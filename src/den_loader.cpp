@@ -1,10 +1,12 @@
 #define GGML_COMMON_DECL_C
 #include "ggml-cuda/den_loader.cuh"
+#include "ggml.h"
 
 #include <nlohmann/json.hpp>
 
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <string>
 
 using json = nlohmann::json;
@@ -244,4 +246,285 @@ void den_repack_to_block_fp4_mmq(
             tile.d4[d4_idx] |= ((uint32_t)encoded) << (byte_pos * 8);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// File I/O helpers with offset
+// ---------------------------------------------------------------------------
+
+static bool file_read_at(FILE * fp, int64_t offset, size_t size, void * buf) {
+    if (fseek(fp, (long)offset, SEEK_SET) != 0) { return false; }
+    return fread(buf, 1, size, fp) == size;
+}
+
+static FILE * open_file_in_dir(const char * dir, const char * filename) {
+    std::string p = path_join(dir, filename);
+    FILE * f = fopen(p.c_str(), "rb");
+    if (!f) {
+        fprintf(stderr, "[den_loader] ERROR: cannot open %s\n", p.c_str());
+    }
+    return f;
+}
+
+// ---------------------------------------------------------------------------
+// Extract layer index from tensor name
+// "blk.N.xxx" → N, "token_embd.weight" → 0, "output.weight" → 999
+// ---------------------------------------------------------------------------
+
+static int extract_layer_idx(const den_entry & e) {
+    if (e.name.find("blk.") == 0) {
+        size_t dot1 = e.name.find('.', 4);
+        if (dot1 != std::string::npos) {
+            return std::stoi(e.name.substr(4, dot1 - 4));
+        }
+    }
+    if (e.name == "token_embd.weight") { return 0; }
+    if (e.name.find("output") == 0)    { return 999; }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// den_load_denquant_tensor
+// ---------------------------------------------------------------------------
+
+int den_load_denquant_tensor(
+    const den_entry * entry,
+    FILE * weights_fp,
+    FILE * scales_fp,
+    void * buf
+) {
+    const int64_t numel = entry->numel();
+    if (numel <= 0) { return 0; }
+
+    // Read FP4 nibble data
+    std::vector<uint8_t> fp4_buf((size_t)entry->weights_size);
+    if (!file_read_at(weights_fp, entry->weights_offset,
+                       (size_t)entry->weights_size, fp4_buf.data())) {
+        fprintf(stderr, "[den_loader] ERROR: failed to read FP4 weights for '%s'\n",
+                entry->name.c_str());
+        return -1;
+    }
+
+    // Read UE4M3 scales
+    std::vector<uint8_t> scales_buf((size_t)entry->scales_size);
+    if (!file_read_at(scales_fp, entry->scales_offset,
+                       (size_t)entry->scales_size, scales_buf.data())) {
+        fprintf(stderr, "[den_loader] ERROR: failed to read UE4M3 scales for '%s'\n",
+                entry->name.c_str());
+        return -1;
+    }
+
+    // Repack into tiles
+    den_repack_to_block_fp4_mmq(
+        fp4_buf.data(), (size_t)numel,
+        scales_buf.data(), entry->tensor_scale,
+        (block_nvfp4 *)buf
+    );
+
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// den_load_fp8_tensor — dequantize FP8 E4M3 + UE8M0 to FP32
+// ---------------------------------------------------------------------------
+
+int den_load_fp8_tensor(
+    const den_entry * entry,
+    FILE * weights_fp,
+    FILE * scales_fp,
+    void * buf
+) {
+    const int64_t numel = entry->numel();
+    if (numel <= 0) { return 0; }
+
+    // Read raw FP8 values
+    std::vector<uint8_t> fp8_buf((size_t)entry->weights_size);
+    if (!file_read_at(weights_fp, entry->weights_offset,
+                       (size_t)entry->weights_size, fp8_buf.data())) {
+        fprintf(stderr, "[den_loader] ERROR: failed to read FP8 weights for '%s'\n",
+                entry->name.c_str());
+        return -1;
+    }
+
+    // Read UE8M0 scale (per-tensor, stored as a single byte at scales_offset)
+    uint8_t ue8m0_byte = 0;
+    if (entry->scales_size > 0) {
+        if (!file_read_at(scales_fp, entry->scales_offset, 1, &ue8m0_byte)) {
+            fprintf(stderr, "[den_loader] ERROR: failed to read UE8M0 scale for '%s'\n",
+                    entry->name.c_str());
+            return -1;
+        }
+    }
+    float global_scale = den_ue8m0_to_fp32(ue8m0_byte);
+
+    // Dequantize: FP8 E4M3 → FP32 × global_scale
+    float * dst = (float *)buf;
+    for (int64_t i = 0; i < numel; i++) {
+        float v = den_fp8_e4m3_to_fp32(fp8_buf[(size_t)i]);
+        dst[i] = v * global_scale;
+    }
+
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// den_load_bf16_tensor — simple copy
+// ---------------------------------------------------------------------------
+
+int den_load_bf16_tensor(
+    const den_entry * entry,
+    FILE * weights_fp,
+    void * buf
+) {
+    if (entry->weights_size <= 0) { return 0; }
+
+    if (!file_read_at(weights_fp, entry->weights_offset,
+                       (size_t)entry->weights_size, buf)) {
+        fprintf(stderr, "[den_loader] ERROR: failed to read BF16 weights for '%s'\n",
+                entry->name.c_str());
+        return -1;
+    }
+
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// den_load_int3_tensor — handle empty gracefully
+// ---------------------------------------------------------------------------
+
+int den_load_int3_tensor(
+    const den_entry * /*entry*/,
+    FILE * /*weights_fp*/,
+    FILE * /*scales_fp*/,
+    void * /*buf*/
+) {
+    // INT3 tier is not used in llm-dense. Zero-byte files are valid.
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// den_load_model — top-level loader
+// ---------------------------------------------------------------------------
+
+size_t den_load_model(
+    const char * fname,
+    struct ggml_context * ctx,
+    int /*n_gpu_layers*/,
+    bool no_alloc
+) {
+    // Parse manifest
+    den_hparams hparams;
+    std::vector<den_entry> entries;
+    int n = den_parse_manifest(fname, &hparams, entries);
+    if (n < 0) {
+        fprintf(stderr, "[den_loader] ERROR: failed to parse manifest from '%s'\n", fname);
+        return 0;
+    }
+    printf("[den_loader] Parsed manifest: %d tensors from %s\n", n, fname);
+
+    // Open data files (unless no_alloc)
+    FILE * fp_denquant_weights = nullptr;
+    FILE * fp_denquant_scales  = nullptr;
+    FILE * fp_fp8_weights      = nullptr;
+    FILE * fp_fp8_scales       = nullptr;
+    FILE * fp_bf16_weights     = nullptr;
+
+    if (!no_alloc) {
+        fp_denquant_weights = open_file_in_dir(fname, "weights_denquant.bin");
+        fp_denquant_scales  = open_file_in_dir(fname, "scales_ue4m3.bin");
+        fp_fp8_weights      = open_file_in_dir(fname, "weights_fp8.bin");
+        fp_fp8_scales       = open_file_in_dir(fname, "scales_ue8m0.bin");
+        fp_bf16_weights     = open_file_in_dir(fname, "weights_bf16.bin");
+    }
+
+    size_t total_bytes = 0;
+    int n_loaded = 0;
+
+    for (auto & e : entries) {
+        // Determine GGML type based on tier
+        ggml_type gtype;
+        if (e.tier == "denquant") {
+            gtype = GGML_TYPE_NVFP4;
+        } else if (e.tier == "fp8") {
+            gtype = GGML_TYPE_F32;  // dequant FP8 → FP32 at load time
+        } else if (e.tier == "bf16") {
+            gtype = GGML_TYPE_BF16;
+        } else if (e.tier == "int3") {
+            gtype = GGML_TYPE_F32;  // dequant INT3 → FP32 at load time
+        } else {
+            fprintf(stderr, "[den_loader] WARNING: unknown tier '%s' for '%s', skipping\n",
+                    e.tier.c_str(), e.name.c_str());
+            continue;
+        }
+
+        // Compute buffer size for this tensor
+        int64_t ne1 = 1;
+        for (size_t d = 0; d + 1 < e.weights_shape.size(); d++) {
+            ne1 *= e.weights_shape[d];
+        }
+
+        // Create dimensions array
+        int n_dims = (int)e.weights_shape.size();
+        int64_t ne[4] = {1, 1, 1, 1};
+        for (int d = 0; d < n_dims && d < 4; d++) {
+            ne[d] = e.weights_shape[(size_t)(n_dims - 1 - d)];
+        }
+
+        size_t tensor_bytes = ggml_row_size(gtype, ne[0]) * ne[1] * ne[2] * ne[3];
+        total_bytes += tensor_bytes;
+
+        if (no_alloc) {
+            continue;  // Just count bytes
+        }
+
+        // Create tensor
+        struct ggml_tensor * t = ggml_new_tensor(ctx, gtype, n_dims, ne);
+        if (!t) {
+            fprintf(stderr, "[den_loader] ERROR: failed to create tensor '%s'\n",
+                    e.name.c_str());
+            continue;
+        }
+
+        ggml_set_name(t, e.name.c_str());
+
+        // Load data into tensor
+        int rc = 0;
+        if (e.tier == "denquant") {
+            rc = den_load_denquant_tensor(&e, fp_denquant_weights,
+                                           fp_denquant_scales, t->data);
+        } else if (e.tier == "fp8") {
+            rc = den_load_fp8_tensor(&e, fp_fp8_weights, fp_fp8_scales, t->data);
+        } else if (e.tier == "bf16") {
+            rc = den_load_bf16_tensor(&e, fp_bf16_weights, t->data);
+        } else if (e.tier == "int3") {
+            rc = den_load_int3_tensor(&e, nullptr, nullptr, t->data);
+        }
+
+        if (rc != 0) {
+            fprintf(stderr, "[den_loader] ERROR: failed to load tensor '%s'\n",
+                    e.name.c_str());
+        } else {
+            n_loaded++;
+        }
+    }
+
+    // Close files
+    if (fp_denquant_weights) fclose(fp_denquant_weights);
+    if (fp_denquant_scales)  fclose(fp_denquant_scales);
+    if (fp_fp8_weights)      fclose(fp_fp8_weights);
+    if (fp_fp8_scales)       fclose(fp_fp8_scales);
+    if (fp_bf16_weights)     fclose(fp_bf16_weights);
+
+    printf("[den_loader] Loaded %d tensors, context size: %zu bytes (%.2f MB)\n",
+           n_loaded, total_bytes, (double)total_bytes / (1024.0 * 1024.0));
+
+    return total_bytes;
+}
+
+// ---------------------------------------------------------------------------
+// den_calc_model_size — compute required ctx size without allocating
+// ---------------------------------------------------------------------------
+
+size_t den_calc_model_size(const char * fname) {
+    return den_load_model(fname, nullptr, 0, true);
 }

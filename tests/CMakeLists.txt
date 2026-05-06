@@ -215,3 +215,6 @@ target_link_libraries(${TEST_TARGET} PRIVATE llama)
 # .den loader self-test (requires live .den directory to run)
 llama_build(test-den-loader.cpp)
 target_include_directories(test-den-loader PRIVATE ../ggml/src)
+
+llama_build(test-den-load-model.cpp)
+target_include_directories(test-den-load-model PRIVATE ../ggml/src)

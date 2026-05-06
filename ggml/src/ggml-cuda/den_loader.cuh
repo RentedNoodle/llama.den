@@ -92,6 +92,41 @@ inline uint8_t den_fp32_to_ue4m3(float val) {
 }
 
 // ---------------------------------------------------------------------------
+// UE8M0 host-side decode
+//
+// UE8M0 unsigned: 8-bit exponent, bias = 127.
+// value = 2^(byte - 127)
+// ---------------------------------------------------------------------------
+
+inline float den_ue8m0_to_fp32(uint8_t code) {
+    if (code == 0) { return 0.0f; }
+    return std::ldexp(1.0f, (int)code - 127);
+}
+
+// ---------------------------------------------------------------------------
+// FP8 E4M3 decode (host-side)
+//
+// E4M3: 1 sign bit, 4 exponent bits, 3 mantissa bits, bias = 7.
+// ---------------------------------------------------------------------------
+
+inline float den_fp8_e4m3_to_fp32(uint8_t code) {
+    const int sign = (code >> 7) & 1;
+    const int exp  = (code >> 3) & 0x0F;
+    const int mant = code & 0x07;
+    if (exp == 0) {
+        // subnormal: (-1)^s * (mant/8) * 2^{-6}
+        float val = std::ldexp((float)mant / 8.0f, -6);
+        return sign ? -val : val;
+    }
+    if (exp == 0x0F) {
+        return 0.0f; // NaN/Inf → 0
+    }
+    // normal: (-1)^s * (1 + mant/8) * 2^{exp-7}
+    float val = std::ldexp(1.0f + (float)mant / 8.0f, exp - 7);
+    return sign ? -val : val;
+}
+
+// ---------------------------------------------------------------------------
 // Manifest parser
 // ---------------------------------------------------------------------------
 
@@ -112,3 +147,51 @@ void den_repack_to_block_fp4_mmq(
     float tensor_scale,
     block_nvfp4 * tiles_out
 );
+
+// ---------------------------------------------------------------------------
+// Per-tier weight loaders
+// ---------------------------------------------------------------------------
+
+int den_load_denquant_tensor(
+    const den_entry * entry,
+    FILE * weights_fp,
+    FILE * scales_fp,
+    void * buf
+);
+
+int den_load_fp8_tensor(
+    const den_entry * entry,
+    FILE * weights_fp,
+    FILE * scales_fp,
+    void * buf
+);
+
+int den_load_bf16_tensor(
+    const den_entry * entry,
+    FILE * weights_fp,
+    void * buf
+);
+
+int den_load_int3_tensor(
+    const den_entry * entry,
+    FILE * weights_fp,
+    FILE * scales_fp,
+    void * buf
+);
+
+// ---------------------------------------------------------------------------
+// Top-level model loader
+// ---------------------------------------------------------------------------
+
+size_t den_load_model(
+    const char * fname,
+    struct ggml_context * ctx,
+    int n_gpu_layers,
+    bool no_alloc
+);
+
+// ---------------------------------------------------------------------------
+// Calculate required context size without allocation
+// ---------------------------------------------------------------------------
+
+size_t den_calc_model_size(const char * fname);
