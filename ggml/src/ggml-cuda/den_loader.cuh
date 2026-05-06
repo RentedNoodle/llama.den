@@ -68,8 +68,8 @@ inline uint8_t den_fp32_to_ue4m3(float val) {
     if (val >= 448.0f)     { return 0x7E; }
 
     int e_raw;
-    float f = std::frexp(val, &e_raw);  // val = f * 2^e_raw, f in [0.5, 1)
-    int e_enc = e_raw + 6;             // floor(log2(val)) + 7
+    std::frexp(val, &e_raw);             // val = f * 2^e_raw, f in [0.5, 1)
+    int e_enc = e_raw + 6;              // floor(log2(val)) + 7
 
     if (e_enc < 1) {
         // Subnormal: (m/8) * 2^{-7}  =>  m = round(val * 8 * 128)

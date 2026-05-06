@@ -17,6 +17,7 @@
 
 // Include den_loader via relative path since we're in the tests/ directory.
 // The ggml/src include is not transitive from the common target.
+#define GGML_COMMON_DECL_C
 #include "../ggml/src/ggml-cuda/den_loader.cuh"
 
 static std::string path_join(const char * dir, const char * file) {

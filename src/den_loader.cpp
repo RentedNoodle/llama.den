@@ -1,3 +1,4 @@
+#define GGML_COMMON_DECL_C
 #include "ggml-cuda/den_loader.cuh"
 
 #include <nlohmann/json.hpp>
