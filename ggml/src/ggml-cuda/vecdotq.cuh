@@ -1189,6 +1189,44 @@ static __device__ __forceinline__ float vec_dot_iq4_nl_q8_1(
 #define VDR_MXFP4_Q8_1_MMVQ 2
 #define VDR_MXFP4_Q8_1_MMQ  4
 
+#define VDR_NVFP4_Q8_1_MMVQ 2
+#define VDR_NVFP4_Q8_1_MMQ  4
+
+static __device__ __forceinline__ float vec_dot_nvfp4_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_nvfp4 * bq = (const block_nvfp4 *) vbq + kbx;
+
+    const int d4_idx = iqs / 8;
+    const uint32_t d4_val = bq->d4[d4_idx];
+
+    float scales[4];
+    scales[0] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d4_val));
+    scales[1] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d4_val >> 8));
+    scales[2] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d4_val >> 16));
+    scales[3] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d4_val >> 24));
+
+    const uint32_t * qs = (const uint32_t *)(bq->qs + d4_idx * 32);
+    const int * q8 = (const int *) bq8_1->qs + iqs;
+
+    int2 sumi = {0, 0};
+#pragma unroll
+    for (int l = 0; l < VDR_NVFP4_Q8_1_MMVQ; ++l) {
+        const int sb = (iqs % 8) / 2 + l;
+        const uint32_t qw0 = qs[2 * sb];
+        const uint32_t qw1 = qs[2 * sb + 1];
+        const int2 v0 = get_int_from_table_16(qw0, kvalues_mxfp4);
+        const int2 v1 = get_int_from_table_16(qw1, kvalues_mxfp4);
+
+        sumi.x = ggml_cuda_dp4a(v0.x, q8[l + 0], sumi.x);
+        sumi.x = ggml_cuda_dp4a(v1.x, q8[l + 2], sumi.x);
+        sumi.y = ggml_cuda_dp4a(v0.y, q8[l + 4], sumi.y);
+        sumi.y = ggml_cuda_dp4a(v1.y, q8[l + 6], sumi.y);
+    }
+
+    return scales[(iqs % 8) / 2] * (sumi.x + sumi.y);
+}
+
 static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 

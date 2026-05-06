@@ -416,6 +416,18 @@ static __device__ __forceinline__ float iq1bn_fp8_to_float(uint8_t fp8) {
     return s.f;
 }
 
+// UE4M3 unsigned decode: 4 exponent bits [6:3], 3 mantissa bits [2:0], bias = 7
+// 0x7F+ are NaN. Max finite: 0x7E = (1 + 6/8) * 2^8 = 448.0.
+static __device__ __forceinline__ float ggml_cuda_ue4m3_to_fp32(uint8_t code) {
+    if (code >= 0x7F) { return 0.0f; }
+    const int exp  = (code >> 3) & 0x0F;
+    const int mant = code & 0x07;
+    if (exp == 0) {
+        return ldexpf((float)mant / 8.0f, -7);
+    }
+    return ldexpf(1.0f + (float)mant / 8.0f, exp - 7);
+}
+
 template <ggml_type type>
 struct ggml_cuda_type_traits;
 

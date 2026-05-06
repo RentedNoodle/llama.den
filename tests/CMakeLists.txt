@@ -211,3 +211,7 @@ llama_target_and_test(test-autorelease.cpp        LABEL "model")
 get_filename_component(TEST_TARGET test-c.c NAME_WE)
 add_executable(${TEST_TARGET} test-c.c)
 target_link_libraries(${TEST_TARGET} PRIVATE llama)
+
+# .den loader self-test (requires live .den directory to run)
+llama_build(test-den-loader.cpp)
+target_include_directories(test-den-loader PRIVATE ../ggml/src)

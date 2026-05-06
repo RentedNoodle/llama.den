@@ -1,0 +1,114 @@
+#pragma once
+
+#include <cstdint>
+#include <cstddef>
+#include <cmath>
+#include <string>
+#include <vector>
+
+#include "ggml-common.h"
+
+// ---------------------------------------------------------------------------
+// den_hparams: model hyperparameters extracted from manifest.json
+// ---------------------------------------------------------------------------
+
+struct den_hparams {
+    int32_t n_vocab = 0;
+    int32_t n_embd  = 0;
+    int32_t n_head  = 0;
+    int32_t n_layer = 0;
+    int32_t ftype   = 0;
+};
+
+// ---------------------------------------------------------------------------
+// den_entry: a single tensor from manifest.json (all tiers)
+// ---------------------------------------------------------------------------
+
+struct den_entry {
+    std::string name;
+    std::string tier;            // "denquant", "fp8", "bf16", "int3"
+
+    int64_t weights_offset = 0;
+    int64_t weights_size   = 0;
+    std::vector<int64_t> weights_shape;
+
+    int64_t scales_offset = 0;
+    int64_t scales_size   = 0;
+    std::vector<int64_t> scales_shape;
+
+    float   tensor_scale = 1.0f;
+    int32_t block_size   = 0;
+
+    int64_t numel() const {
+        int64_t n = 1;
+        for (auto d : weights_shape) { n *= d; }
+        return n;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// UE4M3 host-side encode / decode
+//
+// UE4M3 unsigned: 1 NaN bit (MSB), 4 exponent bits [6:3], 3 mantissa bits [2:0]
+// bias = 7. Finite codes: 0x00..0x7E. Max finite: 0x7E = (1 + 6/8) * 2^8 = 448.0.
+// ---------------------------------------------------------------------------
+
+inline float den_ue4m3_to_fp32(uint8_t code) {
+    if (code >= 0x7F) { return 0.0f; }
+    const int exp  = (code >> 3) & 0x0F;
+    const int mant = code & 0x07;
+    if (exp == 0) {
+        return std::ldexp((float)mant / 8.0f, -7);
+    }
+    return std::ldexp(1.0f + (float)mant / 8.0f, exp - 7);
+}
+
+inline uint8_t den_fp32_to_ue4m3(float val) {
+    if (val <= 0.0f)       { return 0x00; }
+    if (val >= 448.0f)     { return 0x7E; }
+
+    int e_raw;
+    float f = std::frexp(val, &e_raw);  // val = f * 2^e_raw, f in [0.5, 1)
+    int e_enc = e_raw + 6;             // floor(log2(val)) + 7
+
+    if (e_enc < 1) {
+        // Subnormal: (m/8) * 2^{-7}  =>  m = round(val * 8 * 128)
+        int m = (int)(val * 1024.0f + 0.5f);
+        if (m < 0) { m = 0; }
+        if (m > 7) { e_enc = 1; } else { return (uint8_t)m; }
+    }
+
+    if (e_enc > 15) { e_enc = 15; }
+
+    // Normal: (1 + m/8) * 2^{e_enc - 7}
+    float norm_val = val / std::ldexp(1.0f, e_enc - 7);
+    int m = (int)((norm_val - 1.0f) * 8.0f + 0.5f);
+
+    if (m < 0) { m = 0; }
+    if (m > 7) { m = 0; e_enc++; if (e_enc > 15) { e_enc = 15; } }
+    if (e_enc == 15 && m > 6) { m = 6; }  // 0x7F+ are NaN
+
+    return (uint8_t)((e_enc << 3) | m);
+}
+
+// ---------------------------------------------------------------------------
+// Manifest parser
+// ---------------------------------------------------------------------------
+
+int den_parse_manifest(
+    const char * dir_path,
+    struct den_hparams * hparams,
+    std::vector<den_entry> & entries
+);
+
+// ---------------------------------------------------------------------------
+// Two-level scale → block_fp4_mmq tile repacker
+// ---------------------------------------------------------------------------
+
+void den_repack_to_block_fp4_mmq(
+    const uint8_t * fp4_data,
+    size_t numel,
+    const uint8_t * micro_scales,
+    float tensor_scale,
+    block_nvfp4 * tiles_out
+);

@@ -161,6 +161,9 @@ typedef sycl::half2 ggml_half2;
 #define QI_MXFP4 (QK_MXFP4 / (4 * QR_MXFP4))
 #define QR_MXFP4 2
 
+#define QI_NVFP4 (QK_NVFP4 / (4 * QR_NVFP4))
+#define QR_NVFP4 2
+
 #endif // GGML_COMMON_DECL_CUDA || GGML_COMMON_DECL_HIP
 
 #define QK4_0 32
@@ -185,6 +188,15 @@ typedef struct {
     uint8_t qs[QK_MXFP4/2];
 } block_mxfp4;
 static_assert(sizeof(block_mxfp4) == sizeof(uint8_t) + QK_MXFP4/2, "wrong mxfp4 block size/padding");
+
+// DenQuant NVFP4 FP4 E2M1 + UE4M3 per-16 scale, mxf4nvf4 MMA tile
+#define QK_NVFP4 256
+#define QK_NVFP4_SUB 16
+typedef struct {
+    uint32_t d4[4];     // 16 x UE4M3 scales, packed 4 per uint32 (little-endian)
+    int8_t   qs[128];   // 256 x FP4 E2M1 values, nibble-packed (2 per byte)
+} block_nvfp4;
+static_assert(sizeof(block_nvfp4) == 144, "block_nvfp4 must be 144 bytes");
 
 #define QK5_0 32
 typedef struct {
