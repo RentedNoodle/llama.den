@@ -8,8 +8,26 @@
 #include <cstring>
 #include <cstdlib>
 #include <string>
+#include <sys/stat.h>
 
 using json = nlohmann::json;
+
+// ---------------------------------------------------------------------------
+// den_is_directory
+// ---------------------------------------------------------------------------
+bool den_is_directory(const char * path) {
+    // First: check if path itself is a directory containing manifest.json
+    struct stat st;
+    if (stat(path, &st) == 0 && (st.st_mode & S_IFDIR)) {
+        std::string mf = path_join(path, "manifest.json");
+        FILE * f = fopen(mf.c_str(), "rb");
+        if (f) {
+            fclose(f);
+            return true;
+        }
+    }
+    return false;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers: read a file into a buffer

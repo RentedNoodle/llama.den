@@ -55,6 +55,10 @@
 #  include "ggml-metal.h"
 #endif
 
+// .den loader declarations (den_is_directory, den_load_*_tensor, etc.)
+// den_loader.cuh has no CUDA deps; safe to include unconditionally.
+#include "ggml-cuda/den_loader.cuh"
+
 #ifdef __has_include
     #if __has_include(<unistd.h>)
         #include <unistd.h>
@@ -2920,10 +2924,410 @@ static bool llm_load_tensors(
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// .den directory integration helpers
+// ---------------------------------------------------------------------------
+
+// Look for a companion GGUF file that provides architecture metadata and vocab
+// for a .den directory.  Strategy:
+//   1. Strip trailing slash from the .den dir path, append .gguf
+//      e.g.  output.den/  →  output.gguf  (same parent directory)
+//   2. Look for vocab.gguf inside the .den directory
+// Returns empty string if no companion found.
+static std::string find_companion_gguf(const std::string & den_path) {
+    // Normalise: strip trailing path separator(s)
+    std::string base = den_path;
+    while (!base.empty() && (base.back() == '/' || base.back() == '\\')) {
+        base.pop_back();
+    }
+
+    // Strategy 1: sibling .gguf — replace .den suffix with .gguf
+    if (base.size() > 4 && base.substr(base.size() - 4) == ".den") {
+        std::string cand = base.substr(0, base.size() - 4) + ".gguf";
+        FILE * f = fopen(cand.c_str(), "rb");
+        if (f) { fclose(f); return cand; }
+    }
+
+    // Or just append .gguf (handles directory names without .den extension)
+    {
+        std::string cand = base + ".gguf";
+        FILE * f = fopen(cand.c_str(), "rb");
+        if (f) { fclose(f); return cand; }
+    }
+
+    // Strategy 2: vocab.gguf inside the .den directory
+    {
+        std::string cand = den_path + "/vocab.gguf";
+        while (cand.find("//") != std::string::npos) {
+            cand.replace(cand.find("//"), 2, "/");
+        }
+        FILE * f = fopen(cand.c_str(), "rb");
+        if (f) { fclose(f); return cand; }
+    }
+
+    return {};
+}
+
+// ---------------------------------------------------------------------------
+// Load weights from a .den directory into the model, using backend buffers
+// for GPU offload.  The companion GGUF has already provided arch/hparams/vocab.
+// ---------------------------------------------------------------------------
+static int llama_load_den_tensors(
+    const char * den_dir,
+    const char * /*companion_gguf*/,
+    llama_model & model,
+    const llama_model_params & params)
+{
+    auto & hparams = model.hparams;
+    const int n_layer = hparams.n_layer;
+    const int n_gpu_layers = params.n_gpu_layers;
+    const int i_gpu_start = std::max(0, n_layer - n_gpu_layers);
+
+    LLAMA_LOG_INFO("%s: loading .den tensors from %s\n", __func__, den_dir);
+
+    // -------------------------------------------------------------------
+    // 1. Parse manifest
+    // -------------------------------------------------------------------
+    den_hparams den_hp;
+    std::vector<den_entry> entries;
+    int n_entries = den_parse_manifest(den_dir, &den_hp, entries);
+    if (n_entries < 0) {
+        LLAMA_LOG_ERROR("%s: failed to parse manifest\n", __func__);
+        return -1;
+    }
+    LLAMA_LOG_INFO("%s: %d tensors in manifest\n", __func__, n_entries);
+
+    // -------------------------------------------------------------------
+    // 2. Open data files
+    // -------------------------------------------------------------------
+    std::string base(den_dir);
+    while (!base.empty() && (base.back() == '/' || base.back() == '\\')) {
+        base.pop_back();
+    }
+
+    FILE * fp_denquant_weights = nullptr;
+    FILE * fp_denquant_scales  = nullptr;
+    FILE * fp_fp8_weights      = nullptr;
+    FILE * fp_fp8_scales       = nullptr;
+    FILE * fp_bf16_weights     = nullptr;
+
+    auto open_file = [&base](const char * name) -> FILE* {
+        std::string p = base + "/" + name;
+        FILE * f = fopen(p.c_str(), "rb");
+        if (!f) {
+            LLAMA_LOG_WARN("%s: cannot open %s\n", __func__, p.c_str());
+        }
+        return f;
+    };
+
+    fp_denquant_weights = open_file("weights_denquant.bin");
+    fp_denquant_scales  = open_file("scales_ue4m3.bin");
+    fp_fp8_weights      = open_file("weights_fp8.bin");
+    fp_fp8_scales       = open_file("scales_ue8m0.bin");
+    fp_bf16_weights     = open_file("weights_bf16.bin");
+
+    // -------------------------------------------------------------------
+    // 3. Determine GGML context sizes (per backend type)
+    //    We create one CPU context and one GPU context.
+    //    Tensors whose layer index >= i_gpu_start go on GPU.
+    //    Embedding (layer 0) and norms on early layers stay on CPU.
+    // -------------------------------------------------------------------
+    size_t cpu_ctx_data_size = 0;
+    size_t gpu_ctx_data_size = 0;
+    const size_t k_tensor_overhead = 2048; // per-tensor metadata overhead
+
+    auto tier_to_ggml_type = [](const std::string & tier) -> ggml_type {
+        if (tier == "denquant") return GGML_TYPE_NVFP4;
+        if (tier == "bf16")     return GGML_TYPE_BF16;
+        if (tier == "fp8")      return GGML_TYPE_F32;
+        return GGML_TYPE_F32;
+    };
+
+    struct entry_loc {
+        const den_entry * e;
+        ggml_type gtype;
+        int layer;
+        bool on_gpu;
+    };
+    std::vector<entry_loc> elocs;
+    elocs.reserve(entries.size());
+
+    for (auto & e : entries) {
+        ggml_type gtype = tier_to_ggml_type(e.tier);
+
+        // Extract dimensions
+        int n_dims = (int)e.weights_shape.size();
+        int64_t ne[4] = {1, 1, 1, 1};
+        for (int d = 0; d < n_dims && d < 4; d++) {
+            ne[d] = e.weights_shape[(size_t)(n_dims - 1 - d)];
+        }
+
+        // Extract layer index
+        int layer = 0;
+        if (e.name.find("blk.") == 0) {
+            size_t dot1 = e.name.find('.', 4);
+            if (dot1 != std::string::npos) {
+                layer = std::stoi(e.name.substr(4, dot1 - 4));
+            }
+        } else if (e.name.find("output") == 0) {
+            layer = n_layer;  // output goes with GPU if any layers are on GPU
+        }
+
+        bool on_gpu = (layer >= i_gpu_start && n_gpu_layers > 0);
+
+        size_t data_bytes = ggml_row_size(gtype, ne[0]) * ne[1] * ne[2] * ne[3];
+
+        if (on_gpu) {
+            gpu_ctx_data_size += data_bytes + k_tensor_overhead;
+        } else {
+            cpu_ctx_data_size += data_bytes + k_tensor_overhead;
+        }
+
+        elocs.push_back({&e, gtype, layer, on_gpu});
+    }
+
+    LLAMA_LOG_INFO("%s: CPU ctx ~%.2f MiB, GPU ctx ~%.2f MiB\n",
+                   __func__,
+                   (double)cpu_ctx_data_size / (1024.0 * 1024.0),
+                   (double)gpu_ctx_data_size / (1024.0 * 1024.0));
+
+    // -------------------------------------------------------------------
+    // 4. Create ggml contexts (no_alloc, mem_buffer=null: ggml mallocs)
+    //    Backend buffers will later provide the actual tensor data (GPU
+    //    or CPU), replacing the NULL data pointers from the no_alloc ctx.
+    // -------------------------------------------------------------------
+    struct ggml_context * cpu_ctx = nullptr;
+    struct ggml_context * gpu_ctx = nullptr;
+
+    if (cpu_ctx_data_size > 0) {
+        struct ggml_init_params p = {
+            cpu_ctx_data_size + 4096,
+            nullptr,  // ggml mallocs the buffer
+            true      // no_alloc — tensor metadata only
+        };
+        cpu_ctx = ggml_init(p);
+        if (!cpu_ctx) {
+            LLAMA_LOG_ERROR("%s: failed to create CPU ggml context\n", __func__);
+            return -1;
+        }
+    }
+
+    if (gpu_ctx_data_size > 0) {
+        struct ggml_init_params p = {
+            gpu_ctx_data_size + 4096,
+            nullptr,
+            true
+        };
+        gpu_ctx = ggml_init(p);
+        if (!gpu_ctx) {
+            LLAMA_LOG_ERROR("%s: failed to create GPU ggml context\n", __func__);
+            return -1;
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // 5. Create tensor metadata in the right context
+    // -------------------------------------------------------------------
+    struct tensor_meta {
+        struct ggml_tensor * t;
+        const den_entry * e;
+    };
+    std::vector<tensor_meta> metas;
+    metas.reserve(elocs.size());
+
+    for (auto & loc : elocs) {
+        int n_dims = (int)loc.e->weights_shape.size();
+        int64_t ne[4] = {1, 1, 1, 1};
+        for (int d = 0; d < n_dims && d < 4; d++) {
+            ne[d] = loc.e->weights_shape[(size_t)(n_dims - 1 - d)];
+        }
+
+        struct ggml_context * tgt_ctx = loc.on_gpu ? gpu_ctx : cpu_ctx;
+        if (!tgt_ctx) { tgt_ctx = cpu_ctx ? cpu_ctx : gpu_ctx; }
+        if (!tgt_ctx) { continue; }
+
+        struct ggml_tensor * t = ggml_new_tensor(tgt_ctx, loc.gtype, n_dims, ne);
+        if (!t) {
+            LLAMA_LOG_ERROR("%s: failed to create tensor '%s'\n",
+                            __func__, loc.e->name.c_str());
+            continue;
+        }
+        ggml_set_name(t, loc.e->name.c_str());
+        metas.push_back({t, loc.e});
+    }
+
+    // -------------------------------------------------------------------
+    // 6. Set up buffer type assignment and allocate backend buffers
+    // -------------------------------------------------------------------
+    model.buft_input = llama_default_buffer_type_cpu(true);
+    model.buft_output = (n_gpu_layers > 0)
+        ? llama_default_buffer_type_offload(model, 0)
+        : llama_default_buffer_type_cpu(true);
+    model.buft_layer.resize(n_layer);
+
+    for (int i = 0; i < i_gpu_start; ++i) {
+        model.buft_layer[i] = llama_default_buffer_type_cpu(true);
+    }
+    for (int i = i_gpu_start; i < n_layer; ++i) {
+        model.buft_layer[i] = llama_default_buffer_type_offload(model, 0);
+    }
+
+    // GPU context buffers
+    if (gpu_ctx && gpu_ctx_data_size > 0) {
+        ggml_backend_buffer_type_t gpu_buft =
+            llama_default_buffer_type_offload(model, 0);
+        ggml_backend_buffer_t gpu_buf =
+            ggml_backend_alloc_ctx_tensors_from_buft(gpu_ctx, gpu_buft);
+        if (gpu_buf) {
+            ggml_backend_buffer_set_usage(gpu_buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+            model.bufs.push_back(gpu_buf);
+        }
+    }
+
+    // CPU context buffers
+    if (cpu_ctx && cpu_ctx_data_size > 0) {
+        ggml_backend_buffer_type_t cpu_buft = llama_default_buffer_type_cpu(true);
+        ggml_backend_buffer_t cpu_buf =
+            ggml_backend_alloc_ctx_tensors_from_buft(cpu_ctx, cpu_buft);
+        if (cpu_buf) {
+            ggml_backend_buffer_set_usage(cpu_buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
+
+#ifdef GGML_USE_CUDA
+            if (n_gpu_layers > 0) {
+                ggml_backend_cuda_register_host_buffer(
+                    ggml_backend_buffer_get_base(cpu_buf),
+                    ggml_backend_buffer_get_size(cpu_buf));
+            }
+#endif
+
+            model.bufs.push_back(cpu_buf);
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // 7. Load tensor data and upload to backend buffers
+    // -------------------------------------------------------------------
+    int n_loaded = 0;
+    for (auto & meta : metas) {
+        const den_entry * e = meta.e;
+        struct ggml_tensor * t = meta.t;
+
+        // Compute buffer size
+        size_t tensor_bytes = ggml_nbytes(t);
+
+        // Allocate temporary buffer for loading
+        std::vector<uint8_t> host_buf(tensor_bytes);
+
+        int rc = 0;
+        if (e->tier == "denquant") {
+            rc = den_load_denquant_tensor(e, fp_denquant_weights,
+                                          fp_denquant_scales, host_buf.data());
+        } else if (e->tier == "fp8") {
+            rc = den_load_fp8_tensor(e, fp_fp8_weights,
+                                     fp_fp8_scales, host_buf.data());
+        } else if (e->tier == "bf16") {
+            rc = den_load_bf16_tensor(e, fp_bf16_weights, host_buf.data());
+        } else if (e->tier == "int3") {
+            // INT3 not used for dense models; skip silently
+            continue;
+        }
+
+        if (rc != 0) {
+            LLAMA_LOG_ERROR("%s: failed to load '%s'\n", __func__, e->name.c_str());
+            continue;
+        }
+
+        ggml_backend_tensor_set(t, host_buf.data(), 0, tensor_bytes);
+        n_loaded++;
+    }
+
+    LLAMA_LOG_INFO("%s: loaded %d tensors\n", __func__, n_loaded);
+
+    // -------------------------------------------------------------------
+    // 8. Register contexts and tensors with model
+    // -------------------------------------------------------------------
+    if (cpu_ctx) { model.ctxs.push_back(cpu_ctx); }
+    if (gpu_ctx) { model.ctxs.push_back(gpu_ctx); }
+
+    for (auto & meta : metas) {
+        model.tensors_by_name.emplace_back(ggml_get_name(meta.t), meta.t);
+    }
+
+    // -------------------------------------------------------------------
+    // 9. Wire model layers by name lookup
+    // -------------------------------------------------------------------
+    auto lookup = [&](const std::string & name) -> struct ggml_tensor * {
+        for (auto & meta : metas) {
+            if (meta.e->name == name) { return meta.t; }
+        }
+        return nullptr;
+    };
+
+    model.tok_embd = lookup("token_embd.weight");
+    model.output_norm = lookup("output_norm.weight");
+    model.output = lookup("output.weight");
+
+    model.layers.resize(n_layer);
+    for (int i = 0; i < n_layer; i++) {
+        auto & l = model.layers[i];
+        l.attn_norm   = lookup("blk." + std::to_string(i) + ".attn_norm.weight");
+        l.attn_norm_b = lookup("blk." + std::to_string(i) + ".attn_norm.bias");
+        l.ffn_norm    = lookup("blk." + std::to_string(i) + ".ffn_norm.weight");
+        l.ffn_norm_b  = lookup("blk." + std::to_string(i) + ".ffn_norm.bias");
+        l.wqkv        = lookup("blk." + std::to_string(i) + ".attn_qkv.weight");
+        l.wqkv_b      = lookup("blk." + std::to_string(i) + ".attn_qkv.bias");
+        l.wo          = lookup("blk." + std::to_string(i) + ".attn_output.weight");
+        l.ffn_gate    = lookup("blk." + std::to_string(i) + ".ffn_gate.weight");
+        l.ffn_up      = lookup("blk." + std::to_string(i) + ".ffn_up.weight");
+        l.ffn_down    = lookup("blk." + std::to_string(i) + ".ffn_down.weight");
+    }
+
+    // -------------------------------------------------------------------
+    // 10. Cleanup
+    // -------------------------------------------------------------------
+    if (fp_denquant_weights) fclose(fp_denquant_weights);
+    if (fp_denquant_scales)  fclose(fp_denquant_scales);
+    if (fp_fp8_weights)      fclose(fp_fp8_weights);
+    if (fp_fp8_scales)       fclose(fp_fp8_scales);
+    if (fp_bf16_weights)     fclose(fp_bf16_weights);
+
+    // Print buffer sizes
+    for (ggml_backend_buffer_t buf : model.bufs) {
+        LLAMA_LOG_INFO("%s: %10s buffer size = %8.2f MiB\n",
+                       __func__,
+                       ggml_backend_buffer_name(buf),
+                       ggml_backend_buffer_get_size(buf) / 1024.0 / 1024.0);
+    }
+
+    model.t_load_us = ggml_time_us() - model.t_start_us;
+    return 0;
+}
+#endif // GGML_USE_CUDA
+
 // Returns 0 on success, -1 on error, and -2 on cancellation via llama_progress_callback
 static int llama_model_load(const std::string & fname, llama_model & model, llama_model_params & params) {
+    // .den directory detection — we need a companion GGUF for arch/vocab metadata
+    std::string metadata_fname = fname;
+    std::string den_dir;
+#ifdef GGML_USE_CUDA
+    if (den_is_directory(fname.c_str())) {
+        den_dir = fname;
+        metadata_fname = find_companion_gguf(fname);
+        if (metadata_fname.empty()) {
+            LLAMA_LOG_ERROR("%s: .den directory '%s' requires a companion GGUF for metadata.\n"
+                            "  Place a .gguf file with the same base name next to the .den directory,\n"
+                            "  or place vocab.gguf inside the .den directory.\n",
+                            __func__, fname.c_str());
+            return -1;
+        }
+        LLAMA_LOG_INFO("%s: .den directory detected\n", __func__);
+        LLAMA_LOG_INFO("%s:   weights dir  = %s\n", __func__, den_dir.c_str());
+        LLAMA_LOG_INFO("%s:   metadata     = %s\n", __func__, metadata_fname.c_str());
+    }
+#endif
+
     try {
-        llama_model_loader ml(fname, params.ncmoe, params.use_mmap, params.check_tensors,
+        llama_model_loader ml(metadata_fname, params.ncmoe, params.use_mmap, params.check_tensors,
                 params.repack_tensors, params.use_thp, params.merge_qkv, params.merge_up_gate_exps,
                 params.defer_experts,
                 params.kv_overrides, params.tensor_buft_overrides);
@@ -2965,6 +3369,13 @@ static int llama_model_load(const std::string & fname, llama_model & model, llam
             LLAMA_LOG_INFO("%s: vocab only - skipping tensors\n", __func__);
             return 0;
         }
+
+#ifdef GGML_USE_CUDA
+        if (!den_dir.empty()) {
+            model.t_start_us = ggml_time_us();
+            return llama_load_den_tensors(den_dir.c_str(), metadata_fname.c_str(), model, params);
+        }
+#endif
 
 #ifdef GGML_USE_KOMPUTE
         if (params.n_gpu_layers > 0 && (
