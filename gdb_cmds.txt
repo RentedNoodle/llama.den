@@ -1,0 +1,4 @@
+set pagination off
+run --model /mnt/c/Denmother/Models/denquant-test/output.den/ -ngl 0 -p test -n 3
+bt
+quit

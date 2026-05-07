@@ -1215,8 +1215,13 @@ static __device__ __forceinline__ float vec_dot_nvfp4_q8_1(
         const int sb = (iqs % 8) / 2 + l;
         const uint32_t qw0 = qs[2 * sb];
         const uint32_t qw1 = qs[2 * sb + 1];
-        const int2 v0 = get_int_from_table_16(qw0, kvalues_mxfp4);
-        const int2 v1 = get_int_from_table_16(qw1, kvalues_mxfp4);
+        // qs is nibble-packed (2 FP4 values per byte).  __byte_perm requires
+        // selector bytes with bits[7:4]==0; raw packed bytes trigger undefined
+        // f4e-mode behavior.  Mask to extract only the lower nibble of each byte.
+        const uint32_t qw0_m = qw0 & 0x0F0F0F0F;
+        const uint32_t qw1_m = qw1 & 0x0F0F0F0F;
+        const int2 v0 = get_int_from_table_16(qw0_m, kvalues_mxfp4);
+        const int2 v1 = get_int_from_table_16(qw1_m, kvalues_mxfp4);
 
         sumi.x = ggml_cuda_dp4a(v0.x, q8[l + 0], sumi.x);
         sumi.x = ggml_cuda_dp4a(v1.x, q8[l + 2], sumi.x);
@@ -1237,7 +1242,7 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
     int2 sumi = {0, 0};
 #pragma unroll
     for (int l = 0; l < VDR_Q4_0_Q8_1_MMVQ; ++l) {
-        const int aux_q4 = get_int_b1(bq4->qs, iqs + l);
+        const int aux_q4 = get_int_b1(bq4->qs, iqs + l) & 0x0F0F0F0F;
         const int2 v = get_int_from_table_16(aux_q4, kvalues_mxfp4);
 
         sumi.x = ggml_cuda_dp4a(v.x, q8[l + 0], sumi.x);

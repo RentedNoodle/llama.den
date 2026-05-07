@@ -198,6 +198,13 @@ typedef struct {
 } block_nvfp4;
 static_assert(sizeof(block_nvfp4) == 144, "block_nvfp4 must be 144 bytes");
 
+// Same physical layout as block_nvfp4 — used for activation tiles in native
+// FP4 MMA dispatch (quantize_mmq_fp4_cuda writes this format for the B matrix).
+typedef struct {
+    uint32_t d4[4];
+    int8_t   qs[4 * 32];  // 128 bytes = 256 FP4 nibble-packed values
+} block_fp4_mmq;
+
 #define QK5_0 32
 typedef struct {
     ggml_half d;           // delta

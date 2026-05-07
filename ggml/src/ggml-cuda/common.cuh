@@ -52,6 +52,7 @@
 #define CC_TURING     750
 #define CC_AMPERE     800
 #define CC_ADA_LOVELACE 890
+#define CC_BLACKWELL     1200
 #define CC_OFFSET_AMD 1000000
 #define CC_OFFSET_MTHREADS 0x0100000
 #define CC_RDNA1      (CC_OFFSET_AMD + 1010)
@@ -163,6 +164,10 @@ typedef float2 dfloat2;
 #if !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)) && __CUDA_ARCH__ >= CC_AMPERE
 #define CP_ASYNC_AVAILABLE
 #endif // !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)) && __CUDA_ARCH__ >= CC_AMPERE
+
+#if !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)) && __CUDA_ARCH__ >= CC_BLACKWELL
+#define BLACKWELL_MMA_AVAILABLE
+#endif // !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)) && __CUDA_ARCH__ >= CC_BLACKWELL
 
 #ifdef __CUDA_ARCH_LIST__
 constexpr bool ggml_cuda_has_arch_impl(int) {

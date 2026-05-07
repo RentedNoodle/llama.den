@@ -6103,7 +6103,16 @@ struct llama_context * llama_init_from_model(
         }
     }
 
-    if (model->arch != LLM_ARCH_GLM4_MOE && cparams.mtp != 0) {
+    // MTP support: enable for architectures with nextn_predict_layers
+    if (cparams.mtp != 0 && model->hparams.nextn_predict_layers < 1) {
+        LLAMA_LOG_WARN("%s: --mtp %d but model has no MTP heads (nextn_predict_layers=%d), disabling\n",
+                       __func__, cparams.mtp, model->hparams.nextn_predict_layers);
+        cparams.mtp = 0;
+    }
+
+    // BUG-G: Vision + MTP crash together. Disable MTP on vision-language architectures.
+    if (cparams.mtp > 0 && (model->arch == LLM_ARCH_QWEN3VL || model->arch == LLM_ARCH_QWEN3VLMOE)) {
+        LLAMA_LOG_WARN("%s: BUG-G: Vision+MTP crash. Disabling MTP.\n", __func__);
         cparams.mtp = 0;
     }
 

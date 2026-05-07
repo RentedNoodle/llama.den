@@ -31,6 +31,7 @@
 #include "ggml-cuda/pad.cuh"
 #include "ggml-cuda/pool2d.cuh"
 #include "ggml-cuda/quantize.cuh"
+#include "ggml-cuda/quantize_nvfp4.cuh"
 #include "ggml-cuda/rope.cuh"
 #include "ggml-cuda/scale.cuh"
 #include "ggml-cuda/softcap.cuh"
@@ -2277,11 +2278,14 @@ static int ggml_cuda_mul_mat_q(ggml_backend_cuda_context & ctx, const ggml_tenso
     auto ne10_padded = GGML_PAD(src1->ne[0], MATRIX_ROW_PADDING);
     auto nb10_padded = ne10_padded*sizeof(block_q8_1)/QK8_1;
     auto quantized_size = nb10_padded*ggml_nrows(src1);
+    int mmq_y = 128;
     if (!is_gemv) {
+        mmq_y = get_mmq_y_host(ggml_cuda_info().devices[ctx.device].cc);
+        quantized_size = std::max(quantized_size, nb10_padded * (int64_t)mmq_y);
         quantized_size += get_mmq_x_max_host(ggml_cuda_info().devices[ctx.device].cc)*sizeof(block_q8_1_mmq);
     }
     ggml_cuda_pool_alloc<char> src1_quantized(ctx.pool(), quantized_size);
-    if (!is_gemv && src1->ne[1] < 16) {
+    if (!is_gemv && src1->ne[1] < mmq_y) {
         CUDA_CHECK(cudaMemsetAsync(src1_quantized.get(), 0, quantized_size, stream));
     }
     if (is_gemv) {
@@ -2327,7 +2331,17 @@ static int ggml_cuda_mul_mat_q(ggml_backend_cuda_context & ctx, const ggml_tenso
             CUDA_CHECK(cudaGetLastError());
         }
     } else {
-        quantize_mmq_q8_1_cuda((const float *)src1->data, src1_quantized.get(), src1->ne[0], src1->ne[1], 1, ne10_padded, src0->type, stream);
+        if (src0->type == GGML_TYPE_NVFP4 && ggml_cuda_info().devices[ctx.device].cc >= CC_BLACKWELL) {
+            // Use the native FP4 activation quantizer that produces uint32-packed
+            // UE4M3 scales — the format mxf4nvf4 MMA expects for the B matrix.
+            const int64_t ne0 = src1->ne[0];
+            const int64_t ne1 = src1->ne[1];
+            quantize_mmq_fp4_cuda((const float *)src1->data, nullptr, src1_quantized.get(), src0->type,
+                ne0, (int64_t)sizeof(float), ne0 * (int64_t)sizeof(float), 0,
+                ne10_padded, ne1, 1, 1, stream);
+        } else {
+            quantize_mmq_q8_1_cuda((const float *)src1->data, src1_quantized.get(), src1->ne[0], src1->ne[1], 1, ne10_padded, src0->type, stream);
+        }
         CUDA_CHECK(cudaGetLastError());
 
         ggml_cuda_op_mul_mat_q(ctx, src0, src1, dst, (const char *)src0->data, nullptr, src1_quantized.get(), (float *)dst->data,
@@ -3315,11 +3329,13 @@ static void ggml_cuda_up_gate_unary(ggml_backend_cuda_context & ctx, ggml_tensor
 
     auto quantized_size = nb10_padded*src1->ne[1];
     if (src1->ne[1] > 8 || (use_mmq && !use_mul_mat_vec_q)) {
+        const int mmq_y_up = get_mmq_y_host(ggml_cuda_info().devices[ctx.device].cc);
+        quantized_size = std::max(quantized_size, nb10_padded * (int64_t)mmq_y_up);
         quantized_size += get_mmq_x_max_host(ggml_cuda_info().devices[ctx.device].cc)*sizeof(block_q8_1_mmq);
     }
     ggml_cuda_pool_alloc<float> dst_up(ctx.pool(), ggml_nelements(dst));
     ggml_cuda_pool_alloc<char> src1_quantized(ctx.pool(), quantized_size);
-    if (use_mmq && src1->ne[1] < 16) {
+    if (use_mmq && src1->ne[1] < 128) {
         CUDA_CHECK(cudaMemsetAsync(src1_quantized.get(), 0, quantized_size, stream));
     }
     if (src1->ne[1] <= 8 && use_mul_mat_vec_q) {
