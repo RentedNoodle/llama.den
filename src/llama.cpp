@@ -3062,6 +3062,23 @@ static int llama_load_den_tensors(
             ne[d] = e.weights_shape[(size_t)(n_dims - 1 - d)];
         }
 
+        // NVFP4 requires ne[0] to be a multiple of QK_NVFP4 (256).
+        // Tensors with ne[0] < 256 (e.g. SSM params like ssm_a [32],
+        // ssm_conv1d.weight [4]) cannot be stored as block_nvfp4 tiles;
+        // fall back to F32 dequantized at load time.
+        if (gtype == GGML_TYPE_NVFP4 && ne[0] % QK_NVFP4 != 0) {
+            gtype = GGML_TYPE_F32;
+        }
+
+        // Norm weights stored as BF16 in .den must be upcast to F32:
+        // the CUDA RMS norm kernel (norm.cu:671) requires F32 src1.
+        if (gtype == GGML_TYPE_BF16) {
+            const std::string & nm = e.name;
+            if (nm.find("_norm.weight") != std::string::npos) {
+                gtype = GGML_TYPE_F32;
+            }
+        }
+
         // Extract layer index
         int layer = 0;
         if (e.name.find("blk.") == 0) {
@@ -3131,6 +3148,7 @@ static int llama_load_den_tensors(
     struct tensor_meta {
         struct ggml_tensor * t;
         const den_entry * e;
+        ggml_type gtype;
     };
     std::vector<tensor_meta> metas;
     metas.reserve(elocs.size());
@@ -3153,7 +3171,7 @@ static int llama_load_den_tensors(
             continue;
         }
         ggml_set_name(t, loc.e->name.c_str());
-        metas.push_back({t, loc.e});
+        metas.push_back({t, loc.e, loc.gtype});
     }
 
     // -------------------------------------------------------------------
@@ -3166,18 +3184,23 @@ static int llama_load_den_tensors(
     model.buft_layer.resize(n_layer);
 
     for (int i = 0; i < i_gpu_start; ++i) {
-        model.buft_layer[i] = llama_default_buffer_type_cpu(true);
+        // Use plain CPU buffer for .den loading to avoid pinned-memory issues with NVFP4
+        model.buft_layer[i] = ggml_backend_cpu_buffer_type();
     }
     for (int i = i_gpu_start; i < n_layer; ++i) {
         model.buft_layer[i] = llama_default_buffer_type_offload(model, 0);
     }
 
     // GPU context buffers
+    fprintf(stderr, "DEBUG: step 6a — allocating GPU buffers (gpu_ctx=%p, gpu_ctx_data_size=%zu)\n",
+            (void*)gpu_ctx, gpu_ctx_data_size);
     if (gpu_ctx && gpu_ctx_data_size > 0) {
         ggml_backend_buffer_type_t gpu_buft =
             llama_default_buffer_type_offload(model, 0);
+        fprintf(stderr, "DEBUG: step 6a — calling ggml_backend_alloc_ctx_tensors_from_buft for GPU\n");
         ggml_backend_buffer_t gpu_buf =
             ggml_backend_alloc_ctx_tensors_from_buft(gpu_ctx, gpu_buft);
+        fprintf(stderr, "DEBUG: step 6a — GPU buffer allocated: %p\n", (void*)gpu_buf);
         if (gpu_buf) {
             ggml_backend_buffer_set_usage(gpu_buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
             model.bufs.push_back(gpu_buf);
@@ -3185,10 +3208,15 @@ static int llama_load_den_tensors(
     }
 
     // CPU context buffers
+    fprintf(stderr, "DEBUG: step 6b — allocating CPU buffers (cpu_ctx=%p, cpu_ctx_data_size=%zu)\n",
+            (void*)cpu_ctx, cpu_ctx_data_size);
     if (cpu_ctx && cpu_ctx_data_size > 0) {
-        ggml_backend_buffer_type_t cpu_buft = llama_default_buffer_type_cpu(true);
+        // Use plain CPU buffer (not CUDA host/pinned) for loading .den tensors
+        ggml_backend_buffer_type_t cpu_buft = ggml_backend_cpu_buffer_type();
+        fprintf(stderr, "DEBUG: step 6b — calling ggml_backend_alloc_ctx_tensors_from_buft for CPU\n");
         ggml_backend_buffer_t cpu_buf =
             ggml_backend_alloc_ctx_tensors_from_buft(cpu_ctx, cpu_buft);
+        fprintf(stderr, "DEBUG: step 6b — CPU buffer allocated: %p\n", (void*)cpu_buf);
         if (cpu_buf) {
             ggml_backend_buffer_set_usage(cpu_buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
@@ -3207,7 +3235,9 @@ static int llama_load_den_tensors(
     // -------------------------------------------------------------------
     // 7. Load tensor data and upload to backend buffers
     // -------------------------------------------------------------------
+    fprintf(stderr, "DEBUG: step 7 — loading %zu tensors\n", metas.size());
     int n_loaded = 0;
+    int tensor_idx = 0;
     for (auto & meta : metas) {
         const den_entry * e = meta.e;
         struct ggml_tensor * t = meta.t;
@@ -3215,18 +3245,50 @@ static int llama_load_den_tensors(
         // Compute buffer size
         size_t tensor_bytes = ggml_nbytes(t);
 
+        if (tensor_idx < 5) fprintf(stderr, "DEBUG: tensor %d '%s' tier=%s gtype=%d ne=[%lld,%lld,%lld,%lld] nbytes=%zu\n",
+                tensor_idx, e->name.c_str(), e->tier.c_str(), (int)meta.gtype,
+                (long long)t->ne[0], (long long)t->ne[1], (long long)t->ne[2], (long long)t->ne[3],
+                (unsigned long long)tensor_bytes);
+
         // Allocate temporary buffer for loading
         std::vector<uint8_t> host_buf(tensor_bytes);
 
         int rc = 0;
         if (e->tier == "denquant") {
-            rc = den_load_denquant_tensor(e, fp_denquant_weights,
-                                          fp_denquant_scales, host_buf.data());
+            if (meta.gtype == GGML_TYPE_F32) {
+                if (tensor_idx < 5) fprintf(stderr, "DEBUG: calling den_load_denquant_to_f32\n");
+                rc = den_load_denquant_to_f32(e, fp_denquant_weights,
+                                               fp_denquant_scales, host_buf.data());
+                if (tensor_idx < 5) fprintf(stderr, "DEBUG: den_load_denquant_to_f32 returned %d\n", rc);
+            } else {
+                if (tensor_idx < 5) fprintf(stderr, "DEBUG: calling den_load_denquant_tensor\n");
+                rc = den_load_denquant_tensor(e, fp_denquant_weights,
+                                              fp_denquant_scales, host_buf.data());
+                if (tensor_idx < 5) fprintf(stderr, "DEBUG: den_load_denquant_tensor returned %d\n", rc);
+            }
         } else if (e->tier == "fp8") {
+            if (tensor_idx < 5) fprintf(stderr, "DEBUG: calling den_load_fp8_tensor\n");
             rc = den_load_fp8_tensor(e, fp_fp8_weights,
                                      fp_fp8_scales, host_buf.data());
+            if (tensor_idx < 5) fprintf(stderr, "DEBUG: den_load_fp8_tensor returned %d\n", rc);
         } else if (e->tier == "bf16") {
-            rc = den_load_bf16_tensor(e, fp_bf16_weights, host_buf.data());
+            if (meta.gtype == GGML_TYPE_F32) {
+                // Norm weights upcast: load BF16 data, convert to F32
+                int64_t numel = e->numel();
+                size_t bf16_bytes = (size_t)numel * sizeof(uint16_t);
+                std::vector<uint8_t> bf16_buf(bf16_bytes);
+                rc = den_load_bf16_tensor(e, fp_bf16_weights, bf16_buf.data());
+                if (rc == 0) {
+                    const uint16_t * src = (const uint16_t *)bf16_buf.data();
+                    float * dst = (float *)host_buf.data();
+                    for (int64_t i = 0; i < numel; i++) {
+                        uint32_t bits = (uint32_t)src[i] << 16;
+                        uint32_t b = bits; memcpy(&dst[i], &b, sizeof(float));
+                    }
+                }
+            } else {
+                rc = den_load_bf16_tensor(e, fp_bf16_weights, host_buf.data());
+            }
         } else if (e->tier == "int3") {
             // INT3 not used for dense models; skip silently
             continue;
@@ -3237,11 +3299,15 @@ static int llama_load_den_tensors(
             continue;
         }
 
+        if (tensor_idx < 5) fprintf(stderr, "DEBUG: calling ggml_backend_tensor_set %zu bytes\n", tensor_bytes);
         ggml_backend_tensor_set(t, host_buf.data(), 0, tensor_bytes);
+        if (tensor_idx < 5) fprintf(stderr, "DEBUG: ggml_backend_tensor_set done\n");
         n_loaded++;
+        tensor_idx++;
     }
 
     LLAMA_LOG_INFO("%s: loaded %d tensors\n", __func__, n_loaded);
+    fprintf(stderr, "DEBUG: step 7 done — loaded %d tensors\n", n_loaded);
 
     // -------------------------------------------------------------------
     // 8. Register contexts and tensors with model
@@ -3263,23 +3329,61 @@ static int llama_load_den_tensors(
         return nullptr;
     };
 
+    // Per-layer default device: for single-GPU, all layers go to device 0.
+    // In the GGUF path this is set by llm_load_tensors; we must replicate it here
+    // because build_layer_attn_linear_core accesses default_layer_device[il].
+    model.default_layer_device = std::vector<int32_t>(n_layer + 1, 0);
+
     model.tok_embd = lookup("token_embd.weight");
     model.output_norm = lookup("output_norm.weight");
     model.output = lookup("output.weight");
 
+    // Tied embeddings: Qwen and many other models share output with token_embd
+    if (!model.output) {
+        model.output = model.tok_embd;
+    }
+
     model.layers.resize(n_layer);
     for (int i = 0; i < n_layer; i++) {
         auto & l = model.layers[i];
-        l.attn_norm   = lookup("blk." + std::to_string(i) + ".attn_norm.weight");
-        l.attn_norm_b = lookup("blk." + std::to_string(i) + ".attn_norm.bias");
-        l.ffn_norm    = lookup("blk." + std::to_string(i) + ".ffn_norm.weight");
-        l.ffn_norm_b  = lookup("blk." + std::to_string(i) + ".ffn_norm.bias");
-        l.wqkv        = lookup("blk." + std::to_string(i) + ".attn_qkv.weight");
-        l.wqkv_b      = lookup("blk." + std::to_string(i) + ".attn_qkv.bias");
-        l.wo          = lookup("blk." + std::to_string(i) + ".attn_output.weight");
-        l.ffn_gate    = lookup("blk." + std::to_string(i) + ".ffn_gate.weight");
-        l.ffn_up      = lookup("blk." + std::to_string(i) + ".ffn_up.weight");
-        l.ffn_down    = lookup("blk." + std::to_string(i) + ".ffn_down.weight");
+        l.attn_norm      = lookup("blk." + std::to_string(i) + ".attn_norm.weight");
+        l.attn_norm_b    = lookup("blk." + std::to_string(i) + ".attn_norm.bias");
+        l.attn_post_norm = lookup("blk." + std::to_string(i) + ".post_attention_norm.weight");
+        l.ffn_norm       = lookup("blk." + std::to_string(i) + ".ffn_norm.weight");
+        l.ffn_norm_b     = lookup("blk." + std::to_string(i) + ".ffn_norm.bias");
+
+        // QWEN35 / Gated DeltaNet: ffn_norm is the same tensor as attn_post_norm
+        if (!l.ffn_norm) {
+            l.ffn_norm = l.attn_post_norm;
+        }
+
+        // Attention: separate Q/K/V (non-SSM layers)
+        l.wq = lookup("blk." + std::to_string(i) + ".attn_q.weight");
+        l.wk = lookup("blk." + std::to_string(i) + ".attn_k.weight");
+        l.wv = lookup("blk." + std::to_string(i) + ".attn_v.weight");
+        l.wo = lookup("blk." + std::to_string(i) + ".attn_output.weight");
+
+        // Attention: Q/K norm (non-SSM layers)
+        l.attn_q_norm = lookup("blk." + std::to_string(i) + ".attn_q_norm.weight");
+        l.attn_k_norm = lookup("blk." + std::to_string(i) + ".attn_k_norm.weight");
+
+        // SSM / Gated DeltaNet: fused QKV + gate (recurrent layers)
+        l.wqkv      = lookup("blk." + std::to_string(i) + ".attn_qkv.weight");
+        l.wqkv_gate = lookup("blk." + std::to_string(i) + ".attn_gate.weight");
+
+        // SSM / Gated DeltaNet: state-space tensors
+        l.ssm_conv1d = lookup("blk." + std::to_string(i) + ".ssm_conv1d.weight");
+        l.ssm_dt     = lookup("blk." + std::to_string(i) + ".ssm_dt.bias");
+        l.ssm_a      = lookup("blk." + std::to_string(i) + ".ssm_a");
+        l.ssm_beta   = lookup("blk." + std::to_string(i) + ".ssm_beta.weight");
+        l.ssm_alpha  = lookup("blk." + std::to_string(i) + ".ssm_alpha.weight");
+        l.ssm_norm   = lookup("blk." + std::to_string(i) + ".ssm_norm.weight");
+        l.ssm_out    = lookup("blk." + std::to_string(i) + ".ssm_out.weight");
+
+        // FFN
+        l.ffn_gate = lookup("blk." + std::to_string(i) + ".ffn_gate.weight");
+        l.ffn_up   = lookup("blk." + std::to_string(i) + ".ffn_up.weight");
+        l.ffn_down = lookup("blk." + std::to_string(i) + ".ffn_down.weight");
     }
 
     // -------------------------------------------------------------------
@@ -3299,10 +3403,10 @@ static int llama_load_den_tensors(
                        ggml_backend_buffer_get_size(buf) / 1024.0 / 1024.0);
     }
 
+    fprintf(stderr, "DEBUG: step 9 done — returning success\n");
     model.t_load_us = ggml_time_us() - model.t_start_us;
     return 0;
 }
-#endif // GGML_USE_CUDA
 
 // Returns 0 on success, -1 on error, and -2 on cancellation via llama_progress_callback
 static int llama_model_load(const std::string & fname, llama_model & model, llama_model_params & params) {

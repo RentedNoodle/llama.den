@@ -282,6 +282,14 @@ void quantize_mmq_q8_1_cuda(
 
     GGML_ASSERT(kx0_padded % (4*QK8_1) == 0);
 
+    // Zero padding rows: the MMQ kernel loads full tiles (≥16 rows).
+    // When kx1 < tile_rows, uninitialized pool memory produces NaN.
+    const int64_t buf_data_bytes = kx1 * kx0_padded * sizeof(block_q8_1) / QK8_1;
+    const int64_t buf_total      = buf_data_bytes + 16 * sizeof(block_q8_1_mmq);
+    if (kx1 < 16) {
+        CUDA_CHECK(cudaMemsetAsync(vy, 0, buf_total, stream));
+    }
+
     const int64_t block_num_x = (kx0_padded + 4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ);
     const dim3 num_blocks(block_num_x, kx1, channels);
     const dim3 block_size(CUDA_QUANTIZE_BLOCK_SIZE_MMQ, 1, 1);
@@ -309,6 +317,13 @@ void quantize_mmq_q8_1_id_cuda(
     const ggml_type type_x, cudaStream_t stream) {
 
     GGML_ASSERT(kx0_padded % (4*QK8_1) == 0);
+
+    // Zero padding rows for batch < tile rows (prevents NaN from garbage VRAM rows)
+    const int64_t buf_data_bytes = kx1 * kx0_padded * sizeof(block_q8_1) / QK8_1;
+    const int64_t buf_total      = buf_data_bytes + 16 * sizeof(block_q8_1_mmq);
+    if (kx1 < 16) {
+        CUDA_CHECK(cudaMemsetAsync(vy, 0, buf_total, stream));
+    }
 
     const int64_t block_num_x = (kx0_padded + 4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ);
     const dim3 num_blocks(block_num_x, kx1, 1);

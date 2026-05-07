@@ -13,6 +13,18 @@
 using json = nlohmann::json;
 
 // ---------------------------------------------------------------------------
+// Helpers: path join and file read
+// ---------------------------------------------------------------------------
+static std::string path_join(const char * dir, const char * file) {
+    std::string p(dir);
+    if (!p.empty() && p.back() != '/' && p.back() != '\\') {
+        p += '/';
+    }
+    p += file;
+    return p;
+}
+
+// ---------------------------------------------------------------------------
 // den_is_directory
 // ---------------------------------------------------------------------------
 bool den_is_directory(const char * path) {
@@ -27,18 +39,6 @@ bool den_is_directory(const char * path) {
         }
     }
     return false;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers: read a file into a buffer
-// ---------------------------------------------------------------------------
-static std::string path_join(const char * dir, const char * file) {
-    std::string p(dir);
-    if (!p.empty() && p.back() != '/' && p.back() != '\\') {
-        p += '/';
-    }
-    p += file;
-    return p;
 }
 
 static std::string read_file(const std::string & path) {
@@ -343,6 +343,56 @@ int den_load_denquant_tensor(
 }
 
 // ---------------------------------------------------------------------------
+// den_load_denquant_to_f32 — dequantize small denquant tensor to FP32
+// ---------------------------------------------------------------------------
+
+int den_load_denquant_to_f32(
+    const den_entry * entry,
+    FILE * weights_fp,
+    FILE * scales_fp,
+    void * buf
+) {
+    const int64_t numel = entry->numel();
+    if (numel <= 0) { return 0; }
+
+    // Read FP4 nibble data
+    std::vector<uint8_t> fp4_buf((size_t)entry->weights_size);
+    if (!file_read_at(weights_fp, entry->weights_offset,
+                       (size_t)entry->weights_size, fp4_buf.data())) {
+        fprintf(stderr, "[den_loader] ERROR: failed to read FP4 weights for '%s'\n",
+                entry->name.c_str());
+        return -1;
+    }
+
+    // Read UE4M3 scales
+    std::vector<uint8_t> scales_buf((size_t)entry->scales_size);
+    if (!file_read_at(scales_fp, entry->scales_offset,
+                       (size_t)entry->scales_size, scales_buf.data())) {
+        fprintf(stderr, "[den_loader] ERROR: failed to read UE4M3 scales for '%s'\n",
+                entry->name.c_str());
+        return -1;
+    }
+
+    float * dst = (float *)buf;
+    const int k_per_scale = (entry->block_size > 0) ? entry->block_size : 16;
+    const float t_scale = entry->tensor_scale;
+
+    for (int64_t i = 0; i < numel; i++) {
+        // Each byte holds 2 FP4 nibbles: low nibble first, then high
+        uint8_t byte_val = fp4_buf[(size_t)(i / 2)];
+        uint8_t nibble = (i & 1) ? (byte_val >> 4) : (byte_val & 0x0F);
+        float fp4_val = den_fp4_e2m1_to_fp32(nibble);
+
+        uint8_t scale_byte = scales_buf[(size_t)(i / k_per_scale)];
+        float scale_val = den_ue4m3_to_fp32(scale_byte);
+
+        dst[i] = fp4_val * scale_val * t_scale;
+    }
+
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // den_load_fp8_tensor — dequantize FP8 E4M3 + UE8M0 to FP32
 // ---------------------------------------------------------------------------
 
@@ -356,9 +406,9 @@ int den_load_fp8_tensor(
     if (numel <= 0) { return 0; }
 
     // Read raw FP8 values
-    std::vector<uint8_t> fp8_buf((size_t)entry->weights_size);
-    if (!file_read_at(weights_fp, entry->weights_offset,
-                       (size_t)entry->weights_size, fp8_buf.data())) {
+    const size_t need_bytes = (size_t)numel * sizeof(uint8_t);
+    std::vector<uint8_t> fp8_buf(need_bytes);
+    if (!file_read_at(weights_fp, entry->weights_offset, need_bytes, fp8_buf.data())) {
         fprintf(stderr, "[den_loader] ERROR: failed to read FP8 weights for '%s'\n",
                 entry->name.c_str());
         return -1;
@@ -394,10 +444,11 @@ int den_load_bf16_tensor(
     FILE * weights_fp,
     void * buf
 ) {
-    if (entry->weights_size <= 0) { return 0; }
+    const int64_t numel = entry->numel();
+    if (numel <= 0) { return 0; }
 
-    if (!file_read_at(weights_fp, entry->weights_offset,
-                       (size_t)entry->weights_size, buf)) {
+    const size_t need_bytes = (size_t)numel * sizeof(uint16_t);
+    if (!file_read_at(weights_fp, entry->weights_offset, need_bytes, buf)) {
         fprintf(stderr, "[den_loader] ERROR: failed to read BF16 weights for '%s'\n",
                 entry->name.c_str());
         return -1;
@@ -488,6 +539,11 @@ size_t den_load_model(
             ne[d] = e.weights_shape[(size_t)(n_dims - 1 - d)];
         }
 
+        // NVFP4 requires ne[0] to be a multiple of QK_NVFP4 (256)
+        if (gtype == GGML_TYPE_NVFP4 && ne[0] % QK_NVFP4 != 0) {
+            gtype = GGML_TYPE_F32;
+        }
+
         size_t tensor_bytes = ggml_row_size(gtype, ne[0]) * ne[1] * ne[2] * ne[3];
         total_bytes += tensor_bytes;
 
@@ -508,8 +564,13 @@ size_t den_load_model(
         // Load data into tensor
         int rc = 0;
         if (e.tier == "denquant") {
-            rc = den_load_denquant_tensor(&e, fp_denquant_weights,
-                                           fp_denquant_scales, t->data);
+            if (gtype == GGML_TYPE_F32) {
+                rc = den_load_denquant_to_f32(&e, fp_denquant_weights,
+                                               fp_denquant_scales, t->data);
+            } else {
+                rc = den_load_denquant_tensor(&e, fp_denquant_weights,
+                                               fp_denquant_scales, t->data);
+            }
         } else if (e.tier == "fp8") {
             rc = den_load_fp8_tensor(&e, fp_fp8_weights, fp_fp8_scales, t->data);
         } else if (e.tier == "bf16") {

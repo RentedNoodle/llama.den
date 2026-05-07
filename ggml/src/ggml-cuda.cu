@@ -1825,6 +1825,10 @@ static void ggml_cuda_op_mul_mat(
             }
             dev[id].src1_ddq = dev[id].src1_ddq_alloc.alloc(ctx.pool(id), src_1_ddq_size);
 
+            if (quantize_src1 == quantize_mmq_q8_1_cuda && nrows1 < 16) {
+                CUDA_CHECK(cudaMemsetAsync(dev[id].src1_ddq, 0, src_1_ddq_size, stream));
+            }
+
             if (src1_on_device && (src1_is_contiguous || (src1->ne[1] == 1 && src1->ne[3] == 1 && src1->nb[0] == sizeof(float)))) {
                 if (src1_is_contiguous) {
                     quantize_src1(dev[id].src1_ddf, dev[id].src1_ddq, ne10, ne11, ne12*ne13, src1_padded_col_size, src0->type, stream);
@@ -1846,7 +1850,7 @@ static void ggml_cuda_op_mul_mat(
     }
 
     const int64_t src1_col_stride = ne11;
-    if (quantization_done && ne11 == 1 && ne12 > 1 && ne13 == 1 && ne02 == ne12 && ne02 == dst->ne[2]) {
+    if (quantization_done && ne11 == 1 && ne12 > 1 && ne13 == 1 && ne02 == ne12 && ne02 == dst->ne[2] && src0->type != GGML_TYPE_NVFP4) {
         //printf("invoking fast path for %s x %s\n", src0->name, src1->name);
         int id = ctx.device;
         char  *  src0_dd_i =  dev[id].src0_dd;
@@ -2277,6 +2281,9 @@ static int ggml_cuda_mul_mat_q(ggml_backend_cuda_context & ctx, const ggml_tenso
         quantized_size += get_mmq_x_max_host(ggml_cuda_info().devices[ctx.device].cc)*sizeof(block_q8_1_mmq);
     }
     ggml_cuda_pool_alloc<char> src1_quantized(ctx.pool(), quantized_size);
+    if (!is_gemv && src1->ne[1] < 16) {
+        CUDA_CHECK(cudaMemsetAsync(src1_quantized.get(), 0, quantized_size, stream));
+    }
     if (is_gemv) {
         quantize_row_q8_1_cuda((const float *)src1->data, (void *)src1_quantized.get(), src1->ne[0], src1->ne[1], src1->ne[2], ne10_padded,
                 src0->type, stream);
@@ -2415,10 +2422,12 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
         && ggml_nbytes(src0) != ggml_backend_buffer_get_alloc_size(src0->buffer, src0) && src0->view_src;
 
     bool use_dequantize_mul_mat_vec = ggml_cuda_dmmv_type_supported(src0->type)
+        && src0->type != GGML_TYPE_NVFP4
         && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32
         && src0->ne[0] % (GGML_CUDA_DMMV_X*2) == 0 && src1->ne[1] == 1;
     bool          use_mul_mat_vec_q =  ggml_is_quantized(src0->type) && !bad_padding_clear
         && ggml_cuda_mmvq_type_supported(src0->type)
+        && src0->type != GGML_TYPE_NVFP4
         && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32
         && src1->ne[1] <= MMVQ_MAX_BATCH_SIZE;
     bool              use_mul_mat_q =  ggml_is_quantized(src0->type) && !bad_padding_clear
@@ -2598,6 +2607,8 @@ static bool ggml_cuda_mul_mat_id(ggml_backend_cuda_context & ctx, ggml_tensor * 
 
     if (src1->ne[1] <= MMVQ_MAX_BATCH_SIZE && src1->ne[2] == 1 && src1->ne[3] == 1 &&
         ggml_is_quantized(src0->type) &&
+        src0->type != GGML_TYPE_NVFP4 &&
+        ggml_cuda_mmvq_type_supported(src0->type) &&
         ggml_backend_buffer_is_cuda(src0->buffer) &&
         ggml_backend_buffer_is_cuda(src1->buffer) &&
         ggml_backend_buffer_is_cuda(dst->buffer) &&
@@ -2800,6 +2811,7 @@ static int ggml_cuda_moe_up_gate_unary(ggml_backend_cuda_context & ctx, ggml_ten
 
     if (src1->ne[1] == 1 && src1->ne[2] == 1 && src1->ne[3] == 1 &&
         ggml_is_quantized(src0_1->type) &&
+        ggml_cuda_mmvq_type_supported(src0_1->type) &&
         (!src0_2 || ggml_is_quantized(src0_2->type)) &&
         ggml_backend_buffer_is_cuda(src0_1->buffer) &&
         (!src0_2 || ggml_backend_buffer_is_cuda(src0_2->buffer)) &&
@@ -3294,13 +3306,23 @@ static void ggml_cuda_up_gate_unary(ggml_backend_cuda_context & ctx, ggml_tensor
 
     auto ne10_padded = GGML_PAD(src1->ne[0], MATRIX_ROW_PADDING);
     auto nb10_padded = ne10_padded*sizeof(block_q8_1)/QK8_1;
+    const bool use_mmq = ggml_cuda_should_use_mmq(src0_1->type, ggml_cuda_info().devices[ctx.device].cc, src1->ne[1]);
+    bool use_mul_mat_vec_q = src0_1->type != GGML_TYPE_NVFP4;
+
+    if (src0_1->type == GGML_TYPE_NVFP4) {
+        use_mul_mat_vec_q = false;
+    }
+
     auto quantized_size = nb10_padded*src1->ne[1];
-    if (src1->ne[1] > 8) {
+    if (src1->ne[1] > 8 || (use_mmq && !use_mul_mat_vec_q)) {
         quantized_size += get_mmq_x_max_host(ggml_cuda_info().devices[ctx.device].cc)*sizeof(block_q8_1_mmq);
     }
     ggml_cuda_pool_alloc<float> dst_up(ctx.pool(), ggml_nelements(dst));
     ggml_cuda_pool_alloc<char> src1_quantized(ctx.pool(), quantized_size);
-    if (src1->ne[1] <= 8) {
+    if (use_mmq && src1->ne[1] < 16) {
+        CUDA_CHECK(cudaMemsetAsync(src1_quantized.get(), 0, quantized_size, stream));
+    }
+    if (src1->ne[1] <= 8 && use_mul_mat_vec_q) {
         quantize_row_q8_1_cuda((const float *)src1->data, (void *)src1_quantized.get(), src1->ne[0], src1->ne[1], 1, ne10_padded,
                 src0_1->type, stream);
         CUDA_CHECK(cudaGetLastError());
@@ -3323,7 +3345,7 @@ static void ggml_cuda_up_gate_unary(ggml_backend_cuda_context & ctx, ggml_tensor
         CUDA_CHECK(cudaGetLastError());
     } else {
 
-        if (ggml_cuda_should_use_mmq(src0_1->type, ggml_cuda_info().devices[ctx.device].cc, src1->ne[1])) {
+        if (use_mmq) {
             quantize_mmq_q8_1_cuda((const float *)src1->data, src1_quantized.get(), src1->ne[0], src1->ne[1], 1,
                     ne10_padded, src0_1->type, stream);
             CUDA_CHECK(cudaGetLastError());

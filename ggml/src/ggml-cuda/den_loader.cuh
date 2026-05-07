@@ -104,6 +104,21 @@ inline float den_ue8m0_to_fp32(uint8_t code) {
 }
 
 // ---------------------------------------------------------------------------
+// FP4 E2M1 decode (host-side)
+//
+// E4M1: 1 sign bit, 2 exponent bits, 1 mantissa bit, bias = 1.
+// This is the NVFP4/MXFP4 nibble format.
+// ---------------------------------------------------------------------------
+
+inline float den_fp4_e2m1_to_fp32(uint8_t nibble) {
+    static const float table[16] = {
+         0.0f,  1.0f,  2.0f,  3.0f,  4.0f,  6.0f,  8.0f, 12.0f,
+         0.0f, -1.0f, -2.0f, -3.0f, -4.0f, -6.0f, -8.0f, -12.0f
+    };
+    return table[nibble & 0x0F];
+}
+
+// ---------------------------------------------------------------------------
 // FP8 E4M3 decode (host-side)
 //
 // E4M3: 1 sign bit, 4 exponent bits, 3 mantissa bits, bias = 7.
@@ -153,6 +168,15 @@ void den_repack_to_block_fp4_mmq(
 // ---------------------------------------------------------------------------
 
 int den_load_denquant_tensor(
+    const den_entry * entry,
+    FILE * weights_fp,
+    FILE * scales_fp,
+    void * buf
+);
+
+// Dequantize a small (< 256 element) denquant tensor to FP32 instead of
+// repacking to NVFP4 tiles.  Used when ne[0] % QK_NVFP4 != 0.
+int den_load_denquant_to_f32(
     const den_entry * entry,
     FILE * weights_fp,
     FILE * scales_fp,
