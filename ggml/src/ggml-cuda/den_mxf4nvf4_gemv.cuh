@@ -31,16 +31,14 @@
          "r"(sfb),"h"((uint16_t)0),"h"((uint16_t)0)                               \
     )
 
-// GEMV kernel: one warp per output row, OMMA mxf4nvf4 4X
-// K-tiles of 256 elements → 4 MMA instructions (K=64 each)
-// Weights: nibble-packed in block_nvfp4 tiles (d4[4] + qs[128])
-// Zero SMEM — registers only for weight data
+// GEMV kernel v2: vectorized uint4 tile loads + pre-loaded qs registers
+// One uint4 (16B) load per 4 lanes for d4 scales, 128B qs loaded once per tile
 template <int NWARPS>
 __global__ void __launch_bounds__(NWARPS * 32, 2)
 den_gemv_mxf4nvf4_kernel(
-    const void * __restrict__ weights,   // block_nvfp4 tiles [N * K/256 * 144B]
-    const float * __restrict__ act,      // F32 activation [K]
-    float       * __restrict__ dst,      // F32 output [N]
+    const void * __restrict__ weights,
+    const float * __restrict__ act,
+    float       * __restrict__ dst,
     int N, int K, int kt_per_row)
 {
     const int warp_id = threadIdx.x / 32;
@@ -48,76 +46,83 @@ den_gemv_mxf4nvf4_kernel(
     const int row     = blockIdx.x * NWARPS + warp_id;
     if (row >= N) return;
 
-    float acc = 0.0f;  // single output accumulator
+    float acc = 0.0f;
     const uint8_t * wptr = (const uint8_t *)weights;
     const size_t row_stride = (size_t)kt_per_row * 144;
 
     for (int kt = 0; kt < kt_per_row; kt++) {
         const uint8_t * tile = wptr + (size_t)row * row_stride + kt * 144;
 
-        // Load UE4M3 scales from d4[4] (first 16 bytes of tile)
+        // Vectorized load: 4 lanes load one uint4 (16B) each → all d4[4] + first qs
+        uint4 d4_vec;
+        if (lane < 4) d4_vec = ((const uint4 *)tile)[lane];
         uint32_t d4[4];
-        if (lane < 4) d4[lane] = ((const uint32_t *)tile)[lane];
-        // Broadcast scales to all lanes
-        uint32_t s0 = __shfl_sync(0xffffffff, (lane < 4) ? d4[0] : 0, 0);
-        uint32_t s1 = __shfl_sync(0xffffffff, (lane < 4) ? d4[1] : 0, 1);
-        uint32_t s2 = __shfl_sync(0xffffffff, (lane < 4) ? d4[2] : 0, 2);
-        uint32_t s3 = __shfl_sync(0xffffffff, (lane < 4) ? d4[3] : 0, 3);
+        if (lane == 0) d4[0] = d4_vec.x; else if (lane == 1) d4[0] = d4_vec.x;
+        // Broadcast d4 via shfl
+        uint32_t s0 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[0] : 0, 0);
+        uint32_t s1 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[1] : 0, 1);
+        uint32_t s2 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[2] : 0, 2);
+        uint32_t s3 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[3] : 0, 3);
 
-        // 4 × K=64 MMA per 256-element K-tile
+        // Pre-load all 128B qs into registers (8 uint4 loads by 32 lanes)
+        // Each lane loads 4 bytes = 1 uint32; 32 lanes × 4B = 128B = all qs
+        const uint32_t * qs_ptr = (const uint32_t *)(tile + 16);
+        uint32_t qs_data[4];  // 4 uint32s = 16B per lane = 32 nibbles
+        #pragma unroll
+        for (int i = 0; i < 4; i++) {
+            int idx = lane * 4 + i;
+            qs_data[i] = (idx < 32) ? qs_ptr[idx] : 0;
+        }
+        // qs_data[0..3] now holds 4 uint32s covering this lane's portion of all 4 K-slices
+        // qs_data[m] = qs for MMA m (m=0..3), each = 4 bytes = 8 nibbles for K[m*64..m*64+63]
+
+        // Pre-quantize activation for this K-tile (256 values, 8 per lane)
+        // Pack as 2-nibble-per-byte: 4 bytes = 8 activations per lane
+        uint32_t act_packed = 0;
+        #pragma unroll
+        for (int i = 0; i < 8; i++) {
+            int k_idx = kt * 256 + lane * 8 + i;
+            float fv = (k_idx < K) ? act[k_idx] : 0.0f;
+            float av = fabsf(fv); int sign = (fv < 0);
+            uint8_t nib = 0;
+            if      (av >= 5.0f) nib = 7;
+            else if (av >= 3.5f) nib = 6;
+            else if (av >= 2.5f) nib = 5;
+            else if (av >= 1.75f) nib = 4;
+            else if (av >= 1.25f) nib = 3;
+            else if (av >= 0.75f) nib = 2;
+            else if (av >= 0.25f) nib = 1;
+            if (sign) nib |= 8;
+            // Pack into uint32: byte i/2 gets lo(i even) or hi(i odd) nibble
+            int byte_idx = i / 2;
+            int shift = (i % 2 == 0) ? 0 : 4;
+            act_packed |= ((uint32_t)nib << (byte_idx * 8 + shift));
+        }
+        uint32_t b0 = act_packed, b1 = act_packed;  // replicate for B fragment
+
+        // 4 × K=64 MMA per tile
+        #pragma unroll
         for (int mm = 0; mm < 4; mm++) {
-            int k_off = mm * 64;
-            const uint8_t * qs = tile + 16 + mm * 32;  // 32 bytes = 64 nibbles
-
-            // A fragment: load nibble-packed weights (32 bytes → 4 uint32 registers)
+            // A fragment from pre-loaded qs
             uint32_t a0, a1, a2, a3;
-            if (lane < 32) {
-                a0 = ((const uint32_t *)qs)[0];  // K[0..7]
-                a1 = ((const uint32_t *)qs)[1];  // K[8..15]
-                a2 = ((const uint32_t *)qs)[2];  // K[16..23]
-                a3 = ((const uint32_t *)qs)[3];  // K[24..31]
-            } else { a0 = a1 = a2 = a3 = 0; }
+            a0 = qs_data[mm];           // reinterpret — MMA handles distribution
+            a1 = qs_data[mm];           // Replicate: each thread broadcasts its K-slice
+            a2 = qs_data[mm];           // across all 4 A registers for symmetry
+            a3 = qs_data[mm];
 
-            // B fragment: quantize activation to E2M1 nibble-packed
-            uint32_t b0 = 0, b1 = 0;
-            for (int i = 0; i < 4; i++) {
-                int k_idx = kt * 256 + k_off + lane * 2 + i / 2;
-                float fv = (k_idx < K) ? act[k_idx] : 0.0f;
-                float av = fabsf(fv); int sign = (fv < 0);
-                uint8_t nib = 0;
-                if      (av >= 5.0f) nib = 7;
-                else if (av >= 3.5f) nib = 6;
-                else if (av >= 2.5f) nib = 5;
-                else if (av >= 1.75f) nib = 4;
-                else if (av >= 1.25f) nib = 3;
-                else if (av >= 0.75f) nib = 2;
-                else if (av >= 0.25f) nib = 1;
-                if (sign) nib |= 8;
-                // Pack into b0/b1: first 2 nibbles (from 2 lanes) go into b0/b1 bytes
-                // For simplicity, pack 4 activations into b0 (2 nibbles per byte)
-                // Lane contributes 2 activations → packed into a uint32
-                uint32_t nib_pair = nib | (nib << 4);  // duplicate for symmetry
-                if (i < 2) b0 |= (nib_pair << (i * 8));
-                else       b1 |= (nib_pair << ((i-2) * 8));
-            }
+            // B fragment: pre-quantized activation (replicated for all K-slices)
 
-            // K=64 scales: 4 UE4M3 values per instruction from d4
             uint32_t scale_a = (mm == 0) ? s0 : (mm == 1) ? s1 : (mm == 2) ? s2 : s3;
-            uint32_t scale_b = 0x38383838u;  // activation scale = 1.0
+            uint32_t scale_b = 0x38383838u;
 
             float d0, d1, d2, d3;
             float c0 = 0, c1 = 0, c2 = 0, c3 = 0;
             OMMA_MXF4NVF4_4X(d0, d1, d2, d3, a0, a1, a2, a3, b0, b1,
                              c0, c1, c2, c3, scale_a, scale_b);
-
-            // Accumulate outputs: all 16 rows get same activation, so all 4 output regs
-            // have the same dot product result. Use d0 only.
             acc += d0;
         }
     }
 
-    // K-reduction: all lanes have the same accumulated value (broadcast activation)
-    // Sum across warp for the final output
     for (int off = 16; off > 0; off >>= 1)
         acc += __shfl_xor_sync(0xffffffff, acc, off);
     if (lane == 0) dst[row] = acc;
