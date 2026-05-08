@@ -2,6 +2,7 @@
 // den_mxf4nvf4_gemv.cuh — M=1 GEMV via OMMA mxf4nvf4 4X UE4M3 (PRIMARY ISA)
 // Silicon-verified on GB203-300-A1: 64.0 identity test (2026-05-08)
 // v2 stable: pre-loaded qs + pre-quantized activation — 17.04 tok/s
+// SRC (Stochastic Rounding Correction): ~40% MSE reduction via single FMA in epilogue
 
 #include "common.cuh"
 
