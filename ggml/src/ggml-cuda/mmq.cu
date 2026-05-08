@@ -211,7 +211,7 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11) {
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_MXFP4:
-        case GGML_TYPE_NVFP4:
+        // case GGML_TYPE_NVFP4:  // ROUTED TO cuBLAS BF16 SHADOW STOPGAP
         case GGML_TYPE_IQ2_KL:
         case GGML_TYPE_IQ3_KS:
         case GGML_TYPE_IQ4_KSS:
