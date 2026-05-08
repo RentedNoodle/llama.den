@@ -33,6 +33,7 @@
 #include "ggml-cuda/quantize.cuh"
 #include "ggml-cuda/quantize_nvfp4.cuh"
 #include "ggml-cuda/den_dispatch.cuh"
+#include "ggml-cuda/den_mxf4nvf4_gemv.cuh"
 #include "ggml-cuda/den_mxf8f6f4_gemv.cuh"
 #include "ggml-cuda/rope.cuh"
 #include "ggml-cuda/scale.cuh"
@@ -2490,9 +2491,9 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
         // KQ + KQV multi-batch without FlashAttention
         ggml_cuda_mul_mat_batched_cublas(ctx, src0, src1, dst);
     } else if (use_dequantize_mul_mat_vec && src0->type == GGML_TYPE_NVFP4) {
-        // NVFP4 M=1: use mxf8f6f4 MMA GEMV (fast path)
+        // NVFP4 M=1: use OMMA mxf4nvf4 4X UE4M3 GEMV (PRIMARY ISA)
         cudaStream_t stream = ctx.stream();
-        den_mxf8f6f4_gemv_launch(
+        den_mxf4nvf4_gemv_launch(
             src0->data, (const float *)src1->data, (float *)dst->data,
             (int)src0->ne[1], (int)src0->ne[0], stream);
     } else if (use_dequantize_mul_mat_vec) {
