@@ -847,46 +847,64 @@ static void convert_mul_mat_vec_f16_cuda(const void * vx, const dfloat * y, floa
         <<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols, nrows);
 }
 
-// NVFP4 BF16-direct MMVQ — bypasses Q8_1 quantization.
-// Dequantizes FP4 weights inline and dots with raw BF16 activations.
+// NVFP4 BF16-direct DMMV — 32 rows per block. Vectorized decode: 4 bytes
+// (8 nibbles) per inner iteration via uint32 + half2 loads. No MMA, no Q8_1.
+#define NVFP4_DMMV_ROWS_PER_BLOCK 32
+
 static __global__ void dequantize_mul_mat_vec_nvfp4(
     const char * __restrict__ vx, const dfloat * __restrict__ yy, float * __restrict__ dst,
     const int ncols, const int nrows) {
 
-    const int row = blockIdx.x;
+    const int row = blockIdx.x * NVFP4_DMMV_ROWS_PER_BLOCK + threadIdx.x;
     if (row >= nrows) { return; }
 
     const block_nvfp4 * bq = (const block_nvfp4 *) vx;
     const int ncols_qk = ncols / QK_NVFP4;
 
-    float sum = 0.0f;
+    // DenRaZeR: standard E2M1 (0x8 = -0.0) vs remapped (0x8 = +5.0).
+    // Flag stored in bit 7 of d4[0] byte 0 (valid UE4M3 ≤ 0x7E, so bit 7 is free).
+    const float e2m1_std[16] = {0,0.5f,1,1.5f,2,3,4,6, -0,-0.5f,-1,-1.5f,-2,-3,-4,-6};
+    const float e2m1_rzr[16] = {0,0.5f,1,1.5f,2,3,4,6, 5.0f,-0.5f,-1,-1.5f,-2,-3,-4,-6};
+    float sumf = 0.0f;
+
     for (int kb = 0; kb < ncols_qk; kb++) {
         const block_nvfp4 * b = &bq[row * ncols_qk + kb];
-        // Decode UE4M3 scales from d4[0..3]
         float scales[16];
-        for (int s = 0; s < 4; s++) {
-            const uint32_t d = b->d4[s];
-            scales[4*s+0] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d));
-            scales[4*s+1] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d>>8));
-            scales[4*s+2] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d>>16));
-            scales[4*s+3] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d>>24));
-        }
-        const float e2m1[16] = {0,0.5f,1,1.5f,2,3,4,6,-0,-0.5f,-1,-1.5f,-2,-3,-4,-6};
-        const dfloat * y = yy + row * ncols;
-        for (int j = 0; j < QK_NVFP4/2; j++) {
-            const uint8_t packed = b->qs[j];
-            const float w0 = e2m1[packed & 0x0F] * scales[(2*j+0)/16];
-            const float w1 = e2m1[packed >> 4]   * scales[(2*j+1)/16];
+        for (int s = 0; s < 16; s++)
+            scales[s] = ggml_cuda_ue4m3_to_fp32((uint8_t)(b->d4[s/4] >> ((s%4)*8)));
+        // Check DenRaZeR flag: MSB of first scale byte
+        // Bit 7 of first scale byte (little-endian: d4[0] bits 7:0 = byte 0)
+        const float * e2m1 = ((b->d4[0] & 0x80u) ? e2m1_rzr : e2m1_std);
+
+        // Vectorized decode: 4 bytes = 8 nibbles per iteration via uint32
+        const int k_off = kb * QK_NVFP4;
+        for (int j = 0; j < QK_NVFP4/2; j += 4) {
+            uint32_t qw = *(const uint32_t *)(b->qs + j);
 #ifdef GGML_CUDA_F16
-            sum += w0 * __half2float(y[kb*QK_NVFP4 + 2*j+0]);
-            sum += w1 * __half2float(y[kb*QK_NVFP4 + 2*j+1]);
+            const half * act_h = (const half *)yy + row * ncols;
+            half2 a0 = ((const half2 *)act_h)[(k_off + 2*j)/2];
+            half2 a1 = ((const half2 *)act_h)[(k_off + 2*j + 2)/2];
+            half2 a2 = ((const half2 *)act_h)[(k_off + 2*j + 4)/2];
+            half2 a3 = ((const half2 *)act_h)[(k_off + 2*j + 6)/2];
+            sumf += e2m1[(qw>> 0)&0xF] * scales[(2*j+0)/16] * __half2float(a0.x);
+            sumf += e2m1[(qw>> 4)&0xF] * scales[(2*j+0)/16] * __half2float(a0.y);
+            sumf += e2m1[(qw>> 8)&0xF] * scales[(2*j+2)/16] * __half2float(a1.x);
+            sumf += e2m1[(qw>>12)&0xF] * scales[(2*j+2)/16] * __half2float(a1.y);
+            sumf += e2m1[(qw>>16)&0xF] * scales[(2*j+4)/16] * __half2float(a2.x);
+            sumf += e2m1[(qw>>20)&0xF] * scales[(2*j+4)/16] * __half2float(a2.y);
+            sumf += e2m1[(qw>>24)&0xF] * scales[(2*j+6)/16] * __half2float(a3.x);
+            sumf += e2m1[(qw>>28)&0xF] * scales[(2*j+6)/16] * __half2float(a3.y);
 #else
-            sum += w0 * y[kb*QK_NVFP4 + 2*j+0];
-            sum += w1 * y[kb*QK_NVFP4 + 2*j+1];
+            for (int k = 0; k < 4; k++) {
+                const uint8_t bv = (qw >> (k*8)) & 0xFF;
+                const int bi = (j+k)*2;
+                sumf += e2m1[bv & 0xF] * scales[bi/16]   * yy[row*ncols + k_off + bi];
+                sumf += e2m1[bv >> 4]  * scales[(bi+1)/16] * yy[row*ncols + k_off + bi+1];
+            }
 #endif
         }
     }
-    dst[row] = sum;
+    dst[row] = sumf;
 }
 
 void ggml_cuda_op_dequantize_mul_mat_vec(
@@ -968,9 +986,9 @@ void ggml_cuda_op_dequantize_mul_mat_vec(
         case GGML_TYPE_NVFP4: {
             const int ncols = ne00;
             const int nrows = row_diff;
-            const int nblocks = (ne00 + QK8_1 - 1) / QK8_1;
-            const dim3 block_dims(WARP_SIZE, 1, 1);
-            const dim3 block_nums(nrows, 1, 1);
+            const int blocks = (nrows + NVFP4_DMMV_ROWS_PER_BLOCK - 1) / NVFP4_DMMV_ROWS_PER_BLOCK;
+            const dim3 block_dims(NVFP4_DMMV_ROWS_PER_BLOCK, 1, 1);
+            const dim3 block_nums(blocks, 1, 1);
             dequantize_mul_mat_vec_nvfp4<<<block_nums, block_dims, 0, stream>>>(
                 src0_dd_i, src1_dfloat, dst_dd_i, ncols, nrows);
         } break;

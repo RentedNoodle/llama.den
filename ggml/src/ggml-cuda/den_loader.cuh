@@ -209,6 +209,12 @@ int den_load_int3_tensor(
 
 bool den_is_directory(const char * path);
 
+// NVFP4→BF16 dequant kernel for cuBLAS stopgap decode (GPU path, optional)
+#ifdef __CUDACC__
+void den_dequantize_nvfp4_to_bf16(const void * src, half * dst,
+    int64_t nelements, cudaStream_t stream);
+#endif
+
 // ---------------------------------------------------------------------------
 // Top-level model loader
 // ---------------------------------------------------------------------------

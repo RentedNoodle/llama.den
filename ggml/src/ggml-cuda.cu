@@ -32,6 +32,9 @@
 #include "ggml-cuda/pool2d.cuh"
 #include "ggml-cuda/quantize.cuh"
 #include "ggml-cuda/quantize_nvfp4.cuh"
+#include "ggml-cuda/den_bf16_shadow.h"
+extern void den_dequantize_nvfp4_to_bf16(const void * src, half * dst,
+    int64_t nelements, cudaStream_t stream);
 #include "ggml-cuda/rope.cuh"
 #include "ggml-cuda/scale.cuh"
 #include "ggml-cuda/softcap.cuh"
