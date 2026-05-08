@@ -3037,7 +3037,7 @@ static int llama_load_den_tensors(
     const size_t k_tensor_overhead = 2048; // per-tensor metadata overhead
 
     auto tier_to_ggml_type = [](const std::string & tier) -> ggml_type {
-        if (tier == "denquant") return GGML_TYPE_NVFP4;
+        if (tier == "denquant") return GGML_TYPE_BF16;  // Dequant at load time
         if (tier == "bf16")     return GGML_TYPE_BF16;
         if (tier == "fp8")      return GGML_TYPE_F32;
         return GGML_TYPE_F32;
@@ -3062,11 +3062,10 @@ static int llama_load_den_tensors(
             ne[d] = e.weights_shape[(size_t)(n_dims - 1 - d)];
         }
 
-        // NVFP4 requires ne[0] to be a multiple of QK_NVFP4 (256).
-        // Tensors with ne[0] < 256 (e.g. SSM params like ssm_a [32],
-        // ssm_conv1d.weight [4]) cannot be stored as block_nvfp4 tiles;
-        // fall back to F32 dequantized at load time.
-        if (gtype == GGML_TYPE_NVFP4 && ne[0] % QK_NVFP4 != 0) {
+        // BF16 dequant from NVFP4 requires ne[0] to be a multiple of 256.
+        // Small tensors (< 256 elements, e.g. ssm_a [32]) cannot be stored
+        // as block_nvfp4 tiles; fall back to F32 dequantized at load time.
+        if (gtype == GGML_TYPE_BF16 && e.tier == "denquant" && (ne[0] % QK_NVFP4 != 0 || ne[0] < QK_NVFP4)) {
             gtype = GGML_TYPE_F32;
         }
 
@@ -3245,7 +3244,7 @@ static int llama_load_den_tensors(
         // Compute buffer size
         size_t tensor_bytes = ggml_nbytes(t);
 
-        if (tensor_idx < 5) fprintf(stderr, "DEBUG: tensor %d '%s' tier=%s gtype=%d ne=[%lld,%lld,%lld,%lld] nbytes=%zu\n",
+        if (tensor_idx < 5) fprintf(stderr, "DEBUG: tensor %d '%s' tier=%s gtype=%d ne=[%lld,%lld,%lld,%lld] nbytes=%llu\n",
                 tensor_idx, e->name.c_str(), e->tier.c_str(), (int)meta.gtype,
                 (long long)t->ne[0], (long long)t->ne[1], (long long)t->ne[2], (long long)t->ne[3],
                 (unsigned long long)tensor_bytes);
@@ -3260,6 +3259,19 @@ static int llama_load_den_tensors(
                 rc = den_load_denquant_to_f32(e, fp_denquant_weights,
                                                fp_denquant_scales, host_buf.data());
                 if (tensor_idx < 5) fprintf(stderr, "DEBUG: den_load_denquant_to_f32 returned %d\n", rc);
+            } else if (meta.gtype == GGML_TYPE_BF16) {
+                // Load-time dequant: read NVFP4 from disk, dequant to BF16, upload
+                int64_t nelem = (int64_t)t->ne[0] * t->ne[1] * t->ne[2] * t->ne[3];
+                size_t nvfp4_bytes = (size_t)(nelem / 256) * 144;
+                std::vector<uint8_t> nvfp4_buf(nvfp4_bytes);
+                rc = den_load_denquant_tensor(e, fp_denquant_weights,
+                                              fp_denquant_scales, nvfp4_buf.data());
+                if (rc == 0) {
+                    den_dequant_nvfp4_to_bf16_cpu(nvfp4_buf.data(),
+                        (uint16_t *)host_buf.data(), nelem);
+                    if (tensor_idx < 3) fprintf(stderr, "DEN: Load-time dequant NVFP4->BF16 for %s (%ld elements)\n",
+                            e->name.c_str(), (long)nelem);
+                }
             } else {
                 if (tensor_idx < 5) fprintf(stderr, "DEBUG: calling den_load_denquant_tensor\n");
                 rc = den_load_denquant_tensor(e, fp_denquant_weights,

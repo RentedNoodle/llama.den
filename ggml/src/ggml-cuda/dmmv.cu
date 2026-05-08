@@ -1011,5 +1011,5 @@ bool ggml_cuda_dmmv_type_supported(ggml_type src0_type) {
         src0_type == GGML_TYPE_Q3_K || src0_type == GGML_TYPE_Q4_K ||
         src0_type == GGML_TYPE_Q5_K || src0_type == GGML_TYPE_Q6_K ||
         src0_type == GGML_TYPE_IQ2_KT || src0_type == GGML_TYPE_IQ3_KT || src0_type == GGML_TYPE_IQ4_KT ||
-        false /* NVFP4 routed to cuBLAS stopgap */;
+        src0_type == GGML_TYPE_NVFP4;
 }

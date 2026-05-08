@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -208,6 +209,44 @@ int den_load_int3_tensor(
 // ---------------------------------------------------------------------------
 
 bool den_is_directory(const char * path);
+
+// CPU-side NVFP4→BF16 dequant for load-time conversion (no CUDA required)
+static inline float den_ue4m3_to_f32_cpu(uint8_t code) {
+    if (code >= 0x7F) return 0.0f;
+    int e = (code >> 3) & 0x0F, m = code & 0x07;
+    if (e == 0) return ldexpf((float)m / 8.0f, -7);
+    return ldexpf(1.0f + (float)m / 8.0f, e - 7);
+}
+static inline float den_e2m1_to_f32_cpu(unsigned nibble, bool razer) {
+    if (razer && nibble == 8) return 5.0f;
+    unsigned sign = (nibble >> 3) & 1, e = (nibble >> 1) & 3, m = nibble & 1;
+    float v = (e == 0) ? (m ? 0.5f : 0.0f)
+                       : (1.0f + (m ? 0.5f : 0.0f)) * (e == 1 ? 1.0f : e == 2 ? 2.0f : 4.0f);
+    return sign ? -v : v;
+}
+// Dequant block_nvfp4 tiles (144B each) to BF16 (uint16_t, 2B per element)
+static inline void den_dequant_nvfp4_to_bf16_cpu(
+    const void * src, uint16_t * dst, int64_t nelements)
+{
+    for (int64_t i = 0; i < nelements; i++) {
+        int64_t tile_idx = i / 256;
+        int pos = (int)(i % 256);
+        const uint8_t * tile = (const uint8_t *)src + tile_idx * 144;
+        int sg = pos / 16, sw = sg / 4, sb = sg % 4;
+        uint32_t dw = ((const uint32_t *)tile)[sw];
+        uint8_t sv = (dw >> (sb * 8)) & 0xFF;
+        sv = sv >= 0x7F ? 0x7E : sv;
+        float scale = den_ue4m3_to_f32_cpu(sv);
+        int bi = pos / 2, ns = pos & 1;
+        uint8_t pk = tile[16 + bi];
+        uint8_t nib = ns ? (pk >> 4) : (pk & 0x0F);
+        bool razer = (tile[0] & 0x80u) != 0;
+        float val = den_e2m1_to_f32_cpu(nib, razer) * scale;
+        // float→BF16 via truncated 16-bit store
+        uint32_t bits; memcpy(&bits, &val, sizeof(float));
+        dst[i] = (uint16_t)(bits >> 16);
+    }
+}
 
 // NVFP4→BF16 dequant kernel for cuBLAS stopgap decode (GPU path, optional)
 #ifdef __CUDACC__

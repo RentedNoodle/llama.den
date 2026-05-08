@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -584,6 +585,24 @@ size_t den_load_model(
                     e.name.c_str());
         } else {
             n_loaded++;
+            // Load-time NVFP4→BF16 dequant: convert once during loading,
+            // so the rest of the stack sees a plain BF16 tensor.
+            if (gtype == GGML_TYPE_NVFP4) {
+                int64_t nelem = (int64_t)ne[0] * ne[1] * ne[2] * ne[3];
+                size_t bf16_bytes = (size_t)nelem * sizeof(uint16_t);
+                uint16_t * bf16_buf = (uint16_t *)malloc(bf16_bytes);
+                if (bf16_buf) {
+                    den_dequant_nvfp4_to_bf16_cpu(t->data, bf16_buf, nelem);
+                    // Swap tensor to BF16
+                    t->type = GGML_TYPE_BF16;
+                    t->data = bf16_buf;
+                    t->nb[0] = sizeof(uint16_t);
+                    for (int d = 1; d < n_dims; d++)
+                        t->nb[d] = t->nb[d-1] * t->ne[d-1];
+                    fprintf(stderr, "DEN: Load-time dequant NVFP4->BF16 for %s (%ld elements)\n",
+                            e.name.c_str(), (long)nelem);
+                }
+            }
         }
     }
 

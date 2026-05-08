@@ -32,9 +32,6 @@
 #include "ggml-cuda/pool2d.cuh"
 #include "ggml-cuda/quantize.cuh"
 #include "ggml-cuda/quantize_nvfp4.cuh"
-#include "ggml-cuda/den_bf16_shadow.h"
-extern void den_dequantize_nvfp4_to_bf16(const void * src, half * dst,
-    int64_t nelements, cudaStream_t stream);
 #include "ggml-cuda/rope.cuh"
 #include "ggml-cuda/scale.cuh"
 #include "ggml-cuda/softcap.cuh"
@@ -2500,35 +2497,6 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
         if (debug) printf("%s(%s): ggml_cuda_op_mul_mat(ggml_cuda_op_mul_mat_q)\n", __func__, dst->name);
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_q, quantize_mmq_q8_1_cuda);
     } else {
-        // cuBLAS stopgap: create BF16 shadow of NVFP4 tensor for cublasGemmEx
-        ggml_tensor local_src0_buf;
-        if (src0->type == GGML_TYPE_NVFP4) {
-            void * shadow = den_get_shadow(src0->data);
-            if (!shadow) {
-                int64_t nelem = (int64_t)src0->ne[0]*src0->ne[1]*src0->ne[2]*src0->ne[3];
-                size_t bf_bytes = (size_t)nelem * 2, free_mem = 0;
-                cudaMemGetInfo(&free_mem, nullptr);
-                if (bf_bytes > 0 && bf_bytes <= free_mem / 2) {
-                    half * buf = nullptr;
-                    if (cudaMalloc(&buf, bf_bytes) == cudaSuccess) {
-                        cudaStream_t stream = ctx.stream();
-                        den_dequantize_nvfp4_to_bf16(src0->data, buf, nelem, stream);
-                        cudaStreamSynchronize(stream);
-                        den_set_shadow(src0->data, buf);
-                        shadow = buf;
-                    }
-                }
-            }
-            if (shadow) {
-                local_src0_buf = *src0;
-                local_src0_buf.type = GGML_TYPE_BF16;
-                local_src0_buf.data = shadow;
-                local_src0_buf.nb[0] = 2;
-                for (int d = 1; d < GGML_MAX_DIMS; d++)
-                    local_src0_buf.nb[d] = local_src0_buf.nb[d-1] * local_src0_buf.ne[d-1];
-                src0 = &local_src0_buf;
-            }
-        }
         if (debug) printf("%s(%s, %s): ggml_cuda_op_mul_mat(ggml_cuda_op_mul_mat_cublas)\n", __func__, dst->name, ggml_type_name(src0->type));
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
     }
