@@ -1,7 +1,7 @@
 #pragma once
 // den_mxf4nvf4_gemv.cuh — M=1 GEMV via OMMA mxf4nvf4 4X UE4M3 (PRIMARY ISA)
 // Silicon-verified on GB203-300-A1: 64.0 identity test (2026-05-08)
-// v2: pre-loaded qs + pre-quantized activation — 17.06 tok/s
+// v2 stable: pre-loaded qs + pre-quantized activation — 17.04 tok/s
 
 #include "common.cuh"
 
@@ -53,13 +53,11 @@ den_gemv_mxf4nvf4_kernel(
     for (int kt = 0; kt < kt_per_row; kt++) {
         const uint8_t * tile = wptr + (size_t)row * row_stride + kt * 144;
 
-        // Load d4 scales (first 16B) — 4 lanes broadcast to all 32
         uint32_t s0 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[0] : 0, 0);
         uint32_t s1 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[1] : 0, 1);
         uint32_t s2 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[2] : 0, 2);
         uint32_t s3 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[3] : 0, 3);
 
-        // Pre-load all qs data (128B at tile[16..143]) — once per tile, not per MMA
         const uint32_t * qs_ptr = (const uint32_t *)(tile + 16);
         uint32_t qs_data[4];
         #pragma unroll
@@ -68,7 +66,6 @@ den_gemv_mxf4nvf4_kernel(
             qs_data[i] = (idx < 32) ? qs_ptr[idx] : 0;
         }
 
-        // Pre-quantize activation — 8 values packed into 4 bytes per lane
         uint32_t act_packed = 0;
         #pragma unroll
         for (int i = 0; i < 8; i++) {
@@ -81,7 +78,6 @@ den_gemv_mxf4nvf4_kernel(
         }
         const uint32_t b0 = act_packed, b1 = act_packed;
 
-        // 4 × K=64 OMMA per tile — uses pre-loaded qs and pre-quantized activation
         #pragma unroll
         for (int mm = 0; mm < 4; mm++) {
             uint32_t a_val = qs_data[mm];
