@@ -3037,7 +3037,7 @@ static int llama_load_den_tensors(
     const size_t k_tensor_overhead = 2048; // per-tensor metadata overhead
 
     auto tier_to_ggml_type = [](const std::string & tier) -> ggml_type {
-        if (tier == "denquant") return GGML_TYPE_BF16;  // Dequant at load time
+        if (tier == "denquant") return GGML_TYPE_NVFP4;  // DMMV decode path (17 tok/s baseline)
         if (tier == "bf16")     return GGML_TYPE_BF16;
         if (tier == "fp8")      return GGML_TYPE_F32;
         return GGML_TYPE_F32;
@@ -3062,10 +3062,10 @@ static int llama_load_den_tensors(
             ne[d] = e.weights_shape[(size_t)(n_dims - 1 - d)];
         }
 
-        // BF16 dequant from NVFP4 requires ne[0] to be a multiple of 256.
+        // NVFP4 requires ne[0] to be a multiple of QK_NVFP4 (256).
         // Small tensors (< 256 elements, e.g. ssm_a [32]) cannot be stored
         // as block_nvfp4 tiles; fall back to F32 dequantized at load time.
-        if (gtype == GGML_TYPE_BF16 && e.tier == "denquant" && (ne[0] % QK_NVFP4 != 0 || ne[0] < QK_NVFP4)) {
+        if (gtype == GGML_TYPE_NVFP4 && ne[0] % QK_NVFP4 != 0) {
             gtype = GGML_TYPE_F32;
         }
 
