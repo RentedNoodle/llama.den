@@ -847,6 +847,48 @@ static void convert_mul_mat_vec_f16_cuda(const void * vx, const dfloat * y, floa
         <<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols, nrows);
 }
 
+// NVFP4 BF16-direct MMVQ — bypasses Q8_1 quantization.
+// Dequantizes FP4 weights inline and dots with raw BF16 activations.
+static __global__ void dequantize_mul_mat_vec_nvfp4(
+    const char * __restrict__ vx, const dfloat * __restrict__ yy, float * __restrict__ dst,
+    const int ncols, const int nrows) {
+
+    const int row = blockIdx.x;
+    if (row >= nrows) { return; }
+
+    const block_nvfp4 * bq = (const block_nvfp4 *) vx;
+    const int ncols_qk = ncols / QK_NVFP4;
+
+    float sum = 0.0f;
+    for (int kb = 0; kb < ncols_qk; kb++) {
+        const block_nvfp4 * b = &bq[row * ncols_qk + kb];
+        // Decode UE4M3 scales from d4[0..3]
+        float scales[16];
+        for (int s = 0; s < 4; s++) {
+            const uint32_t d = b->d4[s];
+            scales[4*s+0] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d));
+            scales[4*s+1] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d>>8));
+            scales[4*s+2] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d>>16));
+            scales[4*s+3] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d>>24));
+        }
+        const float e2m1[16] = {0,0.5f,1,1.5f,2,3,4,6,-0,-0.5f,-1,-1.5f,-2,-3,-4,-6};
+        const dfloat * y = yy + row * ncols;
+        for (int j = 0; j < QK_NVFP4/2; j++) {
+            const uint8_t packed = b->qs[j];
+            const float w0 = e2m1[packed & 0x0F] * scales[(2*j+0)/16];
+            const float w1 = e2m1[packed >> 4]   * scales[(2*j+1)/16];
+#ifdef GGML_CUDA_F16
+            sum += w0 * __half2float(y[kb*QK_NVFP4 + 2*j+0]);
+            sum += w1 * __half2float(y[kb*QK_NVFP4 + 2*j+1]);
+#else
+            sum += w0 * y[kb*QK_NVFP4 + 2*j+0];
+            sum += w1 * y[kb*QK_NVFP4 + 2*j+1];
+#endif
+        }
+    }
+    dst[row] = sum;
+}
+
 void ggml_cuda_op_dequantize_mul_mat_vec(
     ggml_backend_cuda_context & ctx,
     const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst, const char * src0_dd_i, const float * src1_ddf_i,
@@ -867,7 +909,8 @@ void ggml_cuda_op_dequantize_mul_mat_vec(
         src0->type == GGML_TYPE_Q4_0 || src0->type == GGML_TYPE_Q4_1 ||
         src0->type == GGML_TYPE_Q5_0 || src0->type == GGML_TYPE_Q5_1 ||
         src0->type == GGML_TYPE_Q8_0 || src0->type == GGML_TYPE_F16  ||
-        src0->type == GGML_TYPE_IQ2_KT || src0->type == GGML_TYPE_IQ3_KT || src0->type == GGML_TYPE_IQ4_KT;
+        src0->type == GGML_TYPE_IQ2_KT || src0->type == GGML_TYPE_IQ3_KT || src0->type == GGML_TYPE_IQ4_KT ||
+        src0->type == GGML_TYPE_NVFP4;
 
     if (src1_convert_f16) {
         src1_dfloat = src1_dfloat_a.alloc(ne00);
@@ -922,6 +965,15 @@ void ggml_cuda_op_dequantize_mul_mat_vec(
         case GGML_TYPE_F16:
             convert_mul_mat_vec_f16_cuda(src0_dd_i, src1_dfloat, dst_dd_i, ne00, row_diff, stream);
             break;
+        case GGML_TYPE_NVFP4: {
+            const int ncols = ne00;
+            const int nrows = row_diff;
+            const int nblocks = (ne00 + QK8_1 - 1) / QK8_1;
+            const dim3 block_dims(WARP_SIZE, 1, 1);
+            const dim3 block_nums(nrows, 1, 1);
+            dequantize_mul_mat_vec_nvfp4<<<block_nums, block_dims, 0, stream>>>(
+                src0_dd_i, src1_dfloat, dst_dd_i, ncols, nrows);
+        } break;
         default:
             GGML_ABORT("fatal error");
             break;
@@ -940,5 +992,6 @@ bool ggml_cuda_dmmv_type_supported(ggml_type src0_type) {
         src0_type == GGML_TYPE_Q8_0 || src0_type == GGML_TYPE_Q2_K ||
         src0_type == GGML_TYPE_Q3_K || src0_type == GGML_TYPE_Q4_K ||
         src0_type == GGML_TYPE_Q5_K || src0_type == GGML_TYPE_Q6_K ||
-        src0_type == GGML_TYPE_IQ2_KT || src0_type == GGML_TYPE_IQ3_KT || src0_type == GGML_TYPE_IQ4_KT;
+        src0_type == GGML_TYPE_IQ2_KT || src0_type == GGML_TYPE_IQ3_KT || src0_type == GGML_TYPE_IQ4_KT ||
+        src0_type == GGML_TYPE_NVFP4;
 }

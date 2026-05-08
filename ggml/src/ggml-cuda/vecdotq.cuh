@@ -1192,6 +1192,12 @@ static __device__ __forceinline__ float vec_dot_iq4_nl_q8_1(
 #define VDR_NVFP4_Q8_1_MMVQ 2
 #define VDR_NVFP4_Q8_1_MMQ  4
 
+// E2M1 lookup table: nibble 0x0-0xF → float (register-resident for speed)
+__device__ const float e2m1_lut_nvfp4[16] = {
+     0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
+    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
+};
+
 static __device__ __forceinline__ float vec_dot_nvfp4_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
@@ -1209,27 +1215,27 @@ static __device__ __forceinline__ float vec_dot_nvfp4_q8_1(
     const uint32_t * qs = (const uint32_t *)(bq->qs + d4_idx * 32);
     const int * q8 = (const int *) bq8_1->qs + iqs;
 
-    int2 sumi = {0, 0};
+    const float scale = scales[(iqs % 8) / 2];  // one scale for all nibbles in this call
+    float sumf = 0.0f;
 #pragma unroll
     for (int l = 0; l < VDR_NVFP4_Q8_1_MMVQ; ++l) {
-        const int sb = (iqs % 8) / 2 + l;
-        const uint32_t qw0 = qs[2 * sb];
-        const uint32_t qw1 = qs[2 * sb + 1];
-        // qs is nibble-packed (2 FP4 values per byte).  __byte_perm requires
-        // selector bytes with bits[7:4]==0; raw packed bytes trigger undefined
-        // f4e-mode behavior.  Mask to extract only the lower nibble of each byte.
-        const uint32_t qw0_m = qw0 & 0x0F0F0F0F;
-        const uint32_t qw1_m = qw1 & 0x0F0F0F0F;
-        const int2 v0 = get_int_from_table_16(qw0_m, kvalues_mxfp4);
-        const int2 v1 = get_int_from_table_16(qw1_m, kvalues_mxfp4);
+        const uint32_t qw = qs[(iqs % 8) / 2 * 2 + l];
 
-        sumi.x = ggml_cuda_dp4a(v0.x, q8[l + 0], sumi.x);
-        sumi.x = ggml_cuda_dp4a(v1.x, q8[l + 2], sumi.x);
-        sumi.y = ggml_cuda_dp4a(v0.y, q8[l + 4], sumi.y);
-        sumi.y = ggml_cuda_dp4a(v1.y, q8[l + 6], sumi.y);
+        // Extract 8 nibbles from one uint32 word, dequantize E2M1→float,
+        // apply UE4M3 scale. 1:1 mapping — no duplication.
+        const int q8_val = q8[l];
+        const int8_t * q8_bytes = (const int8_t *)&q8_val;
+        sumf += e2m1_lut_nvfp4[(qw >>  0) & 0xF] * scale * (float)q8_bytes[0];
+        sumf += e2m1_lut_nvfp4[(qw >>  4) & 0xF] * scale * (float)q8_bytes[1];
+        sumf += e2m1_lut_nvfp4[(qw >>  8) & 0xF] * scale * (float)q8_bytes[2];
+        sumf += e2m1_lut_nvfp4[(qw >> 12) & 0xF] * scale * (float)q8_bytes[3];
+        sumf += e2m1_lut_nvfp4[(qw >> 16) & 0xF] * scale * (float)q8_bytes[4];
+        sumf += e2m1_lut_nvfp4[(qw >> 20) & 0xF] * scale * (float)q8_bytes[5];
+        sumf += e2m1_lut_nvfp4[(qw >> 24) & 0xF] * scale * (float)q8_bytes[6];
+        sumf += e2m1_lut_nvfp4[(qw >> 28) & 0xF] * scale * (float)q8_bytes[7];
     }
 
-    return scales[(iqs % 8) / 2] * (sumi.x + sumi.y);
+    return sumf;
 }
 
 static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(

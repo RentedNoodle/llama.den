@@ -374,6 +374,7 @@ static __device__ __forceinline__ void vec_dot_fp4_fp4_mma(
                 tile_C C = {};
                 tile_C::template mma_block_scaled_fp4<type>(
                     C, A[n][frag], B[frag], scaleA[n][frag], scaleB[frag]);
+
 #pragma unroll
                 for (int l = 0; l < tile_C::ne; ++l) {
                     sum[(j0 / tile_C::J + n) * tile_C::ne + l] += C.x[l];

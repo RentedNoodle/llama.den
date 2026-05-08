@@ -19,7 +19,10 @@ static __device__ __forceinline__ uint8_t ggml_cuda_fp32_to_ue4m3(float x) {
         return 0;
     }
     const __nv_fp8_e4m3 xf(x);
-    return xf.__x;
+    // SGLang SM120 fix: E4M3 code 0x7F (127) causes NaN in mxf4nvf4 MMA
+    // on SM120 hardware. Clamp to 0x7E (416.0) for <2% precision loss.
+    uint8_t code = xf.__x;
+    return code >= 0x7F ? 0x7E : code;
 #else
     NO_DEVICE_CODE;
 #endif
