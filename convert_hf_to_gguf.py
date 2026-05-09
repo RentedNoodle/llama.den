@@ -2371,25 +2371,72 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
     ]
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        # Expert tensors: use parent class stacking logic
-        if name.find("experts") != -1:
-            yield from super().modify_tensors(data_torch, name, bid)
-            return
-
-        # Skip vision encoder tensors
-        if name.startswith("model.visual."):
-            return []
-
-        # Map SSM/attention/norm tensor names
+        # Strip model.language_model prefix
         name = name.replace("model.language_model.", "") if "model.language_model." in name else name
         name = name.replace("model.", "") if name.startswith("model.") else name
+
+        # Skip MTP tensors
+        if name.startswith("mtp."):
+            return []
+
+        # ── Fused expert tensors: gate_up_proj [256,1024,2048] → split into gate [2048,512,256] + up [2048,512,256] ──
+        if "experts.gate_up_proj" in name:
+            # data_torch: [n_experts, 2*ffn_dim, hidden] = [256, 1024, 2048]
+            gate_dim = data_torch.shape[1] // 2  # 512
+            gate = data_torch[:, :gate_dim, :].permute(2, 1, 0).contiguous()  # [2048, 512, 256]
+            up   = data_torch[:, gate_dim:, :].permute(2, 1, 0).contiguous()  # [2048, 512, 256]
+            name_base = name.replace("experts.gate_up_proj", "")
+            name_base = name_base.replace("layers.", "blk.")
+            yield (f"{name_base}ffn_gate_exps.weight", gate)
+            yield (f"{name_base}ffn_up_exps.weight", up)
+            return
+
+        # ── Expert down_proj: [256, 2048, 512] → permute to [512, 2048, 256] ──
+        if "experts.down_proj" in name:
+            # data_torch: [n_experts, hidden, ffn] = [256, 2048, 512]
+            data_torch = data_torch.permute(2, 1, 0).contiguous()  # [512, 2048, 256]
+            name = name.replace("experts.down_proj", "ffn_down_exps")
+            name = name.replace("layers.", "blk.")
+            yield (name, data_torch)
+            return
+
+        # ── Shared expert tensors ──
+        if "shared_expert." in name:
+            if "shared_expert_gate" in name:
+                # [1, 2048] → squeeze to [2048]
+                data_torch = data_torch.contiguous().squeeze(0)
+                name = name.replace("shared_expert_gate.weight", "ffn_gate_inp_shexp.weight")
+            elif "gate_proj" in name:
+                # [512, 2048] → [2048, 512]
+                data_torch = data_torch.t().contiguous()
+                name = name.replace("shared_expert.gate_proj", "ffn_gate_shexp")
+            elif "up_proj" in name:
+                # [512, 2048] → [2048, 512]
+                data_torch = data_torch.t().contiguous()
+                name = name.replace("shared_expert.up_proj", "ffn_up_shexp")
+            elif "down_proj" in name:
+                # [2048, 512] → [512, 2048]
+                data_torch = data_torch.t().contiguous()
+                name = name.replace("shared_expert.down_proj", "ffn_down_shexp")
+            name = name.replace("layers.", "blk.")
+            yield (name, data_torch)
+            return
+
+        # ── Router gate: [256, 2048] → transpose to [2048, 256] ──
+        if "mlp.gate.weight" in name and "shared" not in name:
+            data_torch = data_torch.t().contiguous()  # [2048, 256]
+            name = name.replace("mlp.gate.weight", "ffn_gate_inp.weight")
+            name = name.replace("layers.", "blk.")
+            yield (name, data_torch)
+            return
+
+        # ── Map SSM/attention/norm tensor names ──
         name = name.replace("self_attn.", "")
         name = name.replace("mlp.", "")
         name = name.replace("linear_attn.", "")
 
         # Special case: linear_attn.norm → ssm_norm
         if "linear_attn.norm" in name:
-            name = name.replace("model.language_model.", "") if "model.language_model." in name else name
             name = name.replace("linear_attn.norm", "ssm_norm")
             name = name.replace("layers.", "blk.")
             yield (name, data_torch)
