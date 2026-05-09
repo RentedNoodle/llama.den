@@ -8,6 +8,7 @@
 #include "dmmv.cuh"
 #include "dequantize.cuh"
 #include "convert.cuh"
+#include "den_mxf4nvf4_gemv.cuh"
 
 #ifndef K_QUANTS_PER_ITERATION
 #define K_QUANTS_PER_ITERATION 2
@@ -984,13 +985,19 @@ void ggml_cuda_op_dequantize_mul_mat_vec(
             convert_mul_mat_vec_f16_cuda(src0_dd_i, src1_dfloat, dst_dd_i, ne00, row_diff, stream);
             break;
         case GGML_TYPE_NVFP4: {
-            const int ncols = ne00;
-            const int nrows = row_diff;
-            const int blocks = (nrows + NVFP4_DMMV_ROWS_PER_BLOCK - 1) / NVFP4_DMMV_ROWS_PER_BLOCK;
-            const dim3 block_dims(NVFP4_DMMV_ROWS_PER_BLOCK, 1, 1);
-            const dim3 block_nums(blocks, 1, 1);
-            dequantize_mul_mat_vec_nvfp4<<<block_nums, block_dims, 0, stream>>>(
-                src0_dd_i, src1_dfloat, dst_dd_i, ncols, nrows);
+            // PRIMARY: mxf4nvf4 OMMA 4X UE4M3 native MMA path (29 cycles/MMA)
+            const int N = row_diff;  // output rows
+            const int K = ne00;      // shared dimension
+            if (K >= 256) {
+                den_mxf4nvf4_gemv_launch(src0_dd_i, src1_dfloat, dst_dd_i, N, K, stream);
+            } else {
+                // Fallback: software NVFP4 decode (K < 256, rare)
+                const int blocks = (N + NVFP4_DMMV_ROWS_PER_BLOCK - 1) / NVFP4_DMMV_ROWS_PER_BLOCK;
+                const dim3 block_dims(NVFP4_DMMV_ROWS_PER_BLOCK, 1, 1);
+                const dim3 block_nums(blocks, 1, 1);
+                dequantize_mul_mat_vec_nvfp4<<<block_nums, block_dims, 0, stream>>>(
+                    src0_dd_i, src1_dfloat, dst_dd_i, K, N);
+            }
         } break;
         default:
             GGML_ABORT("fatal error");
