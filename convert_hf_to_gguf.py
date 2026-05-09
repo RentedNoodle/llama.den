@@ -2263,7 +2263,7 @@ class Qwen3MoeModel(Qwen2MoeModel):
     model_arch = gguf.MODEL_ARCH.QWEN3MOE
 
 
-@Model.register("Qwen3_5MoeForCausalLM")
+@Model.register("Qwen3_5MoeForCausalLM", "Qwen3_5MoeForConditionalGeneration")
 class Qwen3_5MoeModel(Qwen2MoeModel):
     model_arch = gguf.MODEL_ARCH.QWEN35MOE
 
