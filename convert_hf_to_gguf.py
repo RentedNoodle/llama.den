@@ -300,6 +300,11 @@ class Model:
                             gguf.MODEL_TENSOR.FFN_GATE_INP,
                             gguf.MODEL_TENSOR.POS_EMBD,
                             gguf.MODEL_TENSOR.TOKEN_TYPES,
+                            gguf.MODEL_TENSOR.SSM_CONV1D,
+                            gguf.MODEL_TENSOR.SSM_BETA,
+                            gguf.MODEL_TENSOR.SSM_ALPHA,
+                            gguf.MODEL_TENSOR.SSM_OUT,
+                            gguf.MODEL_TENSOR.ATTN_GATE,
                         )
                     )
                     or not name.endswith(".weight")

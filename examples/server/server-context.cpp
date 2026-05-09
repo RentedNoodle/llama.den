@@ -8,6 +8,7 @@
 #include "log.h"
 #include "sampling.h"
 #include "speculative.h"
+#include "../../common/speculative.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
 
