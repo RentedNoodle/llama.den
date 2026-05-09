@@ -7,10 +7,16 @@
 #include "llama.h"
 #include "log.h"
 #include "sampling.h"
+#include "den_speculative.h"
 #include "speculative.h"
-#include "../../common/speculative.h"
 #include "mtmd.h"
 #include "mtmd-helper.h"
+
+// MTP (Multi-Token Prediction) support is incomplete in this fork.
+// The upstream common/speculative.cpp provides the function symbols
+// but the runtime paths are not validated. Define DEN_MTP_DISABLED
+// to compile out MTP warmup/execution paths for now.
+#define DEN_MTP_DISABLED 1
 
 #include <fstream>
 #include <iostream>

@@ -6,7 +6,7 @@
 // Usage:
 //   ./llama-server -m model.den --draft-model brainstem.gguf --draft-length 3
 
-#include "speculative.h"
+#include "den_speculative.h"
 #include "llama.h"
 #include <cstdio>
 #include <cstring>

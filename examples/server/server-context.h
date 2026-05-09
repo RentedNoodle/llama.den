@@ -1,6 +1,6 @@
 #include "server-task.h"
 #include "server-queue.h"
-#include "speculative.h"
+#include "den_speculative.h"
 #include "json-schema-to-grammar.h"
 #include <nlohmann/json_fwd.hpp>
 
