@@ -660,6 +660,9 @@ class Model:
         if chkhsh == "f4f37b6c8eb9ea29b3eac6bb8c8487c5ab7885f8d8022e67edc1c68ce8403e95":
             # ref: https://huggingface.co/MiniMaxAI/MiniMax-M2
             res = "minimax-m2"
+        if chkhsh == "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a":
+            # ref: Qwen3.5 — byte-level BPE, empty pre-tokenizer
+            res = "qwen35"
         if res is None:
             logger.warning("\n")
             logger.warning("**************************************************************************************")
@@ -2253,6 +2256,156 @@ class Qwen3Model(Qwen2Model):
 @Model.register("Qwen3MoeForCausalLM")
 class Qwen3MoeModel(Qwen2MoeModel):
     model_arch = gguf.MODEL_ARCH.QWEN3MOE
+
+
+@Model.register("Qwen3_5ForConditionalGeneration")
+class Qwen3_5Model(Qwen2Model):
+    model_arch = gguf.MODEL_ARCH.QWEN35
+
+    def __init__(self, *args, **kwargs):
+        # Qwen3.5 nests params under "text_config". The base Model.__init__
+        # calls Model.load_hparams() which reads config.json directly and
+        # then looks for num_hidden_layers at the top level. We temporarily
+        # merge text_config keys into the config so the base init succeeds.
+        dir_model = kwargs.get("dir_model", args[0] if args else None)
+        cfg_path = dir_model / "config.json"
+        import json
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            original_cfg = json.load(f)
+        tc = original_cfg.get("text_config", {})
+        if tc:
+            merged = dict(original_cfg)
+            for k, v in tc.items():
+                if k not in merged:
+                    merged[k] = v
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(merged, f)
+        try:
+            super().__init__(*args, **kwargs)
+        finally:
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(original_cfg, f)
+
+    def set_vocab(self):
+        # Qwen3.5 uses GPT-2 BPE tokenizer. Override to handle pre-tokenizer
+        # detection which may not have the hash for this model variant.
+        try:
+            self._set_vocab_sentencepiece()
+        except (FileNotFoundError, ModuleNotFoundError):
+            try:
+                self._set_vocab_gpt2()
+            except NotImplementedError:
+                # Fallback: load tokens directly without pre-tokenizer detection
+                logger.warning("Pre-tokenizer not recognized — using direct GPT-2 vocab")
+                self._set_vocab_from_tokenizer_json()
+
+    def _set_vocab_from_tokenizer_json(self):
+        import json
+        with open(self.dir_model / "tokenizer.json", "r", encoding="utf-8") as f:
+            tokenizer_json = json.load(f)
+
+        model_vocab = tokenizer_json["model"]["vocab"]
+        vocab_size = self.hparams.get("vocab_size", len(model_vocab))
+        tokens: list[str] = [""] * vocab_size
+        toktypes: list[int] = [gguf.TokenType.NORMAL] * vocab_size
+
+        for token, idx in model_vocab.items():
+            if idx < vocab_size:
+                tokens[idx] = token
+
+        for i in range(vocab_size):
+            if not tokens[i]:
+                tokens[i] = f"[PAD{i}]"
+                toktypes[i] = gguf.TokenType.UNUSED
+
+        self.gguf_writer.add_tokenizer_model("gpt2")
+        self.gguf_writer.add_tokenizer_pre("qwen35")
+        self.gguf_writer.add_token_list(tokens)
+        self.gguf_writer.add_token_types(toktypes)
+        special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
+        special_vocab.add_to_gguf(self.gguf_writer)
+
+    _tensor_map: list[tuple[str, str]] = [
+        # (hf_pattern, gguf_name) — order matters: longer patterns first
+        ("embed_tokens", "token_embd"),
+        ("post_attention_layernorm", "post_attention_norm"),
+        ("input_layernorm", "attn_norm"),
+        ("ssm_norm", "ssm_norm"),
+        ("attn_norm_2", "attn_norm_2"),
+        ("q_norm", "attn_q_norm"),
+        ("k_norm", "attn_k_norm"),
+        ("q_proj", "attn_q"),
+        ("k_proj", "attn_k"),
+        ("v_proj", "attn_v"),
+        ("o_proj", "attn_output"),
+        ("gate_proj", "ffn_gate"),
+        ("up_proj", "ffn_up"),
+        ("down_proj", "ffn_down"),
+        ("in_proj_qkv", "attn_qkv"),
+        ("in_proj_z", "attn_gate"),
+        ("in_proj_a", "ssm_alpha"),
+        ("in_proj_b", "ssm_beta"),
+        ("dt_bias", "ssm_dt.bias"),
+        ("A_log", "ssm_a"),
+        ("conv1d", "ssm_conv1d"),
+        ("out_proj", "ssm_out"),
+        ("norm", "output_norm"),
+    ]
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        tc = self.hparams
+        # SSM (Gated DeltaNet) parameters — required by QWEN35 arch
+        ssm_state_size = tc.get("linear_key_head_dim", 128)
+        ssm_group_count = tc.get("linear_num_key_heads", 16)
+        ssm_dt_rank = tc.get("linear_num_value_heads", 16)
+        ssm_conv_kernel = tc.get("linear_conv_kernel_dim", 4)
+        ssm_inner_size = ssm_state_size * ssm_dt_rank
+        self.gguf_writer.add_ssm_state_size(ssm_state_size)
+        self.gguf_writer.add_ssm_inner_size(ssm_inner_size)
+        self.gguf_writer.add_ssm_conv_kernel(ssm_conv_kernel)
+        self.gguf_writer.add_ssm_time_step_rank(ssm_dt_rank)
+        self.gguf_writer.add_ssm_group_count(ssm_group_count)
+        # Rope dimension sections (mrope)
+        rope_params = self.hparams.get("rope_parameters", {})
+        if isinstance(rope_params, dict):
+            mrope_section = rope_params.get("mrope_section")
+            if mrope_section:
+                sections = list(mrope_section)
+                while len(sections) < 4:
+                    sections.append(0)
+                self.gguf_writer.add_rope_dimension_sections(sections)
+            partial_factor = rope_params.get("partial_rotary_factor")
+            if partial_factor is not None:
+                self.gguf_writer.add_rope_dimension_count(
+                    int(self.hparams.get("hidden_size", 1024)
+                        // self.hparams.get("num_attention_heads", 8)
+                        * partial_factor))
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # Skip vision encoder and MTP tensors (not used by llama.cpp runtime yet)
+        if name.startswith("model.visual.") or name.startswith("mtp."):
+            return []
+        # Map HF Qwen3.5 names to GGUF names
+        # Special case: linear_attn.norm → ssm_norm (must handle before stripping)
+        if "linear_attn.norm" in name:
+            name = name.replace("model.language_model.", "")
+            name = name.replace("linear_attn.norm", "ssm_norm")
+            name = name.replace("layers.", "blk.")
+            return [(name, data_torch)]
+        # Format: model.language_model.layers.{id}.{component}.{weight_name}.weight
+        name = name.replace("model.language_model.", "")
+        name = name.replace("self_attn.", "")
+        name = name.replace("mlp.", "")
+        name = name.replace("linear_attn.", "")
+        # Apply tensor name map (longer patterns first to avoid partial matches)
+        for hf_suffix, gguf_suffix in self._tensor_map:
+            if hf_suffix in name:
+                name = name.replace(hf_suffix, gguf_suffix)
+                break
+        # Convert layers.{id} to blk.{id}
+        name = name.replace("layers.", "blk.")
+        return [(name, data_torch)]
 
 
 @Model.register("Ernie4_5_ForCausalLM", "Ernie4_5ForCausalLM")
