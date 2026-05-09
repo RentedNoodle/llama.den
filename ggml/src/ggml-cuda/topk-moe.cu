@@ -17,6 +17,10 @@ void den_routing_telemetry_reset() {
     g_den_mask_state = {false, 0, 0, 0.0f};
 }
 
+bool den_mask_is_enabled() {
+    return g_den_mask_config.enabled;
+}
+
 void den_routing_telemetry_print() {
     auto & t = g_den_routing_telemetry;
     if (t.tokens_processed == 0) return;

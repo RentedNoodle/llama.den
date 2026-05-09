@@ -59,9 +59,11 @@
 // den_loader.cuh has no CUDA deps; safe to include unconditionally.
 #include "ggml-cuda/den_loader.cuh"
 
-// DEN routing mask activation (defined in ggml-cuda/topk-moe.cu)
+// DEN routing mask (defined in ggml-cuda/topk-moe.cu)
 // Forward-declared to avoid CUDA header dependency in plain C++ compilation
 void den_mask_try_activate(int n_experts, const char * arch_name);
+bool den_mask_is_enabled();
+void den_routing_telemetry_print();
 
 #ifdef __has_include
     #if __has_include(<unistd.h>)
@@ -6535,6 +6537,10 @@ struct llama_context * llama_init_from_model(
 }
 
 void llama_free(struct llama_context * ctx) {
+    // DEN: dump routing mask telemetry if active
+    if (den_mask_is_enabled()) {
+        den_routing_telemetry_print();
+    }
     delete ctx;
 }
 
