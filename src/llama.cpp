@@ -59,6 +59,10 @@
 // den_loader.cuh has no CUDA deps; safe to include unconditionally.
 #include "ggml-cuda/den_loader.cuh"
 
+// DEN routing mask activation (defined in ggml-cuda/topk-moe.cu)
+// Forward-declared to avoid CUDA header dependency in plain C++ compilation
+void den_mask_try_activate(int n_experts, const char * arch_name);
+
 #ifdef __has_include
     #if __has_include(<unistd.h>)
         #include <unistd.h>
@@ -1633,6 +1637,23 @@ static void llm_load_print_meta(llama_model_loader & ml, llama_model & model) {
 
     if (model.arch == LLM_ARCH_QWEN3MOE || model.arch == LLM_ARCH_OPENAI_MOE || model.arch == LLM_ARCH_QWEN3VLMOE) {
         LLAMA_LOG_INFO("%s: n_ff_exp         = %d\n",     __func__, hparams.n_ff_exp);
+    }
+
+    // DEN: activate routing mask for MoE models with >= 128 experts
+    if (model.arch == LLM_ARCH_QWEN35MOE) {
+        LLAMA_LOG_INFO("%s: n_ff_exp         = %d\n",     __func__, hparams.n_ff_exp);
+        LLAMA_LOG_INFO("%s: n_ff_shexp       = %d\n",     __func__, hparams.n_ff_shexp);
+        LLAMA_LOG_INFO("%s: n_expert          = %d\n",     __func__, hparams.n_expert);
+        LLAMA_LOG_INFO("%s: n_expert_used     = %d\n",     __func__, hparams.n_expert_used);
+        den_mask_try_activate(hparams.n_expert, "qwen35moe");
+    }
+
+    // DEN: allow forced mask activation via env var for testing on any model
+    {
+        const char * force = getenv("DEN_MASK_FORCE");
+        if (force && strcmp(force, "1") == 0 && model.arch != LLM_ARCH_QWEN35MOE) {
+            den_mask_try_activate(256, "forced-test");
+        }
     }
 
     if (model.arch == LLM_ARCH_GRANITE || model.arch == LLM_ARCH_GRANITE_MOE) {

@@ -49,3 +49,8 @@ extern den_mask_state        g_den_mask_state;
 extern den_expert_mask_config g_den_mask_config;
 void den_routing_telemetry_reset();
 void den_routing_telemetry_print();
+
+// V1 mask activation: call during model init for MoE models
+// Sets enabled=true, populates default_mask with first default_candidates experts
+// If DEN_MASK_FORCE=1 env var is set, activates even for non-MoE models (testing)
+void den_mask_try_activate(int n_experts, const char * arch_name);

@@ -403,6 +403,42 @@ void ggml_cuda_op_topk_moe(ggml_backend_cuda_context & ctx,
     }
 }
 
+// ── V1 Mask Activation ───────────────────────────────────────────────
+
+void den_mask_try_activate(int n_experts, const char * arch_name) {
+    // Check env var for forced testing
+    const char * force = getenv("DEN_MASK_FORCE");
+    bool forced = (force && strcmp(force, "1") == 0);
+
+    bool is_moe = (arch_name && strstr(arch_name, "moe") != nullptr);
+    bool large_enough = (n_experts >= 128);
+
+    if (!forced && !(is_moe && large_enough)) return;
+
+    auto & cfg = g_den_mask_config;
+    cfg.enabled = true;
+    cfg.entropy_threshold = 0.45f;
+    cfg.hysteresis_margin = 0.05f;
+    cfg.cooldown_tokens = 4;
+    cfg.hysteresis_consecutive = 3;
+    cfg.default_candidates = 128;
+
+    // Populate default mask: first 128 experts eligible, rest masked
+    // V1 uses simple split; replace with super-expert scoring when available
+    memset(cfg.default_mask, 0, sizeof(cfg.default_mask));
+    for (int i = 0; i < cfg.default_candidates && i < 256; i++) {
+        int word = i / 32;
+        int bit  = i % 32;
+        cfg.default_mask[word] |= (1u << bit);
+    }
+
+    den_routing_telemetry_reset();
+
+    fprintf(stderr, "[DEN-MASK] ACTIVATED: arch=%s n_experts=%d candidates=%d threshold=%.2f%s\n",
+            arch_name ? arch_name : "unknown", n_experts, cfg.default_candidates,
+            cfg.entropy_threshold, forced ? " (FORCED)" : "");
+}
+
 // ── Heuristic unchanged ──────────────────────────────────────────────
 
 bool ggml_cuda_should_use_topk_moe(const ggml_tensor * softmax, const ggml_tensor * weights) {
