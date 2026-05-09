@@ -113,11 +113,16 @@ bool server_context::load_model(const gpt_params& params_) {
     if (has_draft_model) {
 
         if (llama_model_has_recurrent(model)) {
+            // SPEC-DEN: Allow standalone draft-model speculation with recurrent models.
+            // The draft model runs independently with its own recurrent state.
+            // All-or-nothing acceptance policy avoids main-model state overshoot:
+            // if all K draft tokens match, the main model's recurrent state is
+            // correctly advanced by K. If any mismatch, we discard the entire
+            // batch and fall back to single-token decoding (state unchanged).
             LLAMA_LOG_WARN("\n=======================================================================\n");
-            LLAMA_LOG_WARN(" Speculative decodong is not suported for recurrent/hybrid models\n");
-            LLAMA_LOG_WARN(" --> bailing out\n");
+            LLAMA_LOG_WARN(" Speculative decoding with recurrent/hybrid models is EXPERIMENTAL\n");
+            LLAMA_LOG_WARN(" Using all-or-nothing acceptance policy to avoid state overshoot\n");
             LLAMA_LOG_WARN("========================================================================\n\n");
-            GGML_ABORT("Fatal error");
         }
 
         LLAMA_LOG_INFO("\n\n==================================loading DRAFT model==================================\n\n");
