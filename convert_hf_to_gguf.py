@@ -2382,10 +2382,16 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
         # ── Fused expert tensors: gate_up_proj [256,1024,2048] → split into gate [2048,512,256] + up [2048,512,256] ──
         if "experts.gate_up_proj" in name:
             # data_torch: [n_experts, 2*ffn_dim, hidden] = [256, 1024, 2048]
-            gate_dim = data_torch.shape[1] // 2  # 512
-            gate = data_torch[:, :gate_dim, :].permute(2, 1, 0).contiguous()  # [2048, 512, 256]
-            up   = data_torch[:, gate_dim:, :].permute(2, 1, 0).contiguous()  # [2048, 512, 256]
+            # Use torch.real (or just ensure we work with a real tensor)
+            gate_dim = data_torch.shape[1] // 2
+            # Force materialization via numpy round-trip (most reliable)
+            import numpy as np
+            gate_np = data_torch[:, :gate_dim, :].permute(2, 1, 0).contiguous().numpy()
+            up_np   = data_torch[:, gate_dim:, :].permute(2, 1, 0).contiguous().numpy()
+            gate = torch.from_numpy(gate_np.copy())
+            up   = torch.from_numpy(up_np.copy())
             name_base = name.replace("experts.gate_up_proj", "")
+            name_base = name_base.replace("mlp.", "")
             name_base = name_base.replace("layers.", "blk.")
             yield (f"{name_base}ffn_gate_exps.weight", gate)
             yield (f"{name_base}ffn_up_exps.weight", up)
@@ -2393,38 +2399,44 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
 
         # ── Expert down_proj: [256, 2048, 512] → permute to [512, 2048, 256] ──
         if "experts.down_proj" in name:
-            # data_torch: [n_experts, hidden, ffn] = [256, 2048, 512]
-            data_torch = data_torch.permute(2, 1, 0).contiguous()  # [512, 2048, 256]
-            name = name.replace("experts.down_proj", "ffn_down_exps")
+            import numpy as np
+            data_np = data_torch.permute(2, 1, 0).contiguous().numpy().copy()
+            data_torch = torch.from_numpy(data_np)
+            name = name.replace("mlp.experts.down_proj", "ffn_down_exps")
             name = name.replace("layers.", "blk.")
             yield (name, data_torch)
             return
 
         # ── Shared expert tensors ──
         if "shared_expert." in name:
+            import numpy as np
             if "shared_expert_gate" in name:
-                # [1, 2048] → squeeze to [2048]
-                data_torch = data_torch.contiguous().squeeze(0)
-                name = name.replace("shared_expert_gate.weight", "ffn_gate_inp_shexp.weight")
+                data_np = data_torch.contiguous().numpy().squeeze(0).copy()
+                data_torch = torch.from_numpy(data_np)
+                name = name.replace("mlp.shared_expert_gate.weight", "ffn_gate_inp_shexp.weight")
             elif "gate_proj" in name:
-                # [512, 2048] → [2048, 512]
-                data_torch = data_torch.t().contiguous()
-                name = name.replace("shared_expert.gate_proj", "ffn_gate_shexp")
+                data_np = data_torch.t().contiguous().numpy().copy()
+                data_torch = torch.from_numpy(data_np)
+                name = name.replace("mlp.shared_expert.gate_proj", "ffn_gate_shexp")
             elif "up_proj" in name:
-                # [512, 2048] → [2048, 512]
-                data_torch = data_torch.t().contiguous()
-                name = name.replace("shared_expert.up_proj", "ffn_up_shexp")
+                data_np = data_torch.t().contiguous().numpy().copy()
+                data_torch = torch.from_numpy(data_np)
+                name = name.replace("mlp.shared_expert.up_proj", "ffn_up_shexp")
             elif "down_proj" in name:
-                # [2048, 512] → [512, 2048]
-                data_torch = data_torch.t().contiguous()
-                name = name.replace("shared_expert.down_proj", "ffn_down_shexp")
+                data_np = data_torch.t().contiguous().numpy().copy()
+                data_torch = torch.from_numpy(data_np)
+                name = name.replace("mlp.shared_expert.down_proj", "ffn_down_shexp")
+            else:
+                return []
             name = name.replace("layers.", "blk.")
             yield (name, data_torch)
             return
 
         # ── Router gate: [256, 2048] → transpose to [2048, 256] ──
-        if "mlp.gate.weight" in name and "shared" not in name:
-            data_torch = data_torch.t().contiguous()  # [2048, 256]
+        if "mlp.gate.weight" in name and "experts" not in name and "shared" not in name:
+            import numpy as np
+            data_np = data_torch.t().contiguous().numpy().copy()
+            data_torch = torch.from_numpy(data_np)
             name = name.replace("mlp.gate.weight", "ffn_gate_inp.weight")
             name = name.replace("layers.", "blk.")
             yield (name, data_torch)
