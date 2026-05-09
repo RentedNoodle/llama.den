@@ -2263,6 +2263,147 @@ class Qwen3MoeModel(Qwen2MoeModel):
     model_arch = gguf.MODEL_ARCH.QWEN3MOE
 
 
+@Model.register("Qwen3_5MoeForCausalLM")
+class Qwen3_5MoeModel(Qwen2MoeModel):
+    model_arch = gguf.MODEL_ARCH.QWEN35MOE
+
+    def __init__(self, *args, **kwargs):
+        # Merge text_config into top-level hparams (same as Qwen3_5Model)
+        dir_model = kwargs.get("dir_model", args[0] if args else None)
+        cfg_path = dir_model / "config.json"
+        import json
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            original_cfg = json.load(f)
+        tc = original_cfg.get("text_config", {})
+        if tc:
+            merged = dict(original_cfg)
+            for k, v in tc.items():
+                if k not in merged:
+                    merged[k] = v
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(merged, f)
+        try:
+            super().__init__(*args, **kwargs)
+        finally:
+            with open(cfg_path, "w", encoding="utf-8") as f:
+                json.dump(original_cfg, f)
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        tc = self.hparams
+        # SSM parameters (required by QWEN35MOE arch)
+        ssm_state_size = tc.get("linear_key_head_dim", 128)
+        ssm_group_count = tc.get("linear_num_key_heads", 16)
+        ssm_dt_rank = tc.get("linear_num_value_heads", 32)
+        ssm_conv_kernel = tc.get("linear_conv_kernel_dim", 4)
+        ssm_inner_size = ssm_state_size * ssm_dt_rank
+        self.gguf_writer.add_ssm_state_size(ssm_state_size)
+        self.gguf_writer.add_ssm_inner_size(ssm_inner_size)
+        self.gguf_writer.add_ssm_conv_kernel(ssm_conv_kernel)
+        self.gguf_writer.add_ssm_time_step_rank(ssm_dt_rank)
+        self.gguf_writer.add_ssm_group_count(ssm_group_count)
+        # Rope dimension sections
+        rope_params = self.hparams.get("rope_parameters", {})
+        if isinstance(rope_params, dict):
+            mrope_section = rope_params.get("mrope_section")
+            if mrope_section:
+                sections = list(mrope_section)
+                while len(sections) < 4:
+                    sections.append(0)
+                self.gguf_writer.add_rope_dimension_sections(sections)
+
+    def set_vocab(self):
+        try:
+            self._set_vocab_sentencepiece()
+        except (FileNotFoundError, ModuleNotFoundError):
+            try:
+                self._set_vocab_gpt2()
+            except NotImplementedError:
+                logger.warning("Pre-tokenizer not recognized — using direct GPT-2 vocab")
+                self._set_vocab_from_tokenizer_json()
+
+    def _set_vocab_from_tokenizer_json(self):
+        import json
+        with open(self.dir_model / "tokenizer.json", "r", encoding="utf-8") as f:
+            tokenizer_json = json.load(f)
+        model_vocab = tokenizer_json["model"]["vocab"]
+        vocab_size = self.hparams.get("vocab_size", len(model_vocab))
+        tokens: list[str] = [""] * vocab_size
+        toktypes: list[int] = [gguf.TokenType.NORMAL] * vocab_size
+        for token, idx in model_vocab.items():
+            if idx < vocab_size:
+                tokens[idx] = token
+        for i in range(vocab_size):
+            if not tokens[i]:
+                tokens[i] = f"[PAD{i}]"
+                toktypes[i] = gguf.TokenType.UNUSED
+        self.gguf_writer.add_tokenizer_model("gpt2")
+        self.gguf_writer.add_tokenizer_pre("qwen35")
+        self.gguf_writer.add_token_list(tokens)
+        self.gguf_writer.add_token_types(toktypes)
+        special_vocab = gguf.SpecialVocab(self.dir_model, load_merges=True)
+        special_vocab.add_to_gguf(self.gguf_writer)
+
+    # SSM tensor name map for non-expert tensors (same as Qwen3_5Model)
+    _ssm_tensor_map: list[tuple[str, str]] = [
+        ("embed_tokens", "token_embd"),
+        ("post_attention_layernorm", "post_attention_norm"),
+        ("input_layernorm", "attn_norm"),
+        ("ssm_norm", "ssm_norm"),
+        ("q_norm", "attn_q_norm"),
+        ("k_norm", "attn_k_norm"),
+        ("q_proj", "attn_q"),
+        ("k_proj", "attn_k"),
+        ("v_proj", "attn_v"),
+        ("o_proj", "attn_output"),
+        ("gate_proj", "ffn_gate"),
+        ("up_proj", "ffn_up"),
+        ("down_proj", "ffn_down"),
+        ("in_proj_qkv", "attn_qkv"),
+        ("in_proj_z", "attn_gate"),
+        ("in_proj_a", "ssm_alpha"),
+        ("in_proj_b", "ssm_beta"),
+        ("dt_bias", "ssm_dt.bias"),
+        ("A_log", "ssm_a"),
+        ("conv1d", "ssm_conv1d"),
+        ("out_proj", "ssm_out"),
+        ("norm", "output_norm"),
+    ]
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # Expert tensors: use parent class stacking logic
+        if name.find("experts") != -1:
+            yield from super().modify_tensors(data_torch, name, bid)
+            return
+
+        # Skip vision encoder tensors
+        if name.startswith("model.visual."):
+            return []
+
+        # Map SSM/attention/norm tensor names
+        name = name.replace("model.language_model.", "") if "model.language_model." in name else name
+        name = name.replace("model.", "") if name.startswith("model.") else name
+        name = name.replace("self_attn.", "")
+        name = name.replace("mlp.", "")
+        name = name.replace("linear_attn.", "")
+
+        # Special case: linear_attn.norm → ssm_norm
+        if "linear_attn.norm" in name:
+            name = name.replace("model.language_model.", "") if "model.language_model." in name else name
+            name = name.replace("linear_attn.norm", "ssm_norm")
+            name = name.replace("layers.", "blk.")
+            yield (name, data_torch)
+            return
+
+        for hf_suffix, gguf_suffix in self._ssm_tensor_map:
+            if hf_suffix in name:
+                name = name.replace(hf_suffix, gguf_suffix)
+                break
+
+        name = name.replace("layers.", "blk.")
+        yield (name, data_torch)
+
+
 @Model.register("Qwen3_5ForConditionalGeneration")
 class Qwen3_5Model(Qwen2Model):
     model_arch = gguf.MODEL_ARCH.QWEN35
