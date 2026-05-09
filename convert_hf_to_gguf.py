@@ -2375,8 +2375,8 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
         name = name.replace("model.language_model.", "") if "model.language_model." in name else name
         name = name.replace("model.", "") if name.startswith("model.") else name
 
-        # Skip MTP tensors
-        if name.startswith("mtp."):
+        # Skip MTP and vision tensors
+        if name.startswith("mtp.") or name.startswith("visual."):
             return []
 
         # ── Fused expert tensors: gate_up_proj [256,1024,2048] → split into gate [2048,512,256] + up [2048,512,256] ──
