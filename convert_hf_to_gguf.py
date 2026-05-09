@@ -2371,6 +2371,10 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
     ]
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        # Force eager: LazyTorchTensor silently discards permute/transpose ops
+        if 'Lazy' in type(data_torch).__name__:
+            import numpy as np
+            data_torch = torch.from_numpy(np.asarray(data_torch.numpy()))
         # Strip model.language_model prefix
         name = name.replace("model.language_model.", "") if "model.language_model." in name else name
         name = name.replace("model.", "") if name.startswith("model.") else name
