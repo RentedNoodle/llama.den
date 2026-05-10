@@ -97,6 +97,16 @@ den_gemv_mxf4nvf4_kernel(
         }
     }
 
+    // ── DIAGNOSTIC: first warp, first block, lane 0 only ──────────────
+    if (blockIdx.x == 0 && warp_id == 0 && lane == 0) {
+        const uint8_t *t0 = wptr;
+        printf("GEMV row0 d4[0..3]=%08x %08x %08x %08x w[0..7]=%02x%02x%02x%02x%02x%02x%02x%02x o=(%.2f,%.2f)\n",
+            ((const uint32_t*)t0)[0], ((const uint32_t*)t0)[1],
+            ((const uint32_t*)t0)[2], ((const uint32_t*)t0)[3],
+            t0[16],t0[17],t0[18],t0[19],t0[20],t0[21],t0[22],t0[23],
+            acc0, acc1);
+    }
+
     // Epilogue: only lanes 0-3 hold row-0 data in c[0] and c[1]
     // Lane 0: col0/col1, Lane 1: col2/col3, Lane 2: col4/col5, Lane 3: col6/col7
     __shared__ float smem_out[8];
