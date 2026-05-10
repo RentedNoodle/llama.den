@@ -11,18 +11,18 @@
 #include <cstring>
 
 // ── SMEM staging for async copy ──────────────────────────────────────────────
-// Ring metadata fits in 3 KB SMEM; staging buffer for cp.async uses the rest.
+// Ring metadata is compact: only the 3 cursor fields live in SMEM.
+// token_ids and positions arrays are in L2-pinned global memory.
+// Staging buffer for cp.async uses the remaining SMEM budget.
 
 struct den_l2_kv_smem {
     int32_t head;             // Current write cursor
     int32_t count;            // Valid entries
     int32_t seq_base;         // Sequence position of slot[0]
-    int32_t token_ids[DEN_L2_KV_MAX_TOKENS];  // Ring token IDs
-    int32_t positions[DEN_L2_KV_MAX_TOKENS];  // Ring positions
 };
 
-static_assert(sizeof(den_l2_kv_smem) <= DEN_L2_KV_SMEM_BYTES,
-              "Ring metadata exceeds SMEM budget");
+static_assert(sizeof(den_l2_kv_smem) <= 64,
+              "Ring metadata struct should be < 64 bytes");
 
 // ── Append kernel ────────────────────────────────────────────────────────────
 // Grid: (1,), Block: (32,) — minimal launch, cp.async handles the transfer.
@@ -40,20 +40,12 @@ __global__ void den_l2_kv_append_kernel(
     int32_t        entry_bytes)
 {
     extern __shared__ uint8_t smem[];
-    den_l2_kv_smem * meta = (den_l2_kv_smem *)smem;
     uint8_t * staging = smem + sizeof(den_l2_kv_smem);
 
-    // Thread 0 updates ring metadata
+    // Thread 0 updates ring metadata and writes to global arrays
     if (threadIdx.x == 0) {
         int32_t slot = head;
-        meta->token_ids[slot] = token_id;
-        meta->positions[slot] = pos;
-        meta->head = (head + 1) % max_tokens;
-        meta->count = min(meta->count + 1, max_tokens);
-        if (meta->count == 1) {
-            meta->seq_base = pos;
-        }
-        // Write metadata to global (one 128-bit store covers head+count+seq_base)
+        // Write token ID and position to L2-pinned global arrays
         ring_token_ids[slot] = token_id;
         ring_positions[slot] = pos;
     }
@@ -64,8 +56,6 @@ __global__ void den_l2_kv_append_kernel(
     int32_t slot = head;
     uint8_t * dst = (uint8_t *)ring_buffer + slot * entry_bytes;
     const uint8_t * src = (const uint8_t *)k_embed;
-    int32_t bytes_per_thread = entry_bytes / blockDim.x;
-
     // Stage through SMEM for cp.async (LDGSTS path)
     for (int i = threadIdx.x; i < entry_bytes / 4; i += blockDim.x) {
         // Load 4 bytes from source into staging
