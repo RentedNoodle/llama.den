@@ -100,8 +100,11 @@ den_gemv_mxf4nvf4_kernel(
                              b0, b1,
                              acc, 0.0f, 0.0f, 0.0f,
                              scale_a, 0x38383838u);
-            // d0 at lane 0 = row 0, column 0 = dot product for this K-range
-            acc = __shfl_sync(0xffffffff, d0, 0);
+            // d0 at lanes 0-3 all cover row 0, each for different K positions.
+            // Sum across 4-thread groups. For 1-row-per-warp, only row 0 matters.
+            acc = d0;
+            acc += __shfl_xor_sync(0x000Fu, acc, 1);
+            acc += __shfl_xor_sync(0x000Fu, acc, 2);
         }
     }
 
