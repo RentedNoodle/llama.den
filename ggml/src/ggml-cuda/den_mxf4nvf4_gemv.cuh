@@ -64,7 +64,8 @@ den_gemv_mxf4nvf4_kernel(
         #pragma unroll
         for (int i = 0; i < 4; i++) {
             int idx = lane * 4 + i;
-            qs_data[i] = (idx < 32) ? qs_ptr[idx] : 0;
+            uint32_t raw = (idx < 32) ? qs_ptr[idx] : 0;
+            qs_data[i] = __byte_perm(raw, 0, 0x0123);
         }
 
         uint32_t act_packed = 0;
