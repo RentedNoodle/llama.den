@@ -47,6 +47,15 @@ den_gemv_mxf4nvf4_kernel(
     const int row     = blockIdx.x * NWARPS + warp_id;
     if (row >= N) return;
 
+    // Entry diagnostic for first warp's first row only
+    if (lane == 0 && row == 0) {
+        printf("GEMV_ENTRY N=%d K=%d kt_per_row=%d row_stride=%zu\n",
+               N, K, kt_per_row, (size_t)kt_per_row * 144);
+        printf("GEMV_TILE0 d4=%08x %08x %08x %08x\n",
+               ((const uint32_t*)weights)[0], ((const uint32_t*)weights)[1],
+               ((const uint32_t*)weights)[2], ((const uint32_t*)weights)[3]);
+    }
+
     // acc = dot product accumulator for this row (d0 at lane 0)
     float acc = 0.0f;
     const uint8_t * wptr = (const uint8_t *)weights;
