@@ -2406,7 +2406,7 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
             import numpy as np
             data_np = data_torch.permute(2, 1, 0).contiguous().numpy().copy()
             data_torch = torch.from_numpy(data_np)
-            name = name.replace("mlp.experts.down_proj", "ffn_down_exps")
+            name = name.replace("mlp.experts.down_proj", "ffn_down_exps.weight")
             name = name.replace("layers.", "blk.")
             yield (name, data_torch)
             return
