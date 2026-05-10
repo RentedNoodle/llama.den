@@ -60,15 +60,6 @@ den_gemv_mxf4nvf4_kernel(
         uint32_t s2 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[2] : 0, 2);
         uint32_t s3 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[3] : 0, 3);
 
-        const uint32_t * qs_ptr = (const uint32_t *)(tile + 16);
-        uint32_t qs_data[4];
-        #pragma unroll
-        for (int i = 0; i < 4; i++) {
-            int idx = lane * 4 + i;
-            uint32_t raw = (idx < 32) ? qs_ptr[idx] : 0;
-            qs_data[i] = __byte_perm(raw, 0, 0x0123);
-        }
-
         uint32_t act_packed = 0;
         #pragma unroll
         for (int i = 0; i < 8; i++) {
@@ -81,13 +72,25 @@ den_gemv_mxf4nvf4_kernel(
         }
         const uint32_t b0 = act_packed, b1 = act_packed;
 
+        // 4 K-ranges of 64 elements each within the 256-element block
         #pragma unroll
         for (int mm = 0; mm < 4; mm++) {
-            uint32_t a_val = qs_data[mm];
+            // Each 64-element K-range = 32 bytes = 8 dwords of nibble-packed weights
+            const uint32_t * qs_ptr = (const uint32_t *)(tile + 16 + mm * 32);
+            uint32_t qs_data[4];
+            #pragma unroll
+            for (int i = 0; i < 4; i++) {
+                int idx = lane * 4 + i;
+                uint32_t raw = (idx < 8) ? qs_ptr[idx] : 0;
+                raw = __byte_perm(raw, 0, 0x0123);
+                qs_data[i] = ((raw & 0xF0F0F0F0u) >> 4) | ((raw & 0x0F0F0F0Fu) << 4);
+            }
+
             uint32_t scale_a = (mm == 0) ? s0 : (mm == 1) ? s1 : (mm == 2) ? s2 : s3;
             float d0, d1, d2, d3;
             float c0 = 0, c1 = 0, c2 = 0, c3 = 0;
-            OMMA_MXF4NVF4_4X(d0, d1, d2, d3, a_val, a_val, a_val, a_val,
+            OMMA_MXF4NVF4_4X(d0, d1, d2, d3,
+                             qs_data[0], qs_data[1], qs_data[2], qs_data[3],
                              b0, b1, c0, c1, c2, c3, scale_a, 0x38383838u);
             acc0 += d0;
             acc1 += d1;
