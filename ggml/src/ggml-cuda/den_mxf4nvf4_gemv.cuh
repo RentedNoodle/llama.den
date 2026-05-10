@@ -47,7 +47,8 @@ den_gemv_mxf4nvf4_kernel(
     const int row     = blockIdx.x * NWARPS + warp_id;
     if (row >= N) return;
 
-    float acc = 0.0f;
+    // Track two accumulators: acc[0]=even cols, acc[1]=odd cols
+    float acc0 = 0.0f, acc1 = 0.0f;
     const uint8_t * wptr = (const uint8_t *)weights;
     const size_t row_stride = (size_t)kt_per_row * 144;
 
@@ -88,13 +89,27 @@ den_gemv_mxf4nvf4_kernel(
             float c0 = 0, c1 = 0, c2 = 0, c3 = 0;
             OMMA_MXF4NVF4_4X(d0, d1, d2, d3, a_val, a_val, a_val, a_val,
                              b0, b1, c0, c1, c2, c3, scale_a, 0x38383838u);
-            acc += d0;
+            acc0 += d0;
+            acc1 += d1;
         }
     }
 
-    for (int off = 16; off > 0; off >>= 1)
-        acc += __shfl_xor_sync(0xffffffff, acc, off);
-    if (lane == 0) dst[row] = acc;
+    // Epilogue: only lanes 0-3 hold row-0 data in c[0] and c[1]
+    // Lane 0: col0/col1, Lane 1: col2/col3, Lane 2: col4/col5, Lane 3: col6/col7
+    __shared__ float smem_out[8];
+
+    if (lane < 4) {
+        smem_out[lane * 2]     = acc0;  // columns 0,2,4,6
+        smem_out[lane * 2 + 1] = acc1;  // columns 1,3,5,7
+    }
+    __syncthreads();
+
+    // Sum all 8 columns to get dot product for this row
+    float dot = 0.0f;
+    if (lane < 8) dot = smem_out[lane];
+    for (int off = 4; off > 0; off >>= 1)
+        dot += __shfl_xor_sync(0xffffffff, dot, off);
+    if (lane == 0) dst[row] = dot;
 }
 
 static void den_mxf4nvf4_gemv_launch(
