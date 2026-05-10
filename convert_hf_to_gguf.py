@@ -2371,29 +2371,19 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
     ]
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        # Force eager: LazyTorchTensor silently discards permute/transpose ops
-        if 'Lazy' in type(data_torch).__name__:
-            import numpy as np
-            data_torch = torch.from_numpy(np.asarray(data_torch.numpy()))
         # Strip model.language_model prefix
         name = name.replace("model.language_model.", "") if "model.language_model." in name else name
         name = name.replace("model.", "") if name.startswith("model.") else name
 
-        # Skip MTP and vision tensors
-        if name.startswith("mtp.") or name.startswith("visual."):
+        # Skip MTP, vision, and lm_head tensors
+        if name.startswith("mtp.") or name.startswith("visual.") or name == "lm_head.weight":
             return []
 
-        # ── Fused expert tensors: gate_up_proj [256,1024,2048] → split into gate [2048,512,256] + up [2048,512,256] ──
+        # ── Fused expert tensors: gate_up_proj [256,1024,2048] → split dim 1 into gate [256,512,2048] + up [256,512,2048] ──
         if "experts.gate_up_proj" in name:
-            # data_torch: [n_experts, 2*ffn_dim, hidden] = [256, 1024, 2048]
-            # Use torch.real (or just ensure we work with a real tensor)
-            gate_dim = data_torch.shape[1] // 2
-            # Force materialization via numpy round-trip (most reliable)
-            import numpy as np
-            gate_np = data_torch[:, :gate_dim, :].permute(2, 1, 0).contiguous().numpy()
-            up_np   = data_torch[:, gate_dim:, :].permute(2, 1, 0).contiguous().numpy()
-            gate = torch.from_numpy(gate_np.copy())
-            up   = torch.from_numpy(up_np.copy())
+            gate_dim = data_torch.shape[1] // 2  # 512
+            gate = data_torch[:, :gate_dim, :]     # [256, 512, 2048]
+            up   = data_torch[:, gate_dim:, :]     # [256, 512, 2048]
             name_base = name.replace("experts.gate_up_proj", "")
             name_base = name_base.replace("mlp.", "")
             name_base = name_base.replace("layers.", "blk.")
@@ -2401,34 +2391,22 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
             yield (f"{name_base}ffn_up_exps.weight", up)
             return
 
-        # ── Expert down_proj: [256, 2048, 512] → permute to [512, 2048, 256] ──
+        # ── Expert down_proj: [256, 2048, 512] → rename only, no shape change ──
         if "experts.down_proj" in name:
-            import numpy as np
-            data_np = data_torch.permute(2, 1, 0).contiguous().numpy().copy()
-            data_torch = torch.from_numpy(data_np)
             name = name.replace("mlp.experts.down_proj", "ffn_down_exps.weight")
             name = name.replace("layers.", "blk.")
             yield (name, data_torch)
             return
 
-        # ── Shared expert tensors ──
+        # ── Shared expert tensors: rename only, no shape change ──
         if "shared_expert" in name:
-            import numpy as np
             if "shared_expert_gate" in name:
-                data_np = data_torch.contiguous().numpy().squeeze(0).copy()
-                data_torch = torch.from_numpy(data_np)
                 name = name.replace("mlp.shared_expert_gate.weight", "ffn_gate_inp_shexp.weight")
             elif "gate_proj" in name:
-                data_np = data_torch.t().contiguous().numpy().copy()
-                data_torch = torch.from_numpy(data_np)
                 name = name.replace("mlp.shared_expert.gate_proj", "ffn_gate_shexp")
             elif "up_proj" in name:
-                data_np = data_torch.t().contiguous().numpy().copy()
-                data_torch = torch.from_numpy(data_np)
                 name = name.replace("mlp.shared_expert.up_proj", "ffn_up_shexp")
             elif "down_proj" in name:
-                data_np = data_torch.t().contiguous().numpy().copy()
-                data_torch = torch.from_numpy(data_np)
                 name = name.replace("mlp.shared_expert.down_proj", "ffn_down_shexp")
             else:
                 return []
@@ -2436,19 +2414,12 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
             yield (name, data_torch)
             return
 
-        # ── Router gate: [256, 2048] → transpose to [2048, 256] ──
+        # ── Router gate: rename only, no shape change ──
         if "mlp.gate.weight" in name and "experts" not in name and "shared" not in name:
-            import numpy as np
-            data_np = data_torch.t().contiguous().numpy().copy()
-            data_torch = torch.from_numpy(data_np)
             name = name.replace("mlp.gate.weight", "ffn_gate_inp.weight")
             name = name.replace("layers.", "blk.")
             yield (name, data_torch)
             return
-
-        # Skip lm_head (tied embeddings — output uses token_embd)
-        if name == "lm_head.weight":
-            return []
 
         # ── Map SSM/attention/norm tensor names ──
         # Special case: must come BEFORE linear_attn. stripping
