@@ -2412,7 +2412,7 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
             return
 
         # ── Shared expert tensors ──
-        if "shared_expert." in name:
+        if "shared_expert" in name:
             import numpy as np
             if "shared_expert_gate" in name:
                 data_np = data_torch.contiguous().numpy().squeeze(0).copy()
@@ -2446,17 +2446,21 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
             yield (name, data_torch)
             return
 
-        # ── Map SSM/attention/norm tensor names ──
-        name = name.replace("self_attn.", "")
-        name = name.replace("mlp.", "")
-        name = name.replace("linear_attn.", "")
+        # Skip lm_head (tied embeddings — output uses token_embd)
+        if name == "lm_head.weight":
+            return []
 
-        # Special case: linear_attn.norm → ssm_norm
+        # ── Map SSM/attention/norm tensor names ──
+        # Special case: must come BEFORE linear_attn. stripping
         if "linear_attn.norm" in name:
             name = name.replace("linear_attn.norm", "ssm_norm")
             name = name.replace("layers.", "blk.")
             yield (name, data_torch)
             return
+
+        name = name.replace("self_attn.", "")
+        name = name.replace("mlp.", "")
+        name = name.replace("linear_attn.", "")
 
         for hf_suffix, gguf_suffix in self._ssm_tensor_map:
             if hf_suffix in name:
