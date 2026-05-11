@@ -53,6 +53,75 @@ den_gemv_mxf4nvf4_kernel(
     const int row_base = (blockIdx.x * NWARPS + warp_id) * 16;
     if (row_base >= N) return;
 
+    // ── Self-calibrating nibble map (one-time, lane 0 of block 0) ──────
+    __shared__ int s_nibble_order;
+    if (lane == 0 && blockIdx.x == 0 && threadIdx.x == 0) {
+        s_nibble_order = -1;
+    }
+    __syncthreads();
+
+    if (s_nibble_order == -1 && lane == 0 && warp_id == 0 && row_base == 0) {
+        const uint8_t *t0 = (const uint8_t *)weights;
+        // Compute BF16 reference for first 64 elements of tile 0
+        float ref = 0.0f;
+        for (int k = 0; k < 64 && k < K; k++) {
+            int sg = k / 16, sw = sg / 4, sb = sg % 4;
+            uint32_t dw = ((const uint32_t *)t0)[sw];
+            uint8_t sv = (dw >> (sb * 8)) & 0xFF;
+            if (sv >= 0x7F) sv = 0;
+            int e = (sv >> 3) & 0x0F, m = sv & 0x07;
+            float scale = (e == 0) ? (m / 8.0f) * ldexpf(1.0f, -7)
+                                   : (1.0f + m / 8.0f) * ldexpf(1.0f, e - 7);
+            int bi = k / 2, ns = k & 1;
+            uint8_t pk = t0[16 + bi];
+            uint8_t nib = ns ? (pk >> 4) : (pk & 0x0F);
+            float wv = 0.0f;
+            if      (nib == 0) wv = 0.0f;
+            else if (nib == 1) wv = 0.5f;
+            else if (nib == 2) wv = 1.0f;
+            else if (nib == 3) wv = 1.5f;
+            else if (nib == 4) wv = 2.0f;
+            else if (nib == 5) wv = 3.0f;
+            else if (nib == 6) wv = 4.0f;
+            else if (nib == 7) wv = 6.0f;
+            else if (nib >= 8) wv = -(nib-8 < 7 ? (float[]){0,0.5,1,1.5,2,3,4,6}[(nib-8)&7] : 0);
+            ref += wv * scale * ((k < K) ? act[k] : 0.0f);
+        }
+        // Test nibble orderings
+        float best_err = 1e30f; int best = 0;
+        for (int order = 0; order < 4; order++) {
+            const uint32_t *qp = (const uint32_t *)(t0 + 16);
+            uint32_t a0=qp[0], a1=qp[1], a2=qp[2], a3=qp[3];
+            if (order == 1) { // byte_rev
+                a0=__byte_perm(a0,0,0x0123); a1=__byte_perm(a1,0,0x0123);
+                a2=__byte_perm(a2,0,0x0123); a3=__byte_perm(a3,0,0x0123);
+            } else if (order == 2) { // nib_swap
+                a0=((a0&0xF0F0F0F0u)>>4)|((a0&0x0F0F0F0Fu)<<4);
+                a1=((a1&0xF0F0F0F0u)>>4)|((a1&0x0F0F0F0Fu)<<4);
+                a2=((a2&0xF0F0F0F0u)>>4)|((a2&0x0F0F0F0Fu)<<4);
+                a3=((a3&0xF0F0F0F0u)>>4)|((a3&0x0F0F0F0Fu)<<4);
+            } else if (order == 3) { // both
+                a0=__byte_perm(a0,0,0x0123); a1=__byte_perm(a1,0,0x0123);
+                a2=__byte_perm(a2,0,0x0123); a3=__byte_perm(a3,0,0x0123);
+                a0=((a0&0xF0F0F0F0u)>>4)|((a0&0x0F0F0F0Fu)<<4);
+                a1=((a1&0xF0F0F0F0u)>>4)|((a1&0x0F0F0F0Fu)<<4);
+                a2=((a2&0xF0F0F0F0u)>>4)|((a2&0x0F0F0F0Fu)<<4);
+                a3=((a3&0xF0F0F0F0u)>>4)|((a3&0x0F0F0F0Fu)<<4);
+            }
+            uint32_t act_p=0; for (int i=0;i<8;i++) { int kx=i; float fv=(kx<K)?act[kx]:0.f; uint8_t n=0; float av=fabsf(fv); if(av>=5.f)n=7;else if(av>=3.5f)n=6;else if(av>=2.5f)n=5;else if(av>=1.75f)n=4;else if(av>=1.25f)n=3;else if(av>=0.75f)n=2;else if(av>=0.25f)n=1;if(fv<0)n|=8; act_p|=(uint32_t)n<<(i*4); }
+            uint32_t b0=act_p, b1=act_p;
+            float d0; float tmp[4]={0};
+            OMMA_MXF4NVF4_4X(d0,tmp[1],tmp[2],tmp[3], a0,a1,a2,a3, b0,b1, 0.f,0.f,0.f,0.f, ((const uint32_t*)t0)[0], 0x38383838u);
+            float err = fabsf(d0 - ref);
+            if (err < best_err) { best_err = err; best = order; }
+        }
+        s_nibble_order = best;
+        if (lane == 0)
+            printf("DEN_NIBBLE_CAL: order=%d err=%.4f\n", best, best_err);
+    }
+    __syncthreads();
+    const int nibble_order = s_nibble_order;
+
     const int my_even_row = row_base + (lane / 4);       // d0: rows 0..7
     const int my_odd_row  = row_base + (lane / 4) + 8;   // d2: rows 8..15
 
@@ -93,8 +162,12 @@ den_gemv_mxf4nvf4_kernel(
             for (int i = 0; i < 4; i++) {
                 int idx = lane * 4 + i;
                 uint32_t raw = (idx < 8) ? qs_ptr[idx] : 0;
-                raw = __byte_perm(raw, 0, 0x0123);
-                qs_data[i] = ((raw & 0xF0F0F0F0u) >> 4) | ((raw & 0x0F0F0F0Fu) << 4);
+                // Apply calibrated nibble ordering
+                if (nibble_order == 1 || nibble_order == 3)
+                    raw = __byte_perm(raw, 0, 0x0123);
+                if (nibble_order == 2 || nibble_order == 3)
+                    raw = ((raw & 0xF0F0F0F0u) >> 4) | ((raw & 0x0F0F0F0Fu) << 4);
+                qs_data[i] = raw;
             }
 
             uint32_t sfa = (mm == 0) ? s0 : (mm == 1) ? s1 : (mm == 2) ? s2 : s3;
