@@ -988,6 +988,11 @@ void ggml_cuda_op_dequantize_mul_mat_vec(
             // PRIMARY: mxf4nvf4 OMMA 4X UE4M3 native MMA path (29 cycles/MMA)
             const int N = row_diff;  // output rows
             const int K = ne00;      // shared dimension
+            static int call_count = 0;
+            if (call_count++ < 10) {
+                printf("DEN_DISPATCH NVFP4: N=%d K=%d src0_ne=[%lld,%lld] K>=256=%d\n",
+                       N, K, (long long)ne00, (long long)src0->ne[1], K >= 256);
+            }
             if (K >= 256) {
                 den_mxf4nvf4_gemv_launch(src0_dd_i, src1_dfloat, dst_dd_i, N, K, stream);
             } else {

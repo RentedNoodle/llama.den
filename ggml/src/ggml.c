@@ -16926,6 +16926,11 @@ static int ggml_compute_forward_mul_mat(
     ggml_gemv_t              const gemv                 = type_traits[type].gemv;
     ggml_gemm_t              const gemm                 = type_traits[type].gemm;
 
+    // NVFP4 escape: skip CPU dequant. CUDA backend handles via native OMMA.
+    if (src0->type == GGML_TYPE_NVFP4) {
+        return node_n;
+    }
+
     GGML_ASSERT(ne0 == ne01);
     GGML_ASSERT(ne1 == ne11);
     GGML_ASSERT(ne2 == ne12);
