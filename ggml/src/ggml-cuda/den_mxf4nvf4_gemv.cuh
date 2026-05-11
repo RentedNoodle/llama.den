@@ -1,8 +1,12 @@
 #pragma once
-// den_mxf4nvf4_gemv.cuh — M=1 GEMV via OMMA mxf4nvf4 4X UE4M3 (PRIMARY ISA)
-// Silicon-verified on GB203-300-A1: 64.0 identity test (2026-05-08)
-// HMMA m16n8k64 layout: d0/d2 = row 0/1 col 0-1, d1/d3 = row 0/1 col 4-5
-// For GEMV: only d0 at lane 0 (row 0, col 0) holds the valid dot product
+// den_mxf4nvf4_gemv.cuh — Multi-Row OMMA GEMV (16 rows per warp)
+// sass-king Kernel 23 verified fragment layout for mxf4nvf4.m16n8k64:
+//   d0,d1: row = lane/4,       cols = {(lane%4)*2, (lane%4)*2+1}
+//   d2,d3: row = lane/4 + 8,   cols = {(lane%4)*2, (lane%4)*2+1}
+// For M=1 GEMV: activation replicated across n=8 → ALL column pairs equal.
+// → d0 at EVERY lane = valid even-row dot product for THAT lane's row.
+// → d2 at EVERY lane = valid odd-row dot product.
+// → 16 distinct rows per warp. No lane filtering needed.
 
 #include "common.cuh"
 
@@ -44,31 +48,30 @@ den_gemv_mxf4nvf4_kernel(
 {
     const int warp_id = threadIdx.x / 32;
     const int lane    = threadIdx.x % 32;
-    const int row     = blockIdx.x * NWARPS + warp_id;
-    if (row >= N) return;
 
-    // Entry diagnostic for first warp's first row only
-    if (lane == 0 && row == 0) {
-        printf("GEMV_ENTRY N=%d K=%d kt_per_row=%d row_stride=%zu\n",
-               N, K, kt_per_row, (size_t)kt_per_row * 144);
-        printf("GEMV_TILE0 d4=%08x %08x %08x %08x\n",
-               ((const uint32_t*)weights)[0], ((const uint32_t*)weights)[1],
-               ((const uint32_t*)weights)[2], ((const uint32_t*)weights)[3]);
-    }
+    // 16 rows per warp: lanes 0-7 cover even rows 0-7, lanes 0-7 cover odd rows 8-15
+    const int row_base = (blockIdx.x * NWARPS + warp_id) * 16;
+    if (row_base >= N) return;
 
-    // acc = dot product accumulator for this row (d0 at lane 0)
-    float acc = 0.0f;
+    const int my_even_row = row_base + (lane / 4);       // d0: rows 0..7
+    const int my_odd_row  = row_base + (lane / 4) + 8;   // d2: rows 8..15
+
+    float acc_even = 0.0f;
+    float acc_odd  = 0.0f;
+
     const uint8_t * wptr = (const uint8_t *)weights;
     const size_t row_stride = (size_t)kt_per_row * 144;
 
     for (int kt = 0; kt < kt_per_row; kt++) {
-        const uint8_t * tile = wptr + (size_t)row * row_stride + kt * 144;
+        // Load weight tile for this lane's even row
+        const uint8_t * tile = wptr + (size_t)my_even_row * row_stride + kt * 144;
 
         uint32_t s0 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[0] : 0, 0);
         uint32_t s1 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[1] : 0, 1);
         uint32_t s2 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[2] : 0, 2);
         uint32_t s3 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)tile)[3] : 0, 3);
 
+        // Activation: quantize on-the-fly to E2M1
         uint32_t act_packed = 0;
         #pragma unroll
         for (int i = 0; i < 8; i++) {
@@ -81,6 +84,7 @@ den_gemv_mxf4nvf4_kernel(
         }
         const uint32_t b0 = act_packed, b1 = act_packed;
 
+        // 4 K-ranges per 256-element block
         #pragma unroll
         for (int mm = 0; mm < 4; mm++) {
             const uint32_t * qs_ptr = (const uint32_t *)(tile + 16 + mm * 32);
@@ -93,22 +97,21 @@ den_gemv_mxf4nvf4_kernel(
                 qs_data[i] = ((raw & 0xF0F0F0F0u) >> 4) | ((raw & 0x0F0F0F0Fu) << 4);
             }
 
-            uint32_t scale_a = (mm == 0) ? s0 : (mm == 1) ? s1 : (mm == 2) ? s2 : s3;
+            uint32_t sfa = (mm == 0) ? s0 : (mm == 1) ? s1 : (mm == 2) ? s2 : s3;
             float d0, d1, d2, d3;
             OMMA_MXF4NVF4_4X(d0, d1, d2, d3,
                              qs_data[0], qs_data[1], qs_data[2], qs_data[3],
                              b0, b1,
-                             acc, 0.0f, 0.0f, 0.0f,
-                             scale_a, 0x38383838u);
-            // d0 at lanes 0-3 all cover row 0, each for different K positions.
-            // Sum across 4-thread groups. For 1-row-per-warp, only row 0 matters.
-            acc = d0;
-            acc += __shfl_xor_sync(0x000Fu, acc, 1);
-            acc += __shfl_xor_sync(0x000Fu, acc, 2);
+                             acc_even, 0.0f, acc_odd, 0.0f,
+                             sfa, 0x38383838u);
+            acc_even = d0;  // row (lane/4), valid dot product
+            acc_odd  = d2;  // row (lane/4)+8, valid dot product
         }
     }
 
-    if (lane == 0) dst[row] = acc;
+    // Epilogue: ALL 32 lanes write their two rows
+    if (my_even_row < N) dst[my_even_row] = acc_even;
+    if (my_odd_row  < N) dst[my_odd_row]  = acc_odd;
 }
 
 static void den_mxf4nvf4_gemv_launch(
@@ -117,7 +120,8 @@ static void den_mxf4nvf4_gemv_launch(
 {
     const int kt_per_row = K / 256;
     const int nwarps = 8;
-    const int grid = (N + nwarps - 1) / nwarps;
+    const int ROWS_PER_WARP = 16;
+    const int grid = (N + nwarps * ROWS_PER_WARP - 1) / (nwarps * ROWS_PER_WARP);
     CUDA_CHECK(cudaGetLastError());
     den_gemv_mxf4nvf4_kernel<nwarps><<<grid, nwarps * 32, 0, stream>>>(
         weights, act, dst, N, K, kt_per_row);
