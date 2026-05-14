@@ -2448,6 +2448,15 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
     bool              use_mul_mat_q =  ggml_is_quantized(src0->type) && !bad_padding_clear
         && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32;
 
+    // DEN_DIAG: trace NVFP4 dispatch
+    static int nvfp4_trace_count = 0;
+    if (src0->type == GGML_TYPE_NVFP4 && nvfp4_trace_count < 20) {
+        nvfp4_trace_count++;
+        fprintf(stderr, "DEN_TRACE MUL_MAT name=%s ne0=%lld ne1=%lld src1_ne1=%lld dmmv=%d mmvq=%d mmq=%d\n",
+            src0->name, (long long)src0->ne[0], (long long)src0->ne[1],
+            (long long)src1->ne[1], use_dequantize_mul_mat_vec, use_mul_mat_vec_q, use_mul_mat_q);
+    }
+
     // if mmvq is available it's a better choice than dmmv:
 #ifndef GGML_CUDA_FORCE_DMMV
     use_dequantize_mul_mat_vec = use_dequantize_mul_mat_vec && !use_mul_mat_vec_q;
@@ -2490,12 +2499,30 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
         if (debug) printf("%s(%s): ggml_cuda_mul_mat_batched_cublas\n", __func__, dst->name);
         // KQ + KQV multi-batch without FlashAttention
         ggml_cuda_mul_mat_batched_cublas(ctx, src0, src1, dst);
-    } else if (use_dequantize_mul_mat_vec && src0->type == GGML_TYPE_NVFP4) {
+    } else if (src0->type == GGML_TYPE_NVFP4 && src1->ne[1] > 1) {
+        // NVFP4 M>1 (prefill): loop GEMV over batch dimension
+        const int K = (int)src0->ne[0];
+        const int N = (int)src0->ne[1];
+        const int M = (int)src1->ne[1];
+        static int nvfp4_prefill_count = 0;
+        if (nvfp4_prefill_count++ < 5) fprintf(stderr, "DEN_PREFILL: NVFP4 %s M=%d N=%d K=%d\n", src0->name, M, N, K);
+        cudaStream_t stream = ctx.stream();
+        for (int i = 0; i < M; i++) {
+            den_mxf4nvf4_gemv_launch(
+                src0->data, (const float *)src1->data + i * K, (float *)dst->data + i * N,
+                N, K, stream);
+        }
+    } else if (src0->type == GGML_TYPE_NVFP4 && src1->ne[1] == 1) {
         // NVFP4 M=1: use OMMA mxf4nvf4 4X UE4M3 GEMV (PRIMARY ISA)
+        const int K = (int)src0->ne[0];
+        const int N = (int)src0->ne[1];
+        static int omma_call_count = 0;
+        if (omma_call_count < 100) fprintf(stderr, "DEN_OMMA: launching GEMV for %s N=%d K=%d\n", src0->name, N, K);
+        omma_call_count++;
         cudaStream_t stream = ctx.stream();
         den_mxf4nvf4_gemv_launch(
             src0->data, (const float *)src1->data, (float *)dst->data,
-            (int)src0->ne[1], (int)src0->ne[0], stream);
+            N, K, stream);
     } else if (use_dequantize_mul_mat_vec) {
         if (debug) printf("%s(%s): ggml_cuda_op_mul_mat(ggml_cuda_op_dequantize_mul_mat_vec)\n", __func__, dst->name);
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_dequantize_mul_mat_vec, nullptr);
@@ -2506,6 +2533,11 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
         if (debug) printf("%s(%s): ggml_cuda_op_mul_mat(ggml_cuda_op_mul_mat_q)\n", __func__, dst->name);
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_q, quantize_mmq_q8_1_cuda);
     } else {
+        if (src0->type == GGML_TYPE_NVFP4) {
+            static int cublas_warn = 0;
+            if (cublas_warn++ < 5) fprintf(stderr, "DEN_WARN: NVFP4 %s falling through to cuBLAS! dmmv=%d mmvq=%d mmq=%d ne01=%lld\n",
+                src0->name, use_dequantize_mul_mat_vec, use_mul_mat_vec_q, use_mul_mat_q, (long long)src1->ne[1]);
+        }
         if (debug) printf("%s(%s, %s): ggml_cuda_op_mul_mat(ggml_cuda_op_mul_mat_cublas)\n", __func__, dst->name, ggml_type_name(src0->type));
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_mul_mat_cublas, nullptr);
     }
