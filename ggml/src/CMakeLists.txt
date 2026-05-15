@@ -456,6 +456,79 @@ if (GGML_CUDA)
             endif()
         endif()
 
+        # ─────────────────────────────────────────────────────────────────────
+        # SM120 DUAL-TOOLCHAIN: CUDA 12.8 nvcc fatbin + CUDA 12.8 Driver API
+        # ─────────────────────────────────────────────────────────────────────
+        # den_mxf4nvf4_decode_sm120.cu → CUDA 12.8 nvcc → fatbin → xxd -i → .c
+        # den_sm120_driver_bridge.cpp → CUDA 12.8 host compiler → links fatbin
+        # ZERO CUDA 13.x dependency anywhere.
+        #
+        # NOTE: CUDA 13.2 (V13.2.78) ptxas rejects sm_120a → mxf4nvf4 features
+        # unsupported on .target 'sm_120'. CUDA 12.8 ptxas assembles sm_120a
+        # correctly. Verified 2026-05-15 on GB203-300-A1.
+        # ─────────────────────────────────────────────────────────────────────
+
+        option(DEN_ENABLE_SM120_FATBIN "Enable SM120 fatbin compilation with CUDA 12.8 nvcc" ON)
+        mark_as_advanced(DEN_ENABLE_SM120_FATBIN)
+
+        # Exclude SM120 kernel .cu files from CUDA 12.8 build (they use sm_120a PTX)
+        # den_decode_sm120_aot.cu is also stale — superseded by den_mxf4nvf4_decode_sm120.cu fatbin
+        list(FILTER GGML_SOURCES_CUDA EXCLUDE REGEX "den_(mxf4nvf4_decode_sm120|decode_sm120_aot)\\.cu$")
+
+        # Always add CUDA 12.8 Driver API bridge (compiled as C++ by host compiler)
+        list(APPEND GGML_SOURCES_CUDA "ggml-cuda/den_sm120_driver_bridge.cpp")
+
+        # Ensure <cuda.h> and <cuda_runtime.h> visible to .cpp compilation
+        list(APPEND GGML_EXTRA_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})
+
+        # Output path for generated/embedded fatbin C array
+        set(SM120_FATBIN_C "${CMAKE_CURRENT_BINARY_DIR}/den_sm120_fatbin_data.c")
+
+        # Locate CUDA 12.8 for AOT fatbin generation (CUDA 13.2 ptxas can't do sm_120a)
+        find_program(CUDA_FATBIN_NVCC /usr/local/cuda-12.8/bin/nvcc)
+
+        if(CUDA_FATBIN_NVCC AND DEN_ENABLE_SM120_FATBIN)
+            set(SM120_FATBIN "${CMAKE_CURRENT_BINARY_DIR}/den_mxf4nvf4_decode_sm120.fatbin")
+
+            add_custom_command(
+                OUTPUT ${SM120_FATBIN}
+                COMMAND ${CUDA_FATBIN_NVCC}
+                    -arch=sm_120a -O3 --fatbin
+                    -maxrregcount=232
+                    -o ${SM120_FATBIN}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/ggml-cuda/den_mxf4nvf4_decode_sm120.cu
+                DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/ggml-cuda/den_mxf4nvf4_decode_sm120.cu
+                COMMENT "CUDA 12.8 fatbin: Compiling SM120 decode kernel -> fatbin"
+            )
+
+            add_custom_command(
+                OUTPUT ${SM120_FATBIN_C}
+                COMMAND xxd -i -n den_mxf4nvf4_decode_sm120_fatbin ${SM120_FATBIN} > ${SM120_FATBIN_C}
+                DEPENDS ${SM120_FATBIN}
+                COMMENT "Embedding SM120 fatbin as C array"
+            )
+
+            add_compile_definitions(DEN_SM120_DRIVER_AVAILABLE)
+            message(STATUS "SM120: CUDA 12.8 fatbin compilation enabled")
+        else()
+            # Stub: CUDA 12.8 not found or disabled — driver init() detects len==0, fails gracefully
+            file(WRITE ${SM120_FATBIN_C}
+                "// Stub: fatbin not compiled\n"
+                "unsigned char den_mxf4nvf4_decode_sm120_fatbin[] = {0};\n"
+                "unsigned int  den_mxf4nvf4_decode_sm120_fatbin_len = 0;\n"
+            )
+            if(NOT DEN_ENABLE_SM120_FATBIN)
+                message(STATUS "SM120: DEN_ENABLE_SM120_FATBIN=OFF — persistent kernel disabled")
+            else()
+                message(WARNING "CUDA 12.8 fatbin compiler not found at /usr/local/cuda-12.8/bin/nvcc — SM120 persistent kernel disabled")
+            endif()
+        endif()
+
+        # Add generated/embedded fatbin C array to ggml library (real or stub)
+        list(APPEND GGML_SOURCES_CUDA ${SM120_FATBIN_C})
+        set_source_files_properties(${SM120_FATBIN_C} PROPERTIES LANGUAGE C)
+        # ─────────────────────────────────────────────────────────────────────
+
         if (GGML_NCCL)
             find_package(NCCL)
             if (NCCL_FOUND)

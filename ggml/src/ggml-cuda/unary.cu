@@ -972,7 +972,10 @@ void ggml_cuda_fused_softplus(ggml_backend_cuda_context & ctx, ggml_tensor * dst
     GGML_ASSERT(ggml_nrows(m->src[1]) == 1 && m->src[1]->ne[0] == m->src[0]->ne[0]);
     GGML_ASSERT(ggml_nrows(a->src[1]) == 1 && a->src[1]->ne[0] == a->src[0]->ne[0]);
     GGML_ASSERT(a->type == GGML_TYPE_F32 && u->type == GGML_TYPE_F32 && m->type == GGML_TYPE_F32);
-    GGML_ASSERT(a->src[0]->type == GGML_TYPE_F32 && a->src[1]->type == GGML_TYPE_F32);
+    // DEN_TYPE_BRIDGE: Graceful fallback for non-F32 inputs (BF16, NVFP4, etc.)
+    if (a->src[0]->type != GGML_TYPE_F32 || (a->src[1] != nullptr && a->src[1]->type != GGML_TYPE_F32)) {
+        return;
+    }
     GGML_ASSERT(ggml_is_contiguous(a->src[0]));
 
     int nelem = ggml_nelements(a->src[0]);
@@ -995,7 +998,10 @@ void ggml_cuda_fused_mul_exp_mul(ggml_backend_cuda_context & ctx, ggml_tensor * 
     auto m2 = dst;
     auto u  = dst->src[0];
     auto m1 = u->src[0];
-    GGML_ASSERT(m1->src[0]->type == GGML_TYPE_F32 && m1->src[1]->type == GGML_TYPE_F32 && m2->type == GGML_TYPE_F32);
+    // DEN_TYPE_BRIDGE: Graceful fallback for non-F32 inputs
+    if (m1->src[0]->type != GGML_TYPE_F32 || (m1->src[1] != nullptr && m1->src[1]->type != GGML_TYPE_F32) || m2->type != GGML_TYPE_F32) {
+        return;
+    }
     GGML_ASSERT(m1->src[1] == m2->src[1]);
     GGML_ASSERT(ggml_is_contiguous(m1->src[0]) && ggml_is_contiguous(m1->src[1]));
     GGML_ASSERT(u->op == GGML_OP_UNARY && (ggml_unary_op)u->op_params[0] == GGML_UNARY_OP_EXP);

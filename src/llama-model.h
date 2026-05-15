@@ -466,6 +466,12 @@ struct llama_model {
     // for quantize-stats only
     std::vector<std::pair<std::string, struct ggml_tensor *>> tensors_by_name;
 
+    // NVFP4 per-tensor scale normalization factors.
+    // Key = tensor name (e.g. "blk.0.attn_qkv.weight"), value = norm_factor.
+    // Populated during model loading from "_n" suffix tensors.
+    // _n tensors are 1D float32 arrays of per-tile norm factors
+    std::unordered_map<std::string, std::vector<float>> nvfp4_norm_factors;
+
     int64_t t_load_us = 0;
     int64_t t_start_us = 0;
 

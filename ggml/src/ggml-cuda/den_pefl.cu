@@ -10,6 +10,9 @@
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
 #include <cstdint>
+#include <cstdio>
+#include <vector>
+#include <algorithm>
 
 struct pefl_tile_record_t {
     uint32_t tile_id;

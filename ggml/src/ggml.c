@@ -1343,6 +1343,19 @@ static const ggml_type_traits_t type_traits[GGML_TYPE_COUNT] = {
         .nrows                    = 1,
         .row_meta_size            = 0,
     },
+    [GGML_TYPE_NVFP4] = {
+        .type_name                = "nvfp4",
+        .blck_size                = QK_NVFP4,
+        .type_size                = sizeof(block_nvfp4),
+        .is_quantized             = true,
+        .to_float                 = NULL,  // NVFP4: no CPU dequant path — CUDA OMMA only
+        .from_float               = NULL,  // quantize handled on-the-fly in kernel
+        .from_float_ref           = NULL,
+        .vec_dot                  = NULL,  // OMMA-only: no CPU fallback exists
+        .vec_dot_type             = GGML_TYPE_NVFP4, // force CUDA routing, CPU will skip
+        .nrows                    = 1,
+        .row_meta_size            = 0,
+    },
     [GGML_TYPE_IQ4_KS] = {
         .type_name                = "iq4_ks",
         .blck_size                = QK_K,

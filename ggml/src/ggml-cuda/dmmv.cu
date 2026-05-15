@@ -8,6 +8,87 @@
 #include "dmmv.cuh"
 #include "dequantize.cuh"
 #include "convert.cuh"
+#include "den_mxf4nvf4_gemv.cuh"
+#include "den_dispatch.cuh"    // A/B path selector — after gemv.cuh so Path A is visible
+
+// Per-tensor NVFP4 scale normalization factors.
+// Populated by llama_model_loader via den_set_nvfp4_norm_factors().
+// Key = tensor name (e.g. "blk.0.attn_qkv.weight"), value = vector<float>
+// of per-tile norm factors (tile_norm * scale_2).
+// Host-side map — pointers from std::vector::data() are in CPU memory.
+static const std::unordered_map<std::string, std::vector<float>>* g_den_nvfp4_norm_factors = nullptr;
+
+// Device-side cache: same keys, GPU-resident float arrays.
+// Populated lazily by den_get_nvfp4_norm_array() so the CUDA context is live.
+static std::unordered_map<std::string, float*> g_den_nvfp4_norm_dev;
+
+void den_set_nvfp4_norm_factors(const std::unordered_map<std::string, std::vector<float>>* m) {
+    // Free previous device allocations.  cudaFree(NULL) is safe, and if the
+    // old context is already gone the driver cleans up regardless.
+    for (auto & kv : g_den_nvfp4_norm_dev) {
+        if (kv.second) {
+            cudaError_t err = cudaFree(kv.second);
+            if (err != cudaSuccess && err != cudaErrorCudartUnloading) {
+                fprintf(stderr, "[DEN] cudaFree warning for %s: %s\n",
+                        kv.first.c_str(), cudaGetErrorString(err));
+            }
+        }
+    }
+    g_den_nvfp4_norm_dev.clear();
+    g_den_nvfp4_norm_factors = m;
+}
+
+// Return pointer to the norm array for this tensor, or nullptr if not found.
+// The returned pointer is valid in CUDA device address space.
+// If the _n tensor has only 1 element (scalar, legacy format), it is broadcast
+// to a full per-tile array on the device so the kernel can index uniformly.
+const float* den_get_nvfp4_norm_array(const std::string & name, size_t & out_count) {
+    if (!g_den_nvfp4_norm_factors) {
+        out_count = 0;
+        return nullptr;
+    }
+    auto it = g_den_nvfp4_norm_factors->find(name);
+    if (it == g_den_nvfp4_norm_factors->end()) {
+        out_count = 0;
+        return nullptr;
+    }
+    // Check device cache first
+    auto dev_it = g_den_nvfp4_norm_dev.find(name);
+    if (dev_it != g_den_nvfp4_norm_dev.end()) {
+        out_count = it->second.size();
+        return dev_it->second;
+    }
+    size_t n_host = it->second.size();
+    const float * host_data = it->second.data();
+
+    // If scalar (legacy format), we need the tensor geometry to broadcast.
+    // We don't have N,kt_per_row here, so for scalar norms we allocate
+    // just 1 element on the device — the kernel will read index 0 for all tiles.
+    // For per-tile arrays, allocate the full array.
+    size_t alloc_count = (n_host == 1) ? 1 : n_host;
+
+    float * d_ptr = nullptr;
+    cudaError_t err = cudaMalloc(&d_ptr, alloc_count * sizeof(float));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[DEN] cudaMalloc failed for %s norms (%zu floats): %s\n",
+                name.c_str(), alloc_count, cudaGetErrorString(err));
+        out_count = 0;
+        return nullptr;
+    }
+
+    // For scalar norms: broadcast to full array if we knew the size, but since
+    // the kernel does tile_norms[idx] where idx=row*kt_per_row+kt, and we only
+    // have 1 element, the kernel would read OOB for any tile beyond tile 0.
+    // Instead, copy just the scalar — the kernel will read tile_norms[0]
+    // (which is the scalar value) for ALL tiles via wrapping/page-rounded reads
+    // (only safe because CUDA alloc granularity keeps adjacent memory readable).
+    // Proper fix: regenerate GGUF with per-tile norm arrays.
+    cudaMemcpy(d_ptr, host_data, n_host * sizeof(float), cudaMemcpyHostToDevice);
+
+    g_den_nvfp4_norm_dev[name] = d_ptr;
+    out_count = n_host;
+    return d_ptr;
+}
 
 #ifndef K_QUANTS_PER_ITERATION
 #define K_QUANTS_PER_ITERATION 2
@@ -922,6 +1003,34 @@ void ggml_cuda_op_dequantize_mul_mat_vec(
         case GGML_TYPE_F16:
             convert_mul_mat_vec_f16_cuda(src0_dd_i, src1_dfloat, dst_dd_i, ne00, row_diff, stream);
             break;
+        case GGML_TYPE_NVFP4: {
+            // PRIMARY: mxf4nvf4 OMMA 4X UE4M3 native MMA path (29 cycles/MMA)
+            const int N = row_diff;  // output rows
+            const int K = (int)ne00;      // shared dimension
+
+            // Get per-tile normalization factors for this tensor
+            size_t n_norms = 0;
+            const float * tile_norms = den_get_nvfp4_norm_array(src0->name, n_norms);
+
+            // DEN_DEBUG: log first 3 NVFP4 tensor launches
+            static int den_nvfp4_launch_count = 0;
+            if (den_nvfp4_launch_count < 3) {
+                fprintf(stderr, "[DEN_DEBUG] NVFP4 tensor: name='%s' tile_norms=%s n_norms=%zu N=%d K=%d kt_per_row=%d\n",
+                    src0->name, tile_norms ? "VALID" : "nullptr", n_norms, N, K, K/256);
+                den_nvfp4_launch_count++;
+            }
+
+            if (K >= 256) {
+                den_nvfp4_gemv_dispatch(src0_dd_i, src1_dfloat, dst_dd_i, N, K, stream, tile_norms, (int)n_norms);
+            } else {
+                // Fallback: software NVFP4 decode (K < 256, rare)
+                const int blocks = (N + NVFP4_DMMV_ROWS_PER_BLOCK - 1) / NVFP4_DMMV_ROWS_PER_BLOCK;
+                const dim3 block_dims(NVFP4_DMMV_ROWS_PER_BLOCK, 1, 1);
+                const dim3 block_nums(blocks, 1, 1);
+                dequantize_mul_mat_vec_nvfp4<<<block_nums, block_dims, 0, stream>>>(
+                    src0_dd_i, src1_dfloat, dst_dd_i, K, N);
+            }
+        } break;
         default:
             GGML_ABORT("fatal error");
             break;

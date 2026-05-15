@@ -1,5 +1,8 @@
 #include "common.cuh"
 
+#include <string>
+#include <unordered_map>
+
 // dmmv = dequantize_mul_mat_vec
 
 // TODO: remove this?
@@ -18,3 +21,8 @@ void ggml_cuda_op_dequantize_mul_mat_vec(
     const int64_t src1_padded_row_size, cudaStream_t stream);
 
 bool ggml_cuda_dmmv_type_supported(ggml_type src0_type);
+
+// NVFP4 scale normalization: OMMA kernel must multiply output by norm_factor
+// to restore correct magnitude after UE4M3 range normalization.
+void den_set_nvfp4_norm_factors(const std::unordered_map<std::string, std::vector<float>>* m);
+const float* den_get_nvfp4_norm_array(const std::string & name, size_t & out_count);

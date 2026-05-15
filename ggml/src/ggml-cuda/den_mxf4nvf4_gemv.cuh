@@ -1,22 +1,24 @@
 #pragma once
-// den_mxf4nvf4_gemv.cuh — Oracle-verified m16n8k64 GEMV
-// a1/a2 swap applied per OMA oracle Probe B.
-// Single-tile loading for simplicity (one row's weights for all rows).
+// den_mxf4nvf4_gemv.cuh — SM120 Native NVFP4 GEMV (SINGLE-OMMA, E010-FIXED)
 #include "common.cuh"
 
+// E010 fix: runtime zero register (not literal "r"(0))
 #define OMMA_MXF4NVF4_4X(d0,d1,d2,d3, a0,a1,a2,a3, b0,b1, c0,c1,c2,c3, sfa,sfb) \
-    asm volatile(                                                                    \
-        "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X"                \
-        ".m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "                              \
-        "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},"                                     \
-        "{%10,%11,%12,%13},"                                                        \
-        "{%14},{%15,%16},{%17},{%18,%19};"                                          \
-        :"=f"(d0),"=f"(d1),"=f"(d2),"=f"(d3)                                      \
-        :"r"(a0),"r"(a1),"r"(a2),"r"(a3),"r"(b0),"r"(b1),                        \
-         "f"(c0),"f"(c1),"f"(c2),"f"(c3),                                          \
-         "r"(sfa),"h"((uint16_t)0),"h"((uint16_t)0),                              \
-         "r"(sfb),"h"((uint16_t)0),"h"((uint16_t)0)                               \
-    )
+    do { \
+        uint32_t zero_reg = 0; \
+        asm volatile( \
+            "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X " \
+            ".m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 " \
+            "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9}," \
+            "{%10,%11,%12,%13}," \
+            "{%14},{%15,%16},{%17},{%18,%19};" \
+            :"=f"(d0),"=f"(d1),"=f"(d2),"=f"(d3) \
+            :"r"(a0),"r"(a1),"r"(a2),"r"(a3),"r"(b0),"r"(b1), \
+             "f"(c0),"f"(c1),"f"(c2),"f"(c3), \
+             "r"(sfa),"h"((uint16_t)0),"h"((uint16_t)0), \
+             "r"(sfb),"h"((uint16_t)0),"h"((uint16_t)0) \
+            : "memory"); \
+    } while(0)
 
 static __device__ __forceinline__ uint8_t quant_f32_e2m1(float fv) {
     float av = fabsf(fv); int sign = (fv < 0);
@@ -27,18 +29,44 @@ static __device__ __forceinline__ uint8_t quant_f32_e2m1(float fv) {
     else if (av >= 1.75f) n = 4;
     else if (av >= 1.25f) n = 3;
     else if (av >= 0.75f) n = 2;
-    else if (av >= 0.25f) n = 1;
+    else if (av >= 0.125f) n = 1;
     if (sign) n |= 8;
     return n;
 }
 
+// 4-bit code → full 8-bit UE4M3 byte for OMMA hardware.
+// Without this mapping, code 8 (1.0) becomes byte 0x08 which HW decodes as 0.015625.
+__device__ constexpr uint8_t ue4m3_code_to_byte[16] = {
+    0x00, 0x18, 0x20, 0x24, 0x28, 0x2A, 0x2C, 0x2E,
+    0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
+};
+
+static __device__ __forceinline__ uint8_t quant_f32_ue4m3(float v) {
+    if (v <= 0.03125f) return 0;
+    if (v <= 0.09375f) return 1;
+    if (v <= 0.15625f) return 2;
+    if (v <= 0.21875f) return 3;
+    if (v <= 0.28125f) return 4;
+    if (v <= 0.34375f) return 5;
+    if (v <= 0.40625f) return 6;
+    if (v <= 0.71875f) return 7;
+    if (v <= 1.0625f) return 8;
+    if (v <= 1.1875f) return 9;
+    if (v <= 1.3125f) return 10;
+    if (v <= 1.4375f) return 11;
+    if (v <= 1.5625f) return 12;
+    if (v <= 1.6875f) return 13;
+    if (v <= 1.8125f) return 14;
+    return 15;
+}
+
 template <int NWARPS>
-__global__ void __launch_bounds__(NWARPS * 32, 2)
-den_gemv_mxf4nvf4_kernel(
+__global__ void den_gemv_mxf4nvf4_kernel(
     const uint8_t * __restrict__ w,
     const float   * __restrict__ x,
     float         * __restrict__ y,
-    int N, int K, int kt_per_row)
+    int N, int K, int kt_per_row,
+    const float * tile_norms, int n_norms)
 {
     const int warp_id = threadIdx.x / 32;
     const int lane    = threadIdx.x & 31;
@@ -46,69 +74,116 @@ den_gemv_mxf4nvf4_kernel(
     const int out_base = out_tile * 16;
     if (out_base >= N) return;
 
-    const int r = lane / 4;
-    const int kg = lane & 3;
-    const int row0 = out_base + r;
-    const int row1 = out_base + r + 8;
-    const size_t row_stride = (size_t)kt_per_row * 144;
+    const int r = lane / 4;          // 0-7
+    const int kg = lane & 3;         // 0-3
+    const int row0 = out_base + r;   // rows 0-7
+    const int row1 = out_base + r + 8; // rows 8-15
 
-    float acc0 = 0.0f, acc1 = 0.0f;
+    const size_t row_stride = (size_t)kt_per_row * 144; // 144-byte tiles
+
+    float total0 = 0.0f, total1 = 0.0f, total2 = 0.0f, total3 = 0.0f;
 
     for (int kt = 0; kt < kt_per_row; kt++) {
+        float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+
+        // Load tile pointers (144-byte layout: scales 0-15, nibbles 16-143)
         const uint8_t * tile0 = w + (size_t)row0 * row_stride + kt * 144;
         const uint8_t * tile1 = w + (size_t)row1 * row_stride + kt * 144;
 
-        #pragma unroll
         for (int mm = 0; mm < 4; mm++) {
             const uint32_t * q0 = (const uint32_t *)(tile0 + 16 + mm * 32);
             const uint32_t * q1 = (const uint32_t *)(tile1 + 16 + mm * 32);
 
-            // Oracle-verified: (a0,a2)→d0/d1, (a1,a3)→d2/d3
-            uint32_t a0 = q0[kg * 2];      // row r0, K[kg*16..kg*16+7]
-            uint32_t a2 = q0[kg * 2 + 1];  // row r0, K[kg*16+8..kg*16+15]
-            uint32_t a1 = q1[kg * 2];      // row r1, K[kg*16..kg*16+7]
-            uint32_t a3 = q1[kg * 2 + 1];  // row r1, K[kg*16+8..kg*16+15]
+            // Load A-fragments from BOTH rows (single-OMMA requires all 4 regs valid)
+            uint32_t a0 = q0[kg * 2];
+            uint32_t a2 = q0[kg * 2 + 1];
+            uint32_t a1 = q1[kg * 2];
+            uint32_t a3 = q1[kg * 2 + 1];
 
-            // B-fragment: 8 unique act nibbles, K[kg*16..kg*16+7]→b0, K[kg*16+8..kg*16+15]→b1
+            // B-fragment: dynamic sfb (same as before)
             int kb = kt * 256 + mm * 64 + kg * 16;
+            float x_local[16];
+            float local_max = 0.0f;
+            #pragma unroll
+            for (int i = 0; i < 16; i++) {
+                float val = ((kb+i) < K) ? x[kb+i] : 0.0f;
+                x_local[i] = val;
+                float av = fabsf(val);
+                if (av > local_max) local_max = av;
+            }
+            float block_max = local_max;
+            #pragma unroll
+            for (int mask = 1; mask <= 2; mask *= 2) {
+                float other = __shfl_xor_sync(0xffffffff, block_max, mask);
+                if (other > block_max) block_max = other;
+            }
+            float sfb_f = fmaxf(0.0625f, fminf(1.875f, block_max * 0.333333f));
+            float sfb_inv = 1.0f / sfb_f;
+            uint8_t sfb_code = quant_f32_ue4m3(sfb_f);
+            uint32_t sfb_packed = 0x01010101u * (uint32_t)ue4m3_code_to_byte[sfb_code];
             uint32_t b0=0, b1=0;
             #pragma unroll
             for (int i = 0; i < 8; i++) {
-                b0 |= ((uint32_t)quant_f32_e2m1(((kb+i) < K) ? x[kb+i] : 0.0f) << (i*4));
-                b1 |= ((uint32_t)quant_f32_e2m1(((kb+8+i) < K) ? x[kb+8+i] : 0.0f) << (i*4));
+                b0 |= ((uint32_t)quant_f32_e2m1(x_local[i] * sfb_inv) << (i*4));
+                b1 |= ((uint32_t)quant_f32_e2m1(x_local[8+i] * sfb_inv) << (i*4));
             }
 
+            // Load scales: tile0 scale used for all 16 rows
             uint32_t sfa = ((const uint32_t *)tile0)[mm];
+
+            // SINGLE OMMA call — all 4 A-regs valid, all 4 accumulators used
             float d0, d1, d2, d3;
-            OMMA_MXF4NVF4_4X(d0, d1, d2, d3,
-                             a0, a1, a2, a3,
-                             b0, b1,
-                             acc0, 0.0f, acc1, 0.0f,
-                             sfa, 0x38383838u);
-            acc0 = d0;
-            acc1 = d2;
+            OMMA_MXF4NVF4_4X(d0, d1, d2, d3, a0, a1, a2, a3, b0, b1, acc0, acc1, acc2, acc3, sfa, sfb_packed);
+
+            // Accumulate results for both rows
+            acc0 = d0; acc1 = d1; acc2 = d2; acc3 = d3;
+        }
+
+        // Shuffle-reduce across kg
+        #pragma unroll
+        for (int mask = 1; mask <= 2; mask *= 2) {
+            acc0 += __shfl_xor_sync(0xffffffff, acc0, mask);
+            acc1 += __shfl_xor_sync(0xffffffff, acc1, mask);
+            acc2 += __shfl_xor_sync(0xffffffff, acc2, mask);
+            acc3 += __shfl_xor_sync(0xffffffff, acc3, mask);
+        }
+
+        // Apply per-tile norm and accumulate
+        if (kg == 0) {
+            float n0 = 1.0f, n1 = 1.0f;
+            if (tile_norms) {
+                if (n_norms == 1) {
+                    n0 = tile_norms[0]; n1 = tile_norms[0];
+                } else {
+                    n0 = tile_norms[row0 * kt_per_row + kt];
+                    n1 = tile_norms[row1 * kt_per_row + kt];
+                }
+            }
+            total0 += acc0 * n0; total1 += acc1 * n0;
+            total2 += acc2 * n1; total3 += acc3 * n1;
         }
     }
 
-    acc0 += __shfl_xor_sync(0xffffffff, acc0, 1);
-    acc0 += __shfl_xor_sync(0xffffffff, acc0, 2);
-    acc1 += __shfl_xor_sync(0xffffffff, acc1, 1);
-    acc1 += __shfl_xor_sync(0xffffffff, acc1, 2);
+    // Write output for both rows
     if (kg == 0) {
-        if (row0 < N) y[row0] = acc0;
-        if (row1 < N) y[row1] = acc1;
+        float row0_out = total0;
+        float row1_out = total2;
+        if (row0 < N) y[row0] = row0_out;
+        if (row1 < N) y[row1] = row1_out;
     }
 }
 
 static void den_mxf4nvf4_gemv_launch(
     const void * weights, const float * act, float * dst,
-    int N, int K, cudaStream_t stream)
+    int N, int K, cudaStream_t stream,
+    const float * tile_norms = nullptr, int n_norms = 0)
 {
     const int kt_per_row = K / 256;
     const int nwarps = 8;
     const int grid = (N + nwarps * 16 - 1) / (nwarps * 16);
+
     CUDA_CHECK(cudaGetLastError());
     den_gemv_mxf4nvf4_kernel<nwarps><<<grid, nwarps * 32, 0, stream>>>(
-        (const uint8_t*)weights, act, dst, N, K, kt_per_row);
+        (const uint8_t*)weights, act, dst, N, K, kt_per_row, tile_norms, n_norms);
     CUDA_CHECK(cudaGetLastError());
 }
