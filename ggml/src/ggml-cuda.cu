@@ -32,8 +32,10 @@
 #include "ggml-cuda/pool2d.cuh"
 #include "ggml-cuda/quantize.cuh"
 #include "ggml-cuda/quantize_nvfp4.cuh"
-#include "ggml-cuda/den_dispatch.cuh"
-#include "ggml-cuda/den_mxf4nvf4_gemv.cuh"
+#include "ggml-cuda/den_mxf4nvf4_gemv.cuh"    // Path A — must precede den_dispatch.cuh
+#include "ggml-cuda/den_sm120_driver_bridge.hpp"
+#include "ggml-cuda/den_dispatch.cuh"          // A/B path selector — after gemv/driver
+#include "ggml-cuda/den_route_dispatcher.hpp"
 #include "ggml-cuda/den_mxf8f6f4_gemv.cuh"
 #include "ggml-cuda/rope.cuh"
 #include "ggml-cuda/scale.cuh"
@@ -293,6 +295,10 @@ static ggml_cuda_device_info ggml_cuda_init() {
         }
     }
 #endif
+
+    // ── Den NVFP4 A/B dispatch init (Path B: driver bridge fatbin load) ────
+    den_nvfp4_dispatch_init();
+
     return info;
 }
 
@@ -2448,15 +2454,6 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
     bool              use_mul_mat_q =  ggml_is_quantized(src0->type) && !bad_padding_clear
         && src1->type == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32;
 
-    // DEN_DIAG: trace NVFP4 dispatch
-    static int nvfp4_trace_count = 0;
-    if (src0->type == GGML_TYPE_NVFP4 && nvfp4_trace_count < 20) {
-        nvfp4_trace_count++;
-        fprintf(stderr, "DEN_TRACE MUL_MAT name=%s ne0=%lld ne1=%lld src1_ne1=%lld dmmv=%d mmvq=%d mmq=%d\n",
-            src0->name, (long long)src0->ne[0], (long long)src0->ne[1],
-            (long long)src1->ne[1], use_dequantize_mul_mat_vec, use_mul_mat_vec_q, use_mul_mat_q);
-    }
-
     // if mmvq is available it's a better choice than dmmv:
 #ifndef GGML_CUDA_FORCE_DMMV
     use_dequantize_mul_mat_vec = use_dequantize_mul_mat_vec && !use_mul_mat_vec_q;
@@ -2500,29 +2497,56 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
         // KQ + KQV multi-batch without FlashAttention
         ggml_cuda_mul_mat_batched_cublas(ctx, src0, src1, dst);
     } else if (src0->type == GGML_TYPE_NVFP4 && src1->ne[1] > 1) {
-        // NVFP4 M>1 (prefill): loop GEMV over batch dimension
+        // NVFP4 M>1 (prefill): try SM120 driver bridge, fall back to loop GEMV
         const int K = (int)src0->ne[0];
         const int N = (int)src0->ne[1];
         const int M = (int)src1->ne[1];
-        static int nvfp4_prefill_count = 0;
-        if (nvfp4_prefill_count++ < 5) fprintf(stderr, "DEN_PREFILL: NVFP4 %s M=%d N=%d K=%d\n", src0->name, M, N, K);
+        size_t n_norms = 0;
+        const float * tile_norms = den_get_nvfp4_norm_array(src0->name, n_norms);
         cudaStream_t stream = ctx.stream();
-        for (int i = 0; i < M; i++) {
-            den_mxf4nvf4_gemv_launch(
-                src0->data, (const float *)src1->data + i * K, (float *)dst->data + i * N,
-                N, K, stream);
+        bool sm120_ok = false;
+        // SM120 persistent kernel (Path B) — disabled by default.
+        // Enable only when forced via DEN_DISABLE_SM120_DRIVER=0 AND DEN_ROUTE=sm120.
+        // The persistent kernel can GPU-hang; use proven GEMV (Path A) instead.
+        {
+            const char* den_route = getenv("DEN_ROUTE");
+            bool force_path_b = (den_route && strcmp(den_route, "sm120") == 0);
+            if (force_path_b && DenSm120Driver::instance().is_initialized()) {
+                sm120_ok = DenSm120Driver::instance().launch_gemv(
+                    (const uint8_t*)src0->data, (const float*)src1->data, (float*)dst->data,
+                    N, K, stream, tile_norms, (int)n_norms);
+            }
+        }
+        if (!sm120_ok) {
+            // Fallback: loop legacy GEMV over batch
+            for (int i = 0; i < M; i++) {
+                den_mxf4nvf4_gemv_launch(
+                    src0->data, (const float *)src1->data + i * K, (float *)dst->data + i * N,
+                    N, K, stream, tile_norms, (int)n_norms);
+            }
         }
     } else if (src0->type == GGML_TYPE_NVFP4 && src1->ne[1] == 1) {
-        // NVFP4 M=1: use OMMA mxf4nvf4 4X UE4M3 GEMV (PRIMARY ISA)
+        // NVFP4 M=1 (decode): try SM120 driver bridge, fall back to legacy GEMV
         const int K = (int)src0->ne[0];
         const int N = (int)src0->ne[1];
-        static int omma_call_count = 0;
-        if (omma_call_count < 100) fprintf(stderr, "DEN_OMMA: launching GEMV for %s N=%d K=%d\n", src0->name, N, K);
-        omma_call_count++;
+        size_t n_norms = 0;
+        const float * tile_norms = den_get_nvfp4_norm_array(src0->name, n_norms);
         cudaStream_t stream = ctx.stream();
-        den_mxf4nvf4_gemv_launch(
-            src0->data, (const float *)src1->data, (float *)dst->data,
-            N, K, stream);
+        bool sm120_ok = false;
+        {
+            const char* den_route = getenv("DEN_ROUTE");
+            bool force_path_b = (den_route && strcmp(den_route, "sm120") == 0);
+            if (force_path_b && DenSm120Driver::instance().is_initialized()) {
+                sm120_ok = DenSm120Driver::instance().launch_gemv(
+                    (const uint8_t*)src0->data, (const float*)src1->data, (float*)dst->data,
+                    N, K, stream, tile_norms, (int)n_norms);
+            }
+        }
+        if (!sm120_ok) {
+            den_mxf4nvf4_gemv_launch(
+                src0->data, (const float *)src1->data, (float *)dst->data,
+                N, K, stream, tile_norms, (int)n_norms);
+        }
     } else if (use_dequantize_mul_mat_vec) {
         if (debug) printf("%s(%s): ggml_cuda_op_mul_mat(ggml_cuda_op_dequantize_mul_mat_vec)\n", __func__, dst->name);
         ggml_cuda_op_mul_mat(ctx, src0, src1, dst, ggml_cuda_op_dequantize_mul_mat_vec, nullptr);

@@ -59,11 +59,10 @@
 // den_loader.cuh has no CUDA deps; safe to include unconditionally.
 #include "ggml-cuda/den_loader.cuh"
 
-// DEN routing mask (defined in ggml-cuda/topk-moe.cu)
-// Forward-declared to avoid CUDA header dependency in plain C++ compilation
-void den_mask_try_activate(int n_experts, const char * arch_name);
-bool den_mask_is_enabled();
-void den_routing_telemetry_print();
+// DEN routing mask stubs (CUDA objects not linked in minimal build)
+void den_mask_try_activate(int, const char *) {}
+bool den_mask_is_enabled() { return false; }
+void den_routing_telemetry_print() {}
 
 #ifdef __has_include
     #if __has_include(<unistd.h>)
@@ -2849,6 +2848,39 @@ static bool llm_load_tensors(
         if (defer_expert_mmap) {
             ml.drop_mmap_expert_pages();
         }
+
+#ifdef GGML_USE_CUDA
+        // Load NVFP4 norm factors from _n tensors
+        // (converter emits 1D float32 arrays of per-tile norm factors)
+        {
+            model.nvfp4_norm_factors.clear();
+            for (const auto & w : ml.weights) {
+                const char * name = ggml_get_name(w.tensor);
+                size_t name_len = strlen(name);
+                if (name_len > 2 && name[name_len-2] == '_' && name[name_len-1] == 'n') {
+                    const size_t n_floats = (size_t)ggml_nelements(w.tensor);
+                    std::string base_name(name, name_len - 2);
+                    auto & vec = model.nvfp4_norm_factors[base_name];
+                    vec.resize(n_floats);
+                    if (ml.use_mmap) {
+                        const auto & mapping = ml.mappings.at(w.idx);
+                        memcpy(vec.data(), (uint8_t *)mapping->addr() + w.offs, n_floats * sizeof(float));
+                    } else {
+                        const auto & file = ml.files.at(w.idx);
+                        file->seek(w.offs, SEEK_SET);
+                        file->read_raw(vec.data(), n_floats * sizeof(float));
+                    }
+                }
+            }
+            if (!model.nvfp4_norm_factors.empty()) {
+                // Forward declaration of the CUDA-side setter
+                void den_set_nvfp4_norm_factors(const std::unordered_map<std::string, std::vector<float>>*);
+                den_set_nvfp4_norm_factors(&model.nvfp4_norm_factors);
+                LLAMA_LOG_INFO("%s: loaded %zu NVFP4 norm factor arrays\n", __func__, model.nvfp4_norm_factors.size());
+            }
+        }
+#endif
+
     }
 
     if (model.arch == LLM_ARCH_DEEPSEEK2 || model.arch == LLM_ARCH_GLM_DSA || model.arch == LLM_ARCH_MISTRAL4) {

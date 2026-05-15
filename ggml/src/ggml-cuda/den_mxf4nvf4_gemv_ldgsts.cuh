@@ -115,17 +115,23 @@ __global__ void den_mxf4nvf4_gemv_ldgsts(
                 qs_data[j] = __shfl_sync(0xffffffff, qs_ptr[j], j % 4);
             }
 
-            // mxf4nvf4 OMMA: 16×8×64, 4X UE4M3
+            // mxf4nvf4 OMMA: 16×8×64, 4X UE4M3, 3-operand scale format
+            float d0 = acc0, d1 = acc1, d2 = 0.0f, d3 = 0.0f;
+            uint32_t sfa = (uint32_t)s0, sfb = (uint32_t)s0;
             asm volatile(
                 "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X"
                 ".m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
-                "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%0,%1,%2,%3},"
-                "%10,{0,0},%11,{0,0};"
-                : "+f"(acc0), "+f"(acc1)
+                "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},"
+                "{%10,%11,%12,%13},"
+                "{%14},{%15,%16},{%17},{%18,%19};"
+                : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
                 : "r"(qs_data[0]), "r"(qs_data[1]), "r"(qs_data[2]), "r"(qs_data[3]),
                   "r"(b0), "r"(b1),
-                  "r"(s0), "r"(s0)  // SFA=SFB colocation (both = s0)
-            );
+                  "f"(acc0), "f"(acc1), "f"(0.0f), "f"(0.0f),
+                  "r"(sfa), "h"((uint16_t)0), "h"((uint16_t)0),
+                  "r"(sfb), "h"((uint16_t)0), "h"((uint16_t)0)
+                : "memory");
+            acc0 = d0; acc1 = d1; acc2 = d2; acc3 = d3;
         }
 
         // ── Flip buffer ───────────────────────────────────────────────────

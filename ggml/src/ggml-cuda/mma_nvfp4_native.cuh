@@ -144,24 +144,34 @@ namespace ggml_cuda_mma {
             float *     Dxi = (float *) D.x;
 
             if constexpr (type == GGML_TYPE_MXFP4) {
+                float d0 = Dxi[0], d1 = Dxi[1], d2 = Dxi[2], d3 = Dxi[3];
                 asm volatile(
                     "mma.sync.aligned.kind::mxf4.block_scale.scale_vec::2X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue8m0 "
-                    "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3}, "
-                    "%10, {0, 0}, %11, {0, 0};"
-                    : "+f"(Dxi[0]), "+f"(Dxi[1]), "+f"(Dxi[2]), "+f"(Dxi[3])
+                    "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13},"
+                    "{%14},{%15,%16},{%17},{%18,%19};"
+                    : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
                     : "r"(Axi[0]), "r"(Axi[1]), "r"(Axi[2]), "r"(Axi[3]),
                       "r"(Bxi[0]), "r"(Bxi[1]),
-                      "r"(a_scale), "r"(b_scale));
+                      "f"(Dxi[0]), "f"(Dxi[1]), "f"(Dxi[2]), "f"(Dxi[3]),
+                      "r"(a_scale), "h"((uint16_t)0), "h"((uint16_t)0),
+                      "r"(b_scale), "h"((uint16_t)0), "h"((uint16_t)0)
+                    : "memory");
+                Dxi[0] = d0; Dxi[1] = d1; Dxi[2] = d2; Dxi[3] = d3;
             } else {
-                // NVFP4: scale_vec::4X with ue4m3 block scales
+                // NVFP4: scale_vec::4X with ue4m3 block scales, 3-operand scale format
+                float d0 = Dxi[0], d1 = Dxi[1], d2 = Dxi[2], d3 = Dxi[3];
                 asm volatile(
                     "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X.m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 "
-                    "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3}, "
-                    "%10, {0, 0}, %11, {0, 0};"
-                    : "+f"(Dxi[0]), "+f"(Dxi[1]), "+f"(Dxi[2]), "+f"(Dxi[3])
+                    "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9},{%10,%11,%12,%13},"
+                    "{%14},{%15,%16},{%17},{%18,%19};"
+                    : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
                     : "r"(Axi[0]), "r"(Axi[1]), "r"(Axi[2]), "r"(Axi[3]),
                       "r"(Bxi[0]), "r"(Bxi[1]),
-                      "r"(a_scale), "r"(b_scale));
+                      "f"(Dxi[0]), "f"(Dxi[1]), "f"(Dxi[2]), "f"(Dxi[3]),
+                      "r"(a_scale), "h"((uint16_t)0), "h"((uint16_t)0),
+                      "r"(b_scale), "h"((uint16_t)0), "h"((uint16_t)0)
+                    : "memory");
+                Dxi[0] = d0; Dxi[1] = d1; Dxi[2] = d2; Dxi[3] = d3;
             }
 #else
             GGML_UNUSED_VARS(D, A, B, a_scale, b_scale);
