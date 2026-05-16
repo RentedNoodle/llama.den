@@ -661,7 +661,7 @@ json oaicompat_chat_params_parse(
             json_schema = json_value(schema_wrapper, "schema", json::object());
         }
         else if (!response_type.empty() && response_type != "text") {
-            json_schema = json_value(json_schema, "schema", json::object());
+            throw std::invalid_argument("response_format type must be one of \"text\" or \"json_object\", but got: " + response_type);
         }
     }
 
@@ -781,10 +781,9 @@ json oaicompat_chat_params_parse(
     inputs.json_schema = json_schema.is_null() ? "" : json_schema.dump();
     inputs.grammar = grammar;
     inputs.use_jinja = opt.use_jinja;
-    inputs.parallel_tool_calls = json_value(body, "parallel_tool_calls", false);
+    inputs.parallel_tool_calls = json_value(body, "parallel_tool_calls", opt.parallel_tool_calls);
     inputs.add_generation_prompt = json_value(body, "add_generation_prompt", true);
     inputs.reasoning_format = opt.reasoning_format;
-    inputs.use_peg = opt.use_peg;
     if (body.contains("reasoning_format")) {
         inputs.reasoning_format = common_reasoning_format_from_name(body.at("reasoning_format").get<std::string>());
     }
@@ -835,6 +834,7 @@ json oaicompat_chat_params_parse(
         }
         inputs.add_generation_prompt = true;
     }
+    inputs.force_pure_content = opt.force_pure_content;
 
     // Apply chat template to the list of messages
     auto chat_params = common_chat_templates_apply(opt.tmpls.get(), inputs);
@@ -855,16 +855,18 @@ json oaicompat_chat_params_parse(
     llama_params["prompt"] = chat_params.prompt;
     if (!chat_params.grammar.empty()) {
         llama_params["grammar"] = chat_params.grammar;
+        llama_params["grammar_type"] = std::string("tool_calls");
     }
     llama_params["grammar_lazy"] = chat_params.grammar_lazy;
     auto grammar_triggers = json::array();
-    for (const auto& trigger : chat_params.grammar_triggers) {
+    for (const auto & trigger : chat_params.grammar_triggers) {
         server_grammar_trigger ct(trigger);
         grammar_triggers.push_back(ct.to_json());
     }
     llama_params["grammar_triggers"] = grammar_triggers;
     llama_params["preserved_tokens"] = chat_params.preserved_tokens;
-    llama_params["thinking_forced_open"] = chat_params.thinking_forced_open;
+    llama_params["generation_prompt"] = chat_params.generation_prompt;
+
     for (const auto& stop : chat_params.additional_stops) {
         llama_params["stop"].push_back(stop);
     }
@@ -875,6 +877,21 @@ json oaicompat_chat_params_parse(
     int n_choices = json_value(body, "n", 1);
     if (n_choices != 1) {
         throw std::runtime_error("Only one completion choice is allowed");
+    }
+
+    // Reasoning budget: pass parameters through to sampling layer
+    {
+        int reasoning_budget = opt.reasoning_budget;
+        if (reasoning_budget == -1 && body.contains("thinking_budget_tokens")) {
+            reasoning_budget = json_value(body, "thinking_budget_tokens", -1);
+        }
+
+        if (!chat_params.thinking_end_tag.empty()) {
+            llama_params["reasoning_budget_tokens"] = reasoning_budget;
+            llama_params["reasoning_budget_start_tag"] = chat_params.thinking_start_tag;
+            llama_params["reasoning_budget_end_tag"] = chat_params.thinking_end_tag;
+            llama_params["reasoning_budget_message"] = opt.reasoning_budget_message;
+        }
     }
 
     // Handle "logprobs" field
@@ -1630,9 +1647,9 @@ llama_pos server_tokens::pos_next(int64_t n_tokens) const {
 }
 
 
-size_t server_tokens::size_up_to_pos(llama_pos max_idx) const {
+size_t server_tokens::size_up_to_pos(llama_pos max_pos) const {
     if (!has_mtmd) {
-        return std::min((size_t)max_idx+1, tokens.size());
+        return std::min((size_t)max_pos, tokens.size());
     }
 
     size_t idx = 0;
@@ -1652,12 +1669,12 @@ size_t server_tokens::size_up_to_pos(llama_pos max_idx) const {
             idx++;
         }
 
-        if (idx >= max_idx) {
+        if (pos >= max_pos) {
             break;
         }
     }
 
-    return idx+1;
+    return idx;
 }
 
 
@@ -2127,7 +2144,9 @@ int32_t server_tokens::process_chunk(
     size_t idx,
     llama_pos pos,
     int32_t seq_id,
-    size_t& n_tokens_out) const {
+    size_t& n_tokens_out,
+    mtmd_helper_eval_batch_callback callback,
+    void * callback_user_data) const {
     const auto& chunk = find_chunk(idx);
     const char* name = mtmd_input_chunk_get_type(chunk.get()) == MTMD_INPUT_CHUNK_TYPE_IMAGE
         ? "image" : "audio";
@@ -2135,13 +2154,15 @@ int32_t server_tokens::process_chunk(
     int32_t n_batch = llama_n_batch(ctx);
     int64_t t0 = ggml_time_ms();
     llama_pos new_n_past; // unused for now
-    int32_t result = mtmd_helper_eval_chunk_single(mctx, ctx,
+    int32_t result = mtmd_helper_eval_chunk_single_with_callback(mctx, ctx,
         chunk.get(),
         pos,
         seq_id,
         n_batch,
         true, // logits last
-        &new_n_past);
+        &new_n_past,
+        callback,
+        callback_user_data);
     LLAMA_LOG_INFO("%s processed in %" PRId64 " ms\n", name, ggml_time_ms() - t0);
     if (result != 0) {
         LLAMA_LOG_ERROR("mtmd_helper_eval failed with status %d", result);
