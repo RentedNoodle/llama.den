@@ -1,0 +1,218 @@
+Log start
+main: build = 4433 (0199be3c9)
+main: built with cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0 for x86_64-linux-gnu
+main: seed  = 1778137826
+ggml_cuda_init: GGML_CUDA_FORCE_MMQ:    no
+ggml_cuda_init: GGML_CUDA_FORCE_CUBLAS: no
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 5070 Ti, compute capability 12.0, VMM: yes, VRAM: 16302 MiB
+CUDA0: using device CUDA0 - 15009 MiB free
+llama_model_load: .den directory detected
+llama_model_load:   weights dir  = /mnt/c/Denmother/Models/denquant-test/output.den/
+llama_model_load:   metadata     = /mnt/c/Denmother/Models/denquant-test/output.gguf
+llama_model_loader: loaded meta data with 41 key-value pairs and 426 tensors from /mnt/c/Denmother/Models/denquant-test/output.gguf (version GGUF V3 (latest))
+llama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.
+llama_model_loader: - kv   0:                       general.architecture str              = qwen35
+llama_model_loader: - kv   1:                               general.type str              = model
+llama_model_loader: - kv   2:                               general.name str              = Qwen3.5 4B
+llama_model_loader: - kv   3:                           general.basename str              = Qwen3.5
+llama_model_loader: - kv   4:                         general.size_label str              = 4B
+llama_model_loader: - kv   5:                            general.license str              = apache-2.0
+llama_model_loader: - kv   6:                       general.license.link str              = https://huggingface.co/Qwen/Qwen3.5-4...
+llama_model_loader: - kv   7:                   general.base_model.count u32              = 1
+llama_model_loader: - kv   8:                  general.base_model.0.name str              = Qwen3.5 4B Base
+llama_model_loader: - kv   9:          general.base_model.0.organization str              = Qwen
+llama_model_loader: - kv  10:              general.base_model.0.repo_url str              = https://huggingface.co/Qwen/Qwen3.5-4...
+llama_model_loader: - kv  11:                               general.tags arr[str,1]       = ["image-text-to-text"]
+llama_model_loader: - kv  12:                         qwen35.block_count u32              = 32
+llama_model_loader: - kv  13:                      qwen35.context_length u32              = 262144
+llama_model_loader: - kv  14:                    qwen35.embedding_length u32              = 2560
+llama_model_loader: - kv  15:                 qwen35.feed_forward_length u32              = 9216
+llama_model_loader: - kv  16:                qwen35.attention.head_count u32              = 16
+llama_model_loader: - kv  17:             qwen35.attention.head_count_kv u32              = 4
+llama_model_loader: - kv  18:             qwen35.rope.dimension_sections arr[i32,4]       = [11, 11, 10, 0]
+llama_model_loader: - kv  19:                      qwen35.rope.freq_base f32              = 10000000.000000
+llama_model_loader: - kv  20:    qwen35.attention.layer_norm_rms_epsilon f32              = 0.000001
+llama_model_loader: - kv  21:                qwen35.attention.key_length u32              = 256
+llama_model_loader: - kv  22:              qwen35.attention.value_length u32              = 256
+llama_model_loader: - kv  23:                          general.file_type u32              = 32
+llama_model_loader: - kv  24:                     qwen35.ssm.conv_kernel u32              = 4
+llama_model_loader: - kv  25:                      qwen35.ssm.state_size u32              = 128
+llama_model_loader: - kv  26:                     qwen35.ssm.group_count u32              = 16
+llama_model_loader: - kv  27:                  qwen35.ssm.time_step_rank u32              = 32
+llama_model_loader: - kv  28:                      qwen35.ssm.inner_size u32              = 4096
+llama_model_loader: - kv  29:             qwen35.full_attention_interval u32              = 4
+llama_model_loader: - kv  30:                qwen35.rope.dimension_count u32              = 64
+llama_model_loader: - kv  31:               general.quantization_version u32              = 2
+llama_model_loader: - kv  32:                       tokenizer.ggml.model str              = gpt2
+llama_model_loader: - kv  33:                         tokenizer.ggml.pre str              = qwen35
+llama_model_loader: - kv  34:                      tokenizer.ggml.tokens arr[str,248320]  = ["!", "\"", "#", "$", "%", "&", "'", ...
+llama_model_loader: - kv  35:                  tokenizer.ggml.token_type arr[i32,248320]  = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...
+llama_model_loader: - kv  36:                      tokenizer.ggml.merges arr[str,247587]  = ["Ġ Ġ", "ĠĠ ĠĠ", "i n", "Ġ t",...
+llama_model_loader: - kv  37:                tokenizer.ggml.eos_token_id u32              = 248046
+llama_model_loader: - kv  38:            tokenizer.ggml.padding_token_id u32              = 248044
+llama_model_loader: - kv  39:               tokenizer.ggml.add_bos_token bool             = false
+llama_model_loader: - kv  40:                    tokenizer.chat_template str              = {%- set image_count = namespace(value...
+llama_model_loader: - type  f32:  177 tensors
+llama_model_loader: - type bf16:  249 tensors
+load: 0 unused tokens
+load: printing all EOG tokens:
+load:   - 248044 ('<|endoftext|>')
+load:   - 248046 ('<|im_end|>')
+load:   - 248063 ('<|fim_pad|>')
+load:   - 248064 ('<|repo_name|>')
+load:   - 248065 ('<|file_sep|>')
+load: special tokens cache size = 33
+load: token to piece cache size = 1.7581 MB
+llm_load_print_meta: format           = GGUF V3 (latest)
+llm_load_print_meta: arch             = qwen35
+llm_load_print_meta: n_ctx_train      = 262144
+llm_load_print_meta: n_embd           = 2560
+llm_load_print_meta: n_layer          = 32
+llm_load_print_meta: n_head           = 16
+llm_load_print_meta: n_head_kv        = 4
+llm_load_print_meta: n_rot            = 64
+llm_load_print_meta: n_swa            = 0
+llm_load_print_meta: n_swa_pattern    = 1
+llm_load_print_meta: n_embd_head_k    = 256
+llm_load_print_meta: n_embd_head_v    = 256
+llm_load_print_meta: n_gqa            = 4
+llm_load_print_meta: n_embd_k_gqa     = 1024
+llm_load_print_meta: n_embd_v_gqa     = 1024
+llm_load_print_meta: f_norm_eps       = 0.0e+00
+llm_load_print_meta: f_norm_rms_eps   = 1.0e-06
+llm_load_print_meta: f_clamp_kqv      = 0.0e+00
+llm_load_print_meta: f_max_alibi_bias = 0.0e+00
+llm_load_print_meta: f_logit_scale    = 0.0e+00
+llm_load_print_meta: n_ff             = 9216
+llm_load_print_meta: n_expert         = 0
+llm_load_print_meta: n_expert_used    = 0
+llm_load_print_meta: causal attn      = 1
+llm_load_print_meta: pooling type     = 0
+llm_load_print_meta: rope type        = 40
+llm_load_print_meta: rope scaling     = linear
+llm_load_print_meta: freq_base_train  = 10000000.0
+llm_load_print_meta: freq_scale_train = 1
+llm_load_print_meta: n_ctx_orig_yarn  = 262144
+llm_load_print_meta: rope_finetuned   = unknown
+llm_load_print_meta: mrope sections   = [11, 11, 10, 0]
+llm_load_print_meta: ssm_d_conv       = 4
+llm_load_print_meta: ssm_d_inner      = 4096
+llm_load_print_meta: ssm_d_state      = 128
+llm_load_print_meta: ssm_dt_rank      = 32
+llm_load_print_meta: ssm_n_group      = 16
+llm_load_print_meta: model type       = 4B
+llm_load_print_meta: model ftype      = BF16
+llm_load_print_meta: model params     = 4.206 B
+llm_load_print_meta: model size       = 7.836 GiB (16.004 BPW) 
+llm_load_print_meta: general.name     = Qwen3.5 4B
+print_info: vocab type            = BPE
+print_info: n_vocab               = 248320
+print_info: n_merges              = 247587
+print_info: BOS token             = 11 ','
+print_info: EOS token             = 248046 '<|im_end|>'
+print_info: EOT token             = 248046 '<|im_end|>'
+print_info: PAD token             = 248044 '<|endoftext|>'
+print_info: LF token              = 198 'Ċ'
+print_info: FIM PRE token         = 248060 '<|fim_prefix|>'
+print_info: FIM SUF token         = 248062 '<|fim_suffix|>'
+print_info: FIM MID token         = 248061 '<|fim_middle|>'
+print_info: FIM PAD token         = 248063 '<|fim_pad|>'
+print_info: FIM REP token         = 248064 '<|repo_name|>'
+print_info: FIM SEP token         = 248065 '<|file_sep|>'
+print_info: EOG token             = 248044 '<|endoftext|>'
+print_info: EOG token             = 248046 '<|im_end|>'
+print_info: EOG token             = 248063 '<|fim_pad|>'
+print_info: EOG token             = 248064 '<|repo_name|>'
+print_info: EOG token             = 248065 '<|file_sep|>'
+print_info: max token length      = 256
+llama_load_den_tensors: loading .den tensors from /mnt/c/Denmother/Models/denquant-test/output.den/
+llama_load_den_tensors: 426 tensors in manifest
+llama_load_den_tensors: CPU ctx ~0.00 MiB, GPU ctx ~5340.20 MiB
+DEBUG: step 6a — allocating GPU buffers (gpu_ctx=0x7236417f8c28, gpu_ctx_data_size=5599608832)
+DEBUG: step 6a — calling ggml_backend_alloc_ctx_tensors_from_buft for GPU
+DEBUG: step 6a — GPU buffer allocated: 0x622d27f1a3f0
+DEBUG: step 6b — allocating CPU buffers (cpu_ctx=(nil), cpu_ctx_data_size=0)
+DEBUG: step 7 — loading 426 tensors
+DEBUG: tensor 0 'blk.0.attn_qkv.weight' tier=denquant gtype=40 ne=[2560,8192,1,1] nbytes=11796480
+DEBUG: calling den_load_denquant_tensor
+DEBUG: den_load_denquant_tensor returned 0
+DEBUG: calling ggml_backend_tensor_set 11796480 bytes
+DEBUG: ggml_backend_tensor_set done
+DEBUG: tensor 1 'blk.0.ffn_down.weight' tier=denquant gtype=40 ne=[9216,2560,1,1] nbytes=13271040
+DEBUG: calling den_load_denquant_tensor
+DEBUG: den_load_denquant_tensor returned 0
+DEBUG: calling ggml_backend_tensor_set 13271040 bytes
+DEBUG: ggml_backend_tensor_set done
+DEBUG: tensor 2 'blk.0.ffn_up.weight' tier=denquant gtype=40 ne=[2560,9216,1,1] nbytes=13271040
+DEBUG: calling den_load_denquant_tensor
+DEBUG: den_load_denquant_tensor returned 0
+DEBUG: calling ggml_backend_tensor_set 13271040 bytes
+DEBUG: ggml_backend_tensor_set done
+DEBUG: tensor 3 'blk.0.ssm_a' tier=denquant gtype=0 ne=[32,1,1,1] nbytes=128
+DEBUG: calling den_load_denquant_to_f32
+DEBUG: den_load_denquant_to_f32 returned 0
+DEBUG: calling ggml_backend_tensor_set 128 bytes
+DEBUG: ggml_backend_tensor_set done
+DEBUG: tensor 4 'blk.0.ssm_alpha.weight' tier=denquant gtype=40 ne=[2560,32,1,1] nbytes=46080
+DEBUG: calling den_load_denquant_tensor
+DEBUG: den_load_denquant_tensor returned 0
+DEBUG: calling ggml_backend_tensor_set 46080 bytes
+DEBUG: ggml_backend_tensor_set done
+llama_load_den_tensors: loaded 426 tensors
+DEBUG: step 7 done — loaded 426 tensors
+llama_load_den_tensors:      CUDA0 buffer size =  5339.37 MiB
+DEBUG: step 9 done — returning success
+llama_init_from_model: n_ctx         = 262144
+llama_init_from_model: n_batch       = 2048
+llama_init_from_model: n_ubatch      = 512
+llama_init_from_model: flash_attn    = 1
+llama_init_from_model: attn_max_b    = 0
+llama_init_from_model: fused_moe     = 1
+llama_init_from_model: grouped er    = 0
+llama_init_from_model: fused_up_gate = 1
+llama_init_from_model: fused_mmad    = 1
+llama_init_from_model: rope_cache    = 0
+llama_init_from_model: graph_reuse   = 0
+llama_init_from_model: k_cache_hadam = 0
+llama_init_from_model: v_cache_hadam = 0
+llama_init_from_model: split_mode_graph_scheduling = 0
+llama_init_from_model: reduce_type   = f16
+llama_init_from_model: sched_async   = 0
+llama_init_from_model: ser           = -1, 0
+llama_init_from_model: freq_base     = 10000000.0
+llama_init_from_model: freq_scale    = 1
+llama_kv_cache_init:      CUDA0 KV buffer size =  8242.25 MiB
+llama_init_from_model: KV self size  = 8192.00 MiB, K (f16): 4096.00 MiB, V (f16): 4096.00 MiB
+llama_init_from_model:  CUDA_Host  output buffer size =     0.95 MiB
+llama_init_from_model:      CUDA0 compute buffer size =   495.00 MiB
+llama_init_from_model:  CUDA_Host compute buffer size =  1473.51 MiB
+llama_init_from_model: graph nodes  = 1559
+llama_init_from_model: graph splits = 2
+llama_init_from_model: enabling only_active_experts scheduling
+
+system_info: n_threads = 8 / 16 | AVX = 1 | AVX_VNNI = 0 | AVX2 = 1 | AVX512 = 1 | AVX512_VBMI = 1 | AVX512_VNNI = 1 | AVX512_BF16 = 1 | FMA = 1 | NEON = 0 | SVE = 0 | ARM_FMA = 0 | F16C = 1 | FP16_VA = 0 | WASM_SIMD = 0 | BLAS = 1 | SSE3 = 1 | SSSE3 = 1 | VSX = 0 | MATMUL_INT8 = 0 | 
+sampling: 
+	repeat_last_n = 64, repeat_penalty = 1.000, frequency_penalty = 0.000, presence_penalty = 0.000
+	top_k = 40, tfs_z = 1.000, top_p = 0.950, min_p = 0.050, typical_p = 1.000, temp = 0.800
+	mirostat = 0, mirostat_lr = 0.100, mirostat_ent = 5.000
+	xtc_probability = 0.000, xtc_threshold = 1.000, top_n_sigma = 0.000
+	adaptive_target = -1.00, adaptive_decay = 0.90
+sampling order: 
+CFG -> Penalties -> dry -> top_k -> tfs_z -> typical_p -> top_p -> min_p -> xtc -> top_n_sigma -> temperature -> adaptive_p 
+generate: n_ctx = 262144, n_batch = 2048, n_predict = 50, n_keep = 0
+
+
+Hello, I have a question about quantum computing.=============================== Failed to sample token
+Data has been stored in probabilities.txt
+Create an issue with full log and attach probabilities.txt to the issue
+
+
+Crashing now
+/opt/den/den-nvfp4-optimizations/third_party/ik_llama.cpp/src/llama-sampling.cpp:744: Fatal error
+Could not attach to process.  If your uid matches the uid of the target
+process, check the setting of /proc/sys/kernel/yama/ptrace_scope, or try
+again as the root user.  For more details, see /etc/sysctl.d/10-ptrace.conf
+ptrace: Inappropriate ioctl for device.
+No stack.
+The program is not being run.

@@ -1,0 +1,9 @@
+=== ISA WARDEN REPORT — Thu May  7 02:11:25 CDT 2026 ===
+Files audited:
+  ggml/src/ggml-cuda.cu
+  ggml/src/ggml-cuda/mmq.cuh
+  ggml/src/ggml-cuda/quantize.cu
+  ggml/src/ggml-cuda/template-instances/mmq-instance-iq4_nl.cu
+
+
+RESULT: PASS — 0 violations found

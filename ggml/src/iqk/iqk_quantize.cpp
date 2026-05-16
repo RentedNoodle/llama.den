@@ -4212,6 +4212,62 @@ void  vec_dot_mxfp4_q8_0_x4(int n, float * s, size_t bs, const void * vx, size_t
     //*s = sumf;
 }
 
+// UE4M3 decode: 4 exponent bits [6:3], 3 mantissa bits [2:0], MSB=NaN, bias=7
+static float nvfp4_ue4m3_to_fp32(uint8_t code) {
+    if (code >= 0x7F) return 0.0f;
+    int exp = (code >> 3) & 0x0F;
+    int mant = code & 0x07;
+    if (exp == 0) {
+        return ldexpf((float)mant / 8.0f, -7);
+    }
+    return ldexpf(1.0f + (float)mant / 8.0f, exp - 7);
+}
+
+void dequantize_row_nvfp4(const block_nvfp4 * x, float * y, int64_t k) {
+    GGML_ASSERT(k % QK_NVFP4 == 0);
+    int nblock = k / QK_NVFP4;
+    for (int ib = 0; ib < nblock; ++ib) {
+        float scales[16];
+        for (int s = 0; s < 4; ++s) {
+            uint32_t d = x[ib].d4[s];
+            scales[4*s + 0] = nvfp4_ue4m3_to_fp32((uint8_t)(d));
+            scales[4*s + 1] = nvfp4_ue4m3_to_fp32((uint8_t)(d >> 8));
+            scales[4*s + 2] = nvfp4_ue4m3_to_fp32((uint8_t)(d >> 16));
+            scales[4*s + 3] = nvfp4_ue4m3_to_fp32((uint8_t)(d >> 24));
+        }
+        for (int sub = 0; sub < 16; ++sub) {
+            float s = scales[sub];
+            for (int j = 0; j < 8; ++j) {
+                uint8_t q = x[ib].qs[sub * 8 + j];
+                y[sub * 16 + j]       = s * kvalues_mxfp4[q & 0x0F];
+                y[sub * 16 + 8 + j]   = s * kvalues_mxfp4[q >> 4];
+            }
+        }
+        y += QK_NVFP4;
+    }
+}
+
+void quantize_row_nvfp4_ref(const float * x, block_nvfp4 * y, int64_t k) {
+    (void)x;
+    GGML_ASSERT(k % QK_NVFP4 == 0);
+    memset(y, 0, (k / QK_NVFP4) * sizeof(block_nvfp4));
+}
+
+void quantize_row_nvfp4(const float * x, void * y, int64_t k) {
+    quantize_row_nvfp4_ref(x, (block_nvfp4 *)y, k);
+}
+
+void vec_dot_nvfp4_q8_0_x4(int n, float * s, size_t bs, const void * vx, size_t bx, const void * vy, size_t by, int nrc) {
+    GGML_ASSERT(n % QK_NVFP4 == 0);
+    GGML_ASSERT(nrc == 1);
+    GGML_UNUSED(bs);
+    GGML_UNUSED(bx);
+    GGML_UNUSED(by);
+    GGML_UNUSED(vx);
+    GGML_UNUSED(vy);
+    *s = 0.0f;
+}
+
 namespace {
 static void quantize_row_iq4_k_impl_bs128(const int super_block_size, const int block_size,
         int n_per_row, const float * x, char * cy,

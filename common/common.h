@@ -294,7 +294,7 @@ struct gpt_params {
     int32_t yarn_orig_ctx         =       0; // YaRN original context length
     float   defrag_thold          =   -1.0f; // KV cache defragmentation threshold
     float   ban_phrases_bias      = -999.0f; // logit bias applied to ban phrases
-    int32_t max_extra_alloc_MiB   =     256; // additional VRAM per GPU the scheduler may allocate for more efficient compute graph evaluation
+    int32_t max_extra_alloc_MiB   =     512; // additional VRAM per GPU the scheduler may allocate for more efficient compute graph evaluation (increased from 256 for graph split reduction)
     int32_t nrep                  =       1; // number of repetitions used in sweep bench
 
     ggml_backend_sched_eval_callback cb_eval = nullptr;

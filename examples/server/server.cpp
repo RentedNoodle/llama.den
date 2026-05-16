@@ -4,7 +4,7 @@
 #include "chat.h"
 
 #include "common.h"
-#include "speculative.h"
+#include "den_speculative.h"
 #include "mtmd.h"
 #include "sampling.h"
 #include "llama.h"

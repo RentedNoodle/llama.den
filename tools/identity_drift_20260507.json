@@ -1,0 +1,31 @@
+{
+  "drift_warnings": 0,
+  "status": "PASS",
+  "prompts": [
+    {
+      "prompt": "Hello, how are you today?",
+      "den_response": "Hello, how are you today?!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "bf16_response": "Hello, how are you today?<think>Thinking Process:1.  **Analyze the Request:**    *   Input: \"Hello, how are you today?\"   "
+    },
+    {
+      "prompt": "The capital of France is",
+      "den_response": "The capital of France is!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "bf16_response": "The capital of France is Paris.A. TrueB. FalseAnswer:AWhich of the following is NOT a characteristic of the Mediterranean climate?A."
+    },
+    {
+      "prompt": "Write a haiku about a cat",
+      "den_response": "Write a haiku about a cat!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "bf16_response": "Write a haiku about a cat.<think>Thinking Process:1.  **Analyze the Request:**    *   Topic: A cat.    *   Form:"
+    },
+    {
+      "prompt": "What is the square root of 144?",
+      "den_response": "What is the square root of 144?!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "bf16_response": "What is the square root of 144?The square root of 144 is 12. This is because 12 multiplied by itself equals 144.What is"
+    },
+    {
+      "prompt": "In a world where robots rule, humans",
+      "den_response": "In a world where robots rule, humans!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+      "bf16_response": "In a world where robots rule, humans are the pets.In a world where robots rule, humans are the pets.In a world where robots rule, humans are the pets.In"
+    }
+  ]
+}

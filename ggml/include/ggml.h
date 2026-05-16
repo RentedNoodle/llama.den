@@ -422,6 +422,7 @@ extern "C" {
         GGML_TYPE_Q4_0_8_8  = 33,
         GGML_TYPE_I2_S      = 36,  // So we are able to consume MS BitNet I2_S quants
         GGML_TYPE_MXFP4     = 39,  // so we are compatible with mainline
+        GGML_TYPE_NVFP4     = 40,  // DenQuant FP4 E2M1 + UE4M3 block scales, block_fp4_mmq tiles
         GGML_TYPE_Q1_0_G128 = 41,  // Bonsai 1-bit quants
         //
         //

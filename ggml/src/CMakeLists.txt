@@ -1282,6 +1282,9 @@ if (GGML_CUDA)
 
         message("-- CUDA host compiler is ${CUDA_CCID} ${CUDA_CCVER}")
 
+        if (NOT CUDA_CCVER)
+            set(CUDA_CCVER "0.0")
+        endif()
         get_flags(${CUDA_CCID} ${CUDA_CCVER})
         list(APPEND CUDA_CXX_FLAGS ${CXX_FLAGS} ${GF_CXX_FLAGS})  # This is passed to -Xcompiler later
     endif()

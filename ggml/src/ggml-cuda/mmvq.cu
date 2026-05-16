@@ -106,6 +106,9 @@ static void ggml_cuda_op_mul_mat_vec_q_impl(ggml_backend_cuda_context & ctx, ggm
         case GGML_TYPE_MXFP4:
             mul_mat_vec_mxfp4_q8_1_cuda(args, stream);
             break;
+        case GGML_TYPE_NVFP4:
+            mul_mat_vec_nvfp4_q8_1_cuda(args, stream);
+            break;
         case GGML_TYPE_IQ4_XS:
             mul_mat_vec_iq4_xs_q8_1_cuda(args, stream);
             break;

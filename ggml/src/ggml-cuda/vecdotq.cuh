@@ -1189,6 +1189,55 @@ static __device__ __forceinline__ float vec_dot_iq4_nl_q8_1(
 #define VDR_MXFP4_Q8_1_MMVQ 2
 #define VDR_MXFP4_Q8_1_MMQ  4
 
+#define VDR_NVFP4_Q8_1_MMVQ 2
+#define VDR_NVFP4_Q8_1_MMQ  4
+
+// E2M1 lookup table: nibble 0x0-0xF → float (register-resident for speed)
+__device__ const float e2m1_lut_nvfp4[16] = {
+     0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
+    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
+};
+
+static __device__ __forceinline__ float vec_dot_nvfp4_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+
+    const block_nvfp4 * bq = (const block_nvfp4 *) vbq + kbx;
+
+    const int d4_idx = iqs / 8;
+    const uint32_t d4_val = bq->d4[d4_idx];
+
+    float scales[4];
+    scales[0] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d4_val));
+    scales[1] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d4_val >> 8));
+    scales[2] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d4_val >> 16));
+    scales[3] = ggml_cuda_ue4m3_to_fp32((uint8_t)(d4_val >> 24));
+
+    const uint32_t * qs = (const uint32_t *)(bq->qs + d4_idx * 32);
+    const int * q8 = (const int *) bq8_1->qs + iqs;
+
+    const float scale = scales[(iqs % 8) / 2];  // one scale for all nibbles in this call
+    float sumf = 0.0f;
+#pragma unroll
+    for (int l = 0; l < VDR_NVFP4_Q8_1_MMVQ; ++l) {
+        const uint32_t qw = qs[(iqs % 8) / 2 * 2 + l];
+
+        // Extract 8 nibbles from one uint32 word, dequantize E2M1→float,
+        // apply UE4M3 scale. 1:1 mapping — no duplication.
+        const int q8_val = q8[l];
+        const int8_t * q8_bytes = (const int8_t *)&q8_val;
+        sumf += e2m1_lut_nvfp4[(qw >>  0) & 0xF] * scale * (float)q8_bytes[0];
+        sumf += e2m1_lut_nvfp4[(qw >>  4) & 0xF] * scale * (float)q8_bytes[1];
+        sumf += e2m1_lut_nvfp4[(qw >>  8) & 0xF] * scale * (float)q8_bytes[2];
+        sumf += e2m1_lut_nvfp4[(qw >> 12) & 0xF] * scale * (float)q8_bytes[3];
+        sumf += e2m1_lut_nvfp4[(qw >> 16) & 0xF] * scale * (float)q8_bytes[4];
+        sumf += e2m1_lut_nvfp4[(qw >> 20) & 0xF] * scale * (float)q8_bytes[5];
+        sumf += e2m1_lut_nvfp4[(qw >> 24) & 0xF] * scale * (float)q8_bytes[6];
+        sumf += e2m1_lut_nvfp4[(qw >> 28) & 0xF] * scale * (float)q8_bytes[7];
+    }
+
+    return sumf;
+}
+
 static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
     const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
 
@@ -1199,7 +1248,7 @@ static __device__ __forceinline__ float vec_dot_mxfp4_q8_1(
     int2 sumi = {0, 0};
 #pragma unroll
     for (int l = 0; l < VDR_Q4_0_Q8_1_MMVQ; ++l) {
-        const int aux_q4 = get_int_b1(bq4->qs, iqs + l);
+        const int aux_q4 = get_int_b1(bq4->qs, iqs + l) & 0x0F0F0F0F;
         const int2 v = get_int_from_table_16(aux_q4, kvalues_mxfp4);
 
         sumi.x = ggml_cuda_dp4a(v.x, q8[l + 0], sumi.x);

@@ -52,6 +52,7 @@
 #define CC_TURING     750
 #define CC_AMPERE     800
 #define CC_ADA_LOVELACE 890
+#define CC_BLACKWELL     1200
 #define CC_OFFSET_AMD 1000000
 #define CC_OFFSET_MTHREADS 0x0100000
 #define CC_RDNA1      (CC_OFFSET_AMD + 1010)
@@ -163,6 +164,10 @@ typedef float2 dfloat2;
 #if !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)) && __CUDA_ARCH__ >= CC_AMPERE
 #define CP_ASYNC_AVAILABLE
 #endif // !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)) && __CUDA_ARCH__ >= CC_AMPERE
+
+#if !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)) && __CUDA_ARCH__ >= CC_BLACKWELL
+#define BLACKWELL_MMA_AVAILABLE
+#endif // !(defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)) && __CUDA_ARCH__ >= CC_BLACKWELL
 
 #ifdef __CUDA_ARCH_LIST__
 constexpr bool ggml_cuda_has_arch_impl(int) {
@@ -416,6 +421,18 @@ static __device__ __forceinline__ float iq1bn_fp8_to_float(uint8_t fp8) {
     return s.f;
 }
 
+// UE4M3 unsigned decode: 4 exponent bits [6:3], 3 mantissa bits [2:0], bias = 7
+// 0x7F+ are NaN. Max finite: 0x7E = (1 + 6/8) * 2^8 = 448.0.
+static __device__ __forceinline__ float ggml_cuda_ue4m3_to_fp32(uint8_t code) {
+    if (code >= 0x7F) { return 0.0f; }
+    const int exp  = (code >> 3) & 0x0F;
+    const int mant = code & 0x07;
+    if (exp == 0) {
+        return ldexpf((float)mant / 8.0f, -7);
+    }
+    return ldexpf(1.0f + (float)mant / 8.0f, exp - 7);
+}
+
 template <ggml_type type>
 struct ggml_cuda_type_traits;
 
@@ -577,6 +594,13 @@ struct ggml_cuda_type_traits<GGML_TYPE_MXFP4> {
     static constexpr int qk = QK4_NL;
     static constexpr int qr = QR4_NL;
     static constexpr int qi = QI4_NL;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_NVFP4> {
+    static constexpr int qk = QK_NVFP4;
+    static constexpr int qr = QR_NVFP4;
+    static constexpr int qi = QI_NVFP4;
 };
 
 template<>

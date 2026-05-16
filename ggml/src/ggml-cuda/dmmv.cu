@@ -928,6 +928,66 @@ static void convert_mul_mat_vec_f16_cuda(const void * vx, const dfloat * y, floa
         <<<block_nums, block_dims, 0, stream>>>(vx, y, dst, ncols, nrows);
 }
 
+// NVFP4 BF16-direct DMMV — 32 rows per block. Vectorized decode: 4 bytes
+// (8 nibbles) per inner iteration via uint32 + half2 loads. No MMA, no Q8_1.
+#define NVFP4_DMMV_ROWS_PER_BLOCK 32
+
+static __global__ void dequantize_mul_mat_vec_nvfp4(
+    const char * __restrict__ vx, const dfloat * __restrict__ yy, float * __restrict__ dst,
+    const int ncols, const int nrows) {
+
+    const int row = blockIdx.x * NVFP4_DMMV_ROWS_PER_BLOCK + threadIdx.x;
+    if (row >= nrows) { return; }
+
+    const block_nvfp4 * bq = (const block_nvfp4 *) vx;
+    const int ncols_qk = ncols / QK_NVFP4;
+
+    // DenRaZeR: standard E2M1 (0x8 = -0.0) vs remapped (0x8 = +5.0).
+    // Flag stored in bit 7 of d4[0] byte 0 (valid UE4M3 ≤ 0x7E, so bit 7 is free).
+    const float e2m1_std[16] = {0,0.5f,1,1.5f,2,3,4,6, -0,-0.5f,-1,-1.5f,-2,-3,-4,-6};
+    const float e2m1_rzr[16] = {0,0.5f,1,1.5f,2,3,4,6, 5.0f,-0.5f,-1,-1.5f,-2,-3,-4,-6};
+    float sumf = 0.0f;
+
+    for (int kb = 0; kb < ncols_qk; kb++) {
+        const block_nvfp4 * b = &bq[row * ncols_qk + kb];
+        float scales[16];
+        for (int s = 0; s < 16; s++)
+            scales[s] = ggml_cuda_ue4m3_to_fp32((uint8_t)(b->d4[s/4] >> ((s%4)*8)));
+        // Check DenRaZeR flag: MSB of first scale byte
+        // Bit 7 of first scale byte (little-endian: d4[0] bits 7:0 = byte 0)
+        const float * e2m1 = ((b->d4[0] & 0x80u) ? e2m1_rzr : e2m1_std);
+
+        // Vectorized decode: 4 bytes = 8 nibbles per iteration via uint32
+        const int k_off = kb * QK_NVFP4;
+        for (int j = 0; j < QK_NVFP4/2; j += 4) {
+            uint32_t qw = *(const uint32_t *)(b->qs + j);
+#ifdef GGML_CUDA_F16
+            const half * act_h = (const half *)yy + row * ncols;
+            half2 a0 = ((const half2 *)act_h)[(k_off + 2*j)/2];
+            half2 a1 = ((const half2 *)act_h)[(k_off + 2*j + 2)/2];
+            half2 a2 = ((const half2 *)act_h)[(k_off + 2*j + 4)/2];
+            half2 a3 = ((const half2 *)act_h)[(k_off + 2*j + 6)/2];
+            sumf += e2m1[(qw>> 0)&0xF] * scales[(2*j+0)/16] * __half2float(a0.x);
+            sumf += e2m1[(qw>> 4)&0xF] * scales[(2*j+0)/16] * __half2float(a0.y);
+            sumf += e2m1[(qw>> 8)&0xF] * scales[(2*j+2)/16] * __half2float(a1.x);
+            sumf += e2m1[(qw>>12)&0xF] * scales[(2*j+2)/16] * __half2float(a1.y);
+            sumf += e2m1[(qw>>16)&0xF] * scales[(2*j+4)/16] * __half2float(a2.x);
+            sumf += e2m1[(qw>>20)&0xF] * scales[(2*j+4)/16] * __half2float(a2.y);
+            sumf += e2m1[(qw>>24)&0xF] * scales[(2*j+6)/16] * __half2float(a3.x);
+            sumf += e2m1[(qw>>28)&0xF] * scales[(2*j+6)/16] * __half2float(a3.y);
+#else
+            for (int k = 0; k < 4; k++) {
+                const uint8_t bv = (qw >> (k*8)) & 0xFF;
+                const int bi = (j+k)*2;
+                sumf += e2m1[bv & 0xF] * scales[bi/16]   * yy[row*ncols + k_off + bi];
+                sumf += e2m1[bv >> 4]  * scales[(bi+1)/16] * yy[row*ncols + k_off + bi+1];
+            }
+#endif
+        }
+    }
+    dst[row] = sumf;
+}
+
 void ggml_cuda_op_dequantize_mul_mat_vec(
     ggml_backend_cuda_context & ctx,
     const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst, const char * src0_dd_i, const float * src1_ddf_i,
@@ -948,7 +1008,8 @@ void ggml_cuda_op_dequantize_mul_mat_vec(
         src0->type == GGML_TYPE_Q4_0 || src0->type == GGML_TYPE_Q4_1 ||
         src0->type == GGML_TYPE_Q5_0 || src0->type == GGML_TYPE_Q5_1 ||
         src0->type == GGML_TYPE_Q8_0 || src0->type == GGML_TYPE_F16  ||
-        src0->type == GGML_TYPE_IQ2_KT || src0->type == GGML_TYPE_IQ3_KT || src0->type == GGML_TYPE_IQ4_KT;
+        src0->type == GGML_TYPE_IQ2_KT || src0->type == GGML_TYPE_IQ3_KT || src0->type == GGML_TYPE_IQ4_KT ||
+        src0->type == GGML_TYPE_NVFP4;
 
     if (src1_convert_f16) {
         src1_dfloat = src1_dfloat_a.alloc(ne00);
@@ -1049,5 +1110,6 @@ bool ggml_cuda_dmmv_type_supported(ggml_type src0_type) {
         src0_type == GGML_TYPE_Q8_0 || src0_type == GGML_TYPE_Q2_K ||
         src0_type == GGML_TYPE_Q3_K || src0_type == GGML_TYPE_Q4_K ||
         src0_type == GGML_TYPE_Q5_K || src0_type == GGML_TYPE_Q6_K ||
-        src0_type == GGML_TYPE_IQ2_KT || src0_type == GGML_TYPE_IQ3_KT || src0_type == GGML_TYPE_IQ4_KT;
+        src0_type == GGML_TYPE_IQ2_KT || src0_type == GGML_TYPE_IQ3_KT || src0_type == GGML_TYPE_IQ4_KT ||
+        src0_type == GGML_TYPE_NVFP4;
 }

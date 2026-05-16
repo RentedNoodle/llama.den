@@ -7,6 +7,7 @@
 
 #include "quantize.cuh"
 #include "mmq.cuh"
+#include "quantize_nvfp4.cuh"
 
 #include <cstdint>
 
@@ -282,6 +283,16 @@ void quantize_mmq_q8_1_cuda(
 
     GGML_ASSERT(kx0_padded % (4*QK8_1) == 0);
 
+    // The D4/DS4/D2S6 MMQ layouts interleave rows across scale groups.
+    // For batch < tile_rows (128), the kernel loads full tiles — uninitialized
+    // pool memory beyond the valid rows produces NaN accumulators.
+    // Zero the entire tile footprint: 128 rows × row_stride + 128 header entries.
+    if (kx1 < 128) {
+        const int64_t tile_data_bytes = 128 * kx0_padded * sizeof(block_q8_1) / QK8_1;
+        const int64_t tile_total      = tile_data_bytes + 128 * sizeof(block_q8_1_mmq);
+        CUDA_CHECK(cudaMemsetAsync(vy, 0, tile_total, stream));
+    }
+
     const int64_t block_num_x = (kx0_padded + 4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ);
     const dim3 num_blocks(block_num_x, kx1, channels);
     const dim3 block_size(CUDA_QUANTIZE_BLOCK_SIZE_MMQ, 1, 1);
@@ -309,6 +320,14 @@ void quantize_mmq_q8_1_id_cuda(
     const ggml_type type_x, cudaStream_t stream) {
 
     GGML_ASSERT(kx0_padded % (4*QK8_1) == 0);
+
+    // Same tile-footprint zeroing as quantize_mmq_q8_1_cuda — prevents NaN
+    // when batch < 128 rows (the MMQ tile height).
+    if (kx1 < 128) {
+        const int64_t tile_data_bytes = 128 * kx0_padded * sizeof(block_q8_1) / QK8_1;
+        const int64_t tile_total      = tile_data_bytes + 128 * sizeof(block_q8_1_mmq);
+        CUDA_CHECK(cudaMemsetAsync(vy, 0, tile_total, stream));
+    }
 
     const int64_t block_num_x = (kx0_padded + 4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ - 1) / (4*CUDA_QUANTIZE_BLOCK_SIZE_MMQ);
     const dim3 num_blocks(block_num_x, kx1, 1);
