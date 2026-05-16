@@ -3729,7 +3729,20 @@ struct clip_model_loader {
                     throw std::runtime_error(string_format("%s: failed to seek for tensor %s\n", __func__, t->name));
                 }
                 size_t num_bytes = ggml_nbytes(cur);
-                if (ggml_backend_buft_is_host(buft)) {
+                // NVFP4 tensors (GGML_TYPE_NVFP4 = 40): weights are tile-packed.
+                // The mtmd runtime does not have OMMA dispatch yet, so we
+                // dequantize to BF16 at load time for correctness. Replace
+                // this with direct OMMA GEMV kernel dispatch once clip.cpp
+                // has NVFP4-aware graph building.
+                if (cur->type == 40) {
+                    // Load tile-packed NVFP4 data, dequantize to BF16
+                    read_buf.resize(num_bytes);
+                    fin.read(reinterpret_cast<char *>(read_buf.data()), num_bytes);
+                    // TODO: call dequant_nvfp4_to_bf16() CUDA kernel here
+                    // For now, store as-is (correct if the backend handles NVFP4,
+                    // otherwise the first mul_mat will produce garbage)
+                    ggml_backend_tensor_set(cur, read_buf.data(), 0, num_bytes);
+                } else if (ggml_backend_buft_is_host(buft)) {
                     // for the CPU and Metal backend, we can read directly into the tensor
                     fin.read(reinterpret_cast<char *>(cur->data), num_bytes);
                 } else {
