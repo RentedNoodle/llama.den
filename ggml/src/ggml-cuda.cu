@@ -35,6 +35,7 @@
 #include "ggml-cuda/den_mxf4nvf4_gemv.cuh"    // Path A — must precede den_dispatch.cuh
 #include "ggml-cuda/den_sm120_driver_bridge.hpp"
 #include "ggml-cuda/den_dispatch.cuh"          // A/B path selector — after gemv/driver
+#include "ggml-cuda/k1_dense.h"               // K1-Dense adaptive dispatch — M>1 uses this
 // DISABLED: k1_dense + k1_moe moved to separate .cu compilation units (2026-05-17)
 // Including static __global__ kernels in this TU caused nvcc register allocation
 // changes that corrupted the proven GEMV kernel. See: k1_dense.cu, k1_moe_35b.cu
@@ -2523,7 +2524,8 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
             }
         }
         if (!sm120_ok) {
-            // Fallback: loop legacy GEMV over batch
+            // TODO: K1-Dense adaptive dispatch needs kernel debugging.
+            // Fallback to proven GEMV loop until variants are verified.
             for (int i = 0; i < M; i++) {
                 den_mxf4nvf4_gemv_launch(
                     src0->data, (const float *)src1->data + i * K, (float *)dst->data + i * N,

@@ -16,3 +16,19 @@
 
 #include "den_omma_shared.cuh"
 #include "specialized/k1_dense.cuh"
+
+// Non-inline dispatch visible to ggml-cuda.cu via k1_dense.h.
+// Provides the same adaptive dispatch as the inline version in k1_dense.cuh,
+// but as a regular function symbol to avoid inlining the whole dispatch into
+// the ggml-cuda.cu translation unit.
+extern "C" void den_k1_dense_dispatch(
+    const void*  weights,
+    const float* act,
+    float*       dst,
+    int M, int N, int K,
+    cudaStream_t stream,
+    const float* tile_norms,
+    int n_norms)
+{
+    den::k1_dense::launch_dense_adaptive(weights, act, dst, M, N, K, stream, tile_norms, n_norms);
+}
