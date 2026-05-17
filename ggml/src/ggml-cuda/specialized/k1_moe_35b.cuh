@@ -49,6 +49,7 @@ static __global__ void persistent_moe_35b(
 ) {
     const int warp_id = threadIdx.x / 32;
     const int lane    = threadIdx.x & 31;
+    const int nwarps  = blockDim.x / 32;
 
     while (true) {
         int work_idx = atomicAdd(work_queue_head, 1);
@@ -59,7 +60,7 @@ static __global__ void persistent_moe_35b(
 
         PersistentWorkItem item = work_queue[work_idx];
 
-        const int out_base = warp_id * 16;
+        const int out_base = (blockIdx.x * nwarps + warp_id) * 16;
         if (out_base >= MOE_TILE_N) continue;
 
         const int r  = lane / 4;
