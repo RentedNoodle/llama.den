@@ -28,13 +28,14 @@ static __global__ void stream_k_decode_nvfp4(
     const float*   __restrict__ x,
     float*         __restrict__ y,
     int N, int K,
-    int kt_per_row,
+    int M, int kt_per_row,
     const float*   __restrict__ tile_norms,
     int n_norms
 ) {
     const int warp_id = threadIdx.x / 32;
     const int lane    = threadIdx.x & 31;
-    const int out_tile = warp_id;
+    const int nwarps = blockDim.x / 32;
+    const int out_tile = blockIdx.x * nwarps + warp_id;
     const int out_base = out_tile * 16;
     if (out_base >= N) return;
 
@@ -42,6 +43,10 @@ static __global__ void stream_k_decode_nvfp4(
     const int kg = lane & 3;
     const int row0 = out_base + r;
     const int row1 = out_base + r + 8;
+
+    // Batched activations: blockIdx.y selects the activation row
+    const int batch_row = blockIdx.y;
+    const float* x_row = x + (size_t)batch_row * (size_t)K;
 
     const size_t row_stride = (size_t)kt_per_row * BYTES_PER_TILE;
 
@@ -70,8 +75,8 @@ static __global__ void stream_k_decode_nvfp4(
             float local_max = 0.0f;
 #pragma unroll
             for (int i = 0; i < 8; i++) {
-                float v_lo = ((kb_lo + i) < K) ? x[kb_lo + i] : 0.0f;
-                float v_hi = ((kb_hi + i) < K) ? x[kb_hi + i] : 0.0f;
+                float v_lo = ((kb_lo + i) < K) ? x_row[kb_lo + i] : 0.0f;
+                float v_hi = ((kb_hi + i) < K) ? x_row[kb_hi + i] : 0.0f;
                 x_local[i]     = v_lo;
                 x_local[8 + i] = v_hi;
                 float av_lo = fabsf(v_lo);
@@ -121,9 +126,10 @@ static __global__ void stream_k_decode_nvfp4(
         }
     }
 
+    float* y_row = y + (size_t)batch_row * (size_t)N;
     if (kg == 0) {
-        if (row0 < N) y[row0] = total0;
-        if (row1 < N) y[row1] = total2;
+        if (row0 < N) y_row[row0] = total0;
+        if (row1 < N) y_row[row1] = total2;
     }
 }
 
@@ -497,15 +503,21 @@ inline void launch_dense_adaptive(
     const int kt_per_row = K / 256;
     const int nwarps = 8;
 
+    // All M: stream_k_decode_nvfp4 (proven warp-cooperative design).
+    // blockIdx.y selects the activation/output row for batched operation.
+    const int grid_n_blocks = (N + nwarps * 16 - 1) / (nwarps * 16);
     if (M == 1) {
-        // stream_k_decode: warp-cooperative, identical architecture to proven GEMV.
-        const int grid = (N + nwarps * 16 - 1) / (nwarps * 16);
-        stream_k_decode_nvfp4<<<grid, nwarps * 32, 8 * 1024, stream>>>(
-            (const uint8_t*)weights, act, dst, N, K, kt_per_row, tile_norms, n_norms);
+        stream_k_decode_nvfp4<<<grid_n_blocks, nwarps * 32, 8 * 1024, stream>>>(
+            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms);
+    } else if (M <= 63) {
+        dim3 grid(grid_n_blocks, M);
+        stream_k_decode_nvfp4<<<grid, nwarps * 32, 0, stream>>>(
+            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms);
+    } else {
+        dim3 grid(grid_n_blocks, (M + 7) / 8);
+        stream_k_decode_nvfp4<<<grid, nwarps * 32, 99 * 1024, stream>>>(
+            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms);
     }
-    // M>1: handled by ggml-cuda.cu with proven GEMV loop.
-    // warp_gemv_small, mid_batch_gemm, prefill_tile_gemm need warp-cooperative
-    // redesign to match the proven GEMV's lane-to-row OMMA mapping.
     CUDA_CHECK(cudaGetLastError());
 }
 
