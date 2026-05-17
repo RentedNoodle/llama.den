@@ -21,7 +21,8 @@
 // Provides the same adaptive dispatch as the inline version in k1_dense.cuh,
 // but as a regular function symbol to avoid inlining the whole dispatch into
 // the ggml-cuda.cu translation unit.
-extern "C" void den_k1_dense_dispatch(
+#include "k1_dense.h"  // forward declaration to suppress -Wmissing-declarations
+void den_k1_dense_dispatch(
     const void*  weights,
     const float* act,
     float*       dst,

@@ -152,7 +152,10 @@ static __global__ void warp_gemv_small_m_nvfp4(
     const int lane    = threadIdx.x & 31;
     if (row >= M) return;
 
-    const int out_tile = warp_id;
+    // NOTE: This kernel is dead code (dispatch uses stream_k_decode for all M).
+    // Fixed out_tile for correctness if reactivated.
+    const int nwarps  = blockDim.x / 32;
+    const int out_tile = blockIdx.x * nwarps + warp_id;
     const int out_base = out_tile * 16;
     if (out_base >= N) return;
 

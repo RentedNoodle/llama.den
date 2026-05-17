@@ -5,10 +5,6 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 void den_k1_dense_dispatch(
     const void*  weights,
     const float* act,
@@ -17,7 +13,3 @@ void den_k1_dense_dispatch(
     cudaStream_t stream,
     const float* tile_norms,
     int n_norms);
-
-#ifdef __cplusplus
-}
-#endif

@@ -5,6 +5,8 @@
 #include <cstring>
 #include "ggml.h"
 
+#ifndef DEN_COMPUTE_PATH_ENUM_DEFINED
+#define DEN_COMPUTE_PATH_ENUM_DEFINED
 namespace den {
 
 enum class ComputePath : uint8_t {
@@ -84,3 +86,4 @@ __host__ __device__ inline bool blackwell_mma_available() {
 }
 
 } // namespace den
+#endif // DEN_COMPUTE_PATH_ENUM_DEFINED
