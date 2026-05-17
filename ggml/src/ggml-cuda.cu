@@ -41,6 +41,7 @@
 // changes that corrupted the proven GEMV kernel. See: k1_dense.cu, k1_moe_35b.cu
 // #include "ggml-cuda/specialized/k1_dense.cuh"
 // #include "ggml-cuda/specialized/k1_moe_35b.cuh"
+// Governor include deferred — den_governor_fsm.cuh has transitive dependency issues
 #include "ggml-cuda/den_mxf8f6f4_gemv.cuh"
 #include "ggml-cuda/rope.cuh"
 #include "ggml-cuda/scale.cuh"
@@ -191,6 +192,10 @@ cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device) {
 #endif
 }
 
+// ── Governor context (Phase 5 integration) ─────────────────────────────────
+// Governor context (minimal, avoid FSM header dependency for now)
+struct { int pressure, intent, state; bool mma_avail; size_t vram_free; } g_gov;
+static bool g_gov_init = false;
 static ggml_cuda_device_info ggml_cuda_init() {
 #ifdef __HIP_PLATFORM_AMD__
     // Workaround for a rocBLAS bug when using multiple graphics cards:
@@ -303,6 +308,12 @@ static ggml_cuda_device_info ggml_cuda_init() {
 
     // ── Den NVFP4 A/B dispatch init (Path B: driver bridge fatbin load) ────
     den_nvfp4_dispatch_init();
+
+    // ── Governor init (Phase 5 skeleton) ────────────────────────────────
+    if (!g_gov_init) {
+        g_gov.pressure = 0; g_gov.intent = 0; g_gov.state = 0;
+        g_gov.mma_avail = true; g_gov_init = true;
+    }
 
     return info;
 }
@@ -2510,10 +2521,13 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
         size_t n_norms = 0;
         const float * tile_norms = den_get_nvfp4_norm_array(src0->name, n_norms);
         cudaStream_t stream = ctx.stream();
+        // Update Governor VRAM tracking
+        if (g_gov_init) {
+            size_t free_bytes, total_bytes;
+            if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess)
+                g_gov.vram_free = free_bytes;
+        }
         bool sm120_ok = false;
-        // SM120 persistent kernel (Path B) — disabled by default.
-        // Enable only when forced via DEN_DISABLE_SM120_DRIVER=0 AND DEN_ROUTE=sm120.
-        // The persistent kernel can GPU-hang; use proven GEMV (Path A) instead.
         {
             const char* den_route = getenv("DEN_ROUTE");
             bool force_path_b = (den_route && strcmp(den_route, "sm120") == 0);
@@ -2535,6 +2549,12 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
         size_t n_norms = 0;
         const float * tile_norms = den_get_nvfp4_norm_array(src0->name, n_norms);
         cudaStream_t stream = ctx.stream();
+        // Update Governor VRAM tracking
+        if (g_gov_init) {
+            size_t free_bytes, total_bytes;
+            if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess)
+                g_gov.vram_free = free_bytes;
+        }
         bool sm120_ok = false;
         {
             const char* den_route = getenv("DEN_ROUTE");
