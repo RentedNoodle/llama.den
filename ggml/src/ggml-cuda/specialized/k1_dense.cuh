@@ -23,7 +23,7 @@ static constexpr int BYTES_PER_TILE = 144;
 //   Walks K dimension sequentially, accumulators in registers
 //   Sub-10μs per token on SM120
 // ───────────────────────────────────────────────────────────────────
-__global__ void stream_k_decode_nvfp4(
+static __global__ void stream_k_decode_nvfp4(
     const uint8_t* __restrict__ w,
     const float*   __restrict__ x,
     float*         __restrict__ y,
@@ -132,7 +132,7 @@ __global__ void stream_k_decode_nvfp4(
 //   Each warp owns one row. Zero SMEM. Warp-shuffle reduction.
 //   Launch: dim3(32, ceil(M/8)) threads, grid = ceil(N/128) blocks
 // ───────────────────────────────────────────────────────────────────
-__global__ void warp_gemv_small_m_nvfp4(
+static __global__ void warp_gemv_small_m_nvfp4(
     const uint8_t* __restrict__ w,
     const float*   __restrict__ x,    // [M, K] row-major
     float*         __restrict__ y,    // [M, N] row-major
@@ -243,7 +243,7 @@ __global__ void warp_gemv_small_m_nvfp4(
 //   Cooperative M×128×64 tile, 99 KB SMEM, 4-stage pipeline
 //   Grid: ceil(N/128) × ceil(M/128), Block: 256
 // ───────────────────────────────────────────────────────────────────
-__global__ void prefill_tile_gemm_nvfp4(
+static __global__ void prefill_tile_gemm_nvfp4(
     const uint8_t* __restrict__ w,
     const float*   __restrict__ x,    // [M, K] row-major
     float*         __restrict__ y,    // [M, N] row-major
