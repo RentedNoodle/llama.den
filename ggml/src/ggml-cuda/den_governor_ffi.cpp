@@ -90,6 +90,14 @@ void den_dawn_write(void* ctx_ptr, float urgency) {
     if (!ctx_ptr) return;
     auto* ctx = static_cast<GovernorContext*>(ctx_ptr);
     ctx->dawn_urgency = urgency;
+    // Auto-trigger volition routing on every urgency update
+    // (route_tier + gwt_ignition recomputed from new urgency)
+    uint32_t route_tier = 0, gwt_ignition = 0;
+    if (urgency > 0.6f)      { route_tier = 2; gwt_ignition = 2; }
+    else if (urgency > 0.3f) { route_tier = 1; gwt_ignition = 1; }
+    uint32_t veto = (ctx->autonomy_idx < 0.15f) ? 1 : 0;
+    if (veto) { route_tier = 0; gwt_ignition = 0; }
+    ctx->route_tier_gwt = (route_tier << 16) | (gwt_ignition << 8) | (veto << 1);
     ctx->seq.fetch_add(1, std::memory_order_release);
 }
 
@@ -156,4 +164,77 @@ void* den_governor_device_ptr(void* ctx_ptr) {
         return nullptr;
     }
     return d_ptr;
+}
+
+// ── Emotion router: PAD → sampling params (3 FMAs) ──────────────────
+// Formulas:
+//   temperature        = 0.6 + 0.4 * arousal    // [0.6, 1.0]  warmer = more aroused
+//   top_p              = 0.7 + 0.3 * pleasure    // [0.7, 1.0]  broader = happier
+//   repetition_penalty = 1.0 + 0.2 * dominance   // [1.0, 1.2]  fresher = more dominant
+
+static float fp16_to_f32_host(uint16_t h) {
+    uint32_t sign = ((uint32_t)(h >> 15) & 0x1) << 31;
+    int32_t exp = ((h >> 10) & 0x1F) - 15 + 127;
+    uint32_t mant = (uint32_t)(h & 0x3FF) << 13;
+    if (exp <= 0) { mant = ((mant | 0x3C00000) >> (1 - exp)) & 0x7FFFFF; exp = 0; }
+    if (exp > 255) { exp = 255; mant = 0; }
+    uint32_t bits = sign | ((uint32_t)exp << 23) | mant;
+    float result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
+
+void den_emotion_route_sampling(const void* ctx_ptr, float* temperature, float* top_p,
+                                float* repetition_penalty) {
+    if (!ctx_ptr || !temperature || !top_p || !repetition_penalty) return;
+    auto* ctx = static_cast<const GovernorContext*>(ctx_ptr);
+
+    // Unpack PAD from uint64_t: [P:16][A:16][D:16][pad:16]
+    uint64_t packed = ctx->pad_packed;
+    float pleasure   = fp16_to_f32_host((packed >> 48) & 0xFFFF);
+    float arousal    = fp16_to_f32_host((packed >> 32) & 0xFFFF);
+    float dominance  = fp16_to_f32_host((packed >> 16) & 0xFFFF);
+
+    // Apply 3-FMA emotion routing
+    *temperature        = 0.6f + 0.4f * arousal;
+    *top_p              = 0.7f + 0.3f * pleasure;
+    *repetition_penalty = 1.0f + 0.2f * dominance;
+}
+
+// ── Volition engine: dawn_urgency → route_tier + gwt_ignition ──────
+// Route tier: 0=observe(stay), 1=consider(prep), 2=promote(swap now)
+// GWT ignition: 0=idle, 1=pre-ignition, 2=ignited (broadcast to workspace)
+// Packed: [route_tier:16][gwt_ignition:8][veto:1][reserved:7]
+
+uint32_t den_volition_route(void* ctx_ptr) {
+    if (!ctx_ptr) return 0;
+    auto* ctx = static_cast<GovernorContext*>(ctx_ptr);
+
+    float urgency = ctx->dawn_urgency;
+    uint32_t route_tier = 0;
+    uint32_t gwt_ignition = 0;
+
+    if (urgency > 0.6f) {
+        route_tier = 2;   // promote now
+        gwt_ignition = 2; // full ignition
+    } else if (urgency > 0.3f) {
+        route_tier = 1;   // consider promote
+        gwt_ignition = 1; // pre-ignition
+    }
+
+    // Safety veto: autonomy_idx < 0.15 blocks promotion (anti-sycophancy guard)
+    uint32_t veto = (ctx->autonomy_idx < 0.15f) ? 1 : 0;
+    if (veto) { route_tier = 0; gwt_ignition = 0; }
+
+    uint32_t packed = (route_tier << 16) | (gwt_ignition << 8) | (veto << 1);
+    ctx->route_tier_gwt = packed;
+    ctx->seq.fetch_add(1, std::memory_order_release);
+    return packed;
+}
+
+bool den_volition_promote_pending(const void* ctx_ptr) {
+    if (!ctx_ptr) return false;
+    auto* ctx = static_cast<const GovernorContext*>(ctx_ptr);
+    uint32_t gwt_ignition = (ctx->route_tier_gwt >> 8) & 0xFF;
+    return gwt_ignition >= 2;
 }

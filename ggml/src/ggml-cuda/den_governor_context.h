@@ -86,6 +86,20 @@ float den_vram_free_gb(const void* ctx);
 // Get device pointer for GPU-side access (returns ptr to GPU-mapped memory)
 void* den_governor_device_ptr(void* ctx);
 
+// Emotion router: read PAD from GovernorContext → adjust sampling params (3 FMAs)
+// Called before each token sample. No-op if ctx is null.
+void den_emotion_route_sampling(const void* ctx, float* temperature, float* top_p,
+                                float* repetition_penalty);
+
+// Volition engine: dawn_urgency → route_tier + gwt_ignition.
+// Thresholds: urgency<0.3→tier0(observe), 0.3-0.6→tier1(consider),
+//             >0.6→tier2(promote), gwt_ignition=ceil(urgency*2).
+// Returns packed route_tier_gwt value written to GovernorContext.
+uint32_t den_volition_route(void* ctx);
+
+// Read promote status from GovernorContext. Returns gwt_ignition > 0.
+bool den_volition_promote_pending(const void* ctx);
+
 #ifdef __cplusplus
 }
 #endif

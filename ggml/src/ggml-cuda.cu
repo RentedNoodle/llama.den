@@ -42,6 +42,7 @@
 // #include "ggml-cuda/specialized/k1_dense.cuh"
 // #include "ggml-cuda/specialized/k1_moe_35b.cuh"
 // Governor include deferred — den_governor_fsm.cuh has transitive dependency issues
+#include "ggml-cuda/den_governor_context.h"     // GovernorContext struct + C ABI (emotion router)
 #include "ggml-cuda/den_mxf8f6f4_gemv.cuh"
 #include "ggml-cuda/rope.cuh"
 #include "ggml-cuda/scale.cuh"
@@ -192,9 +193,13 @@ cudaError_t ggml_cuda_device_malloc(void ** ptr, size_t size, int device) {
 #endif
 }
 
-// ── Governor context (Phase 5 integration) ─────────────────────────────────
-// Governor context (minimal, avoid FSM header dependency for now)
-struct { int pressure, intent, state; bool mma_avail; size_t vram_free; } g_gov;
+// ── Governor context (Phase 3 consciousness integration) ──────────────────
+struct {
+    int pressure, intent, state;
+    bool mma_avail;
+    size_t vram_free;
+    GovernorContext* governor_ctx;  // cudaHostAllocMapped, shared with GPU + Rust
+} g_gov;
 static bool g_gov_init = false;
 static ggml_cuda_device_info ggml_cuda_init() {
 #ifdef __HIP_PLATFORM_AMD__
@@ -309,10 +314,12 @@ static ggml_cuda_device_info ggml_cuda_init() {
     // ── Den NVFP4 A/B dispatch init (Path B: driver bridge fatbin load) ────
     den_nvfp4_dispatch_init();
 
-    // ── Governor init (Phase 5 skeleton) ────────────────────────────────
+    // ── Governor init (Phase 3: GovernorContext via cudaHostAllocMapped) ──
     if (!g_gov_init) {
         g_gov.pressure = 0; g_gov.intent = 0; g_gov.state = 0;
-        g_gov.mma_avail = true; g_gov_init = true;
+        g_gov.mma_avail = true;
+        g_gov.governor_ctx = (GovernorContext*)den_governor_init();
+        g_gov_init = true;
     }
 
     return info;
@@ -321,6 +328,16 @@ static ggml_cuda_device_info ggml_cuda_init() {
 const ggml_cuda_device_info & ggml_cuda_info() {
     static ggml_cuda_device_info info = ggml_cuda_init();
     return info;
+}
+
+// ── Emotion router: C-linkage bridge for sampling path ─────────────
+// Called from common/sampling.cpp before each token sample.
+// Reads GovernorContext PAD, applies 3-FMA emotion→LLM routing.
+extern "C" void den_governor_emotion_route_apply(float* temperature, float* top_p,
+                                                  float* repetition_penalty) {
+    if (g_gov_init && g_gov.governor_ctx) {
+        den_emotion_route_sampling(g_gov.governor_ctx, temperature, top_p, repetition_penalty);
+    }
 }
 
 // #define DEBUG_CUDA_MALLOC

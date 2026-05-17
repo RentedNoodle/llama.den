@@ -8,6 +8,12 @@
 #include <random>
 #if defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
 #include <immintrin.h>
+
+// ── Den Governor emotion router (weak — overridden by libggml.so if linked) ──
+extern "C" __attribute__((weak)) void den_governor_emotion_route_apply(
+    float* temperature, float* top_p, float* repetition_penalty) {
+    (void)temperature; (void)top_p; (void)repetition_penalty; // no-op stub
+}
 #endif
 #include <nlohmann/json.hpp>
 using json = nlohmann::ordered_json;
@@ -413,11 +419,16 @@ static void sampler_queue(
     common_sampler * ctx_sampling,
     llama_token_data_array& cur_p,
     size_t   min_keep) {
-    const float         temp = params.temp;
     const float         dynatemp_range = params.dynatemp_range;
     const float         dynatemp_exponent = params.dynatemp_exponent;
-    const int32_t       top_k = params.top_k;
-    const float         top_p = params.top_p;
+    const float         top_k = params.top_k;
+    // Emotion router: PAD→LLM overrides (3 FMAs, no-op if Governor not linked)
+    float emotion_temp = params.temp;
+    float emotion_top_p = params.top_p;
+    float emotion_rep_pen = params.penalty_repeat;
+    den_governor_emotion_route_apply(&emotion_temp, &emotion_top_p, &emotion_rep_pen);
+    const float         temp = emotion_temp;
+    const float         top_p = emotion_top_p;
     const float         min_p = params.min_p;
     const float         tfs_z = params.tfs_z;
     const float         typical_p = params.typical_p;
@@ -581,7 +592,10 @@ static llama_token_data_array llama_sampling_prepare_impl(
     const int n_vocab = llama_n_vocab(llama_get_model(ctx_main));
 
     const int32_t penalty_last_n  = params.penalty_last_n < 0 ? params.n_prev : params.penalty_last_n;
-    const float   penalty_repeat  = params.penalty_repeat;
+    // Emotion router: PAD→rep_penalty override (same call as sampler_queue, near-zero overhead)
+    float _e_temp = 0, _e_top_p = 0, emotion_rep_pen = params.penalty_repeat;
+    den_governor_emotion_route_apply(&_e_temp, &_e_top_p, &emotion_rep_pen);
+    const float   penalty_repeat  = emotion_rep_pen;
     const float   penalty_freq    = params.penalty_freq;
     const float   penalty_present = params.penalty_present;
 
