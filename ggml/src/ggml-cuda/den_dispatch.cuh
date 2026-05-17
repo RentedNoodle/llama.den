@@ -25,6 +25,9 @@
 #include <cstdlib>
 #include <cstring>
 
+// K1-Dense adaptive kernel (Phase 1 — available for Phase 5 Governor integration)
+#include "specialized/k1_dense.cuh"
+
 
 // ─────────────────────────────────────────────────────────────────────────────────
 // PATH ENUM
