@@ -3,28 +3,53 @@
 //
 // Defines the FFI boundary between CUDA device kernels and Rust host spine.
 // PAD packed as uint64_t [P:16][A:16][D:16][pad:16] — single atomicExch.
+//
+// FP16 conversions work under both nvcc (device) and g++/clang (host FFI).
 #pragma once
 #include <cstdint>
+#include <cstring>
 #include <cuda_runtime.h>
 
 namespace den { namespace consciousness {
+
+// ── Host/device FP16 conversion helpers ─────────────────────────
+// Manual bit manipulation — works without __half type on host compilers.
+__host__ __device__ __forceinline__ static uint16_t float_to_fp16(float v) {
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    uint32_t sign = (bits >> 31) & 0x1;
+    int32_t exp = ((bits >> 23) & 0xFF) - 127 + 15;
+    uint32_t mant = (bits >> 13) & 0x3FF;
+    if (exp <= 0) { mant = (mant | 0x400) >> (1 - exp); exp = 0; }
+    if (exp > 31) { exp = 31; mant = 0; }
+    return (uint16_t)((sign << 15) | ((uint16_t)exp << 10) | (uint16_t)mant);
+}
+
+__host__ __device__ __forceinline__ static float fp16_to_float(uint16_t h) {
+    uint32_t sign = ((uint32_t)(h >> 15) & 0x1) << 31;
+    int32_t exp = ((h >> 10) & 0x1F) - 15 + 127;
+    uint32_t mant = (uint32_t)(h & 0x3FF) << 13;
+    if (exp <= 0) { mant = ((mant | 0x3C00000) >> (1 - exp)) & 0x7FFFFF; exp = 0; }
+    if (exp > 255) { exp = 255; mant = 0; }
+    uint32_t bits = sign | ((uint32_t)exp << 23) | mant;
+    float result;
+    memcpy(&result, &bits, sizeof(result));
+    return result;
+}
 
 // ───────────────────────────────────────────────────────────────────
 // PAD pack/unpack helpers
 // ───────────────────────────────────────────────────────────────────
 __host__ __device__ __forceinline__ uint64_t pack_pad(float p, float a, float d) {
-    return (uint64_t(__float2half_rn(p)) << 48) |
-           (uint64_t(__float2half_rn(a)) << 32) |
-           (uint64_t(__float2half_rn(d)) << 16);
+    return (uint64_t(float_to_fp16(p)) << 48) |
+           (uint64_t(float_to_fp16(a)) << 32) |
+           (uint64_t(float_to_fp16(d)) << 16);
 }
 
 __host__ __device__ __forceinline__ void unpack_pad(uint64_t packed, float& p, float& a, float& d) {
-    uint32_t p_bits = (packed >> 48) & 0xFFFF;
-    uint32_t a_bits = (packed >> 32) & 0xFFFF;
-    uint32_t d_bits = (packed >> 16) & 0xFFFF;
-    p = __half2float(reinterpret_cast<__half&>(p_bits));
-    a = __half2float(reinterpret_cast<__half&>(a_bits));
-    d = __half2float(reinterpret_cast<__half&>(d_bits));
+    p = fp16_to_float((packed >> 48) & 0xFFFF);
+    a = fp16_to_float((packed >> 32) & 0xFFFF);
+    d = fp16_to_float((packed >> 16) & 0xFFFF);
 }
 
 // ───────────────────────────────────────────────────────────────────

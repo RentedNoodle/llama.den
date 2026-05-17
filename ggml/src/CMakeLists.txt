@@ -477,6 +477,7 @@ if (GGML_CUDA)
 
         # Always add CUDA 12.8 Driver API bridge (compiled as C++ by host compiler)
         list(APPEND GGML_SOURCES_CUDA "ggml-cuda/den_sm120_driver_bridge.cpp")
+	        list(APPEND GGML_SOURCES_CUDA "ggml-cuda/den_consciousness_ffi.cpp")
 
         # Ensure <cuda.h> and <cuda_runtime.h> visible to .cpp compilation
         list(APPEND GGML_EXTRA_INCLUDES ${CUDAToolkit_INCLUDE_DIRS})

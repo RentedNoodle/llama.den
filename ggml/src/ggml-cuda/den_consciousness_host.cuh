@@ -58,7 +58,7 @@ struct ConsciousnessHost {
     __host__ void destroy() {
         ticker.destroy();
         if (d_checkpoint) cudaFreeHost((void*)d_checkpoint);
-        if (d_promote_flag) cudaFreeHost((void*)d_promote_flag);
+        if (d_promote_flag) cudaFreeHost(const_cast<uint32_t*>(d_promote_flag));
         cudaEventDestroy(promote_event);
     }
 };

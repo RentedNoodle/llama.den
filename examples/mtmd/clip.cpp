@@ -3375,10 +3375,10 @@ struct clip_model_loader {
                 throw std::runtime_error(string_format("%s: unable to find tensor %s\n", __func__, name.c_str()));
             }
             if (cur) {
-                // NVFP4 (type 40): remember original type, promote to F16 for allocation
+                // NVFP4 (type 40): promote to F16 for allocation — Stage 2 dequant
                 if (cur->type == GGML_TYPE_NVFP4) {
                     nvfp4_tensor_names.insert(name);
-                    cur->type = GGML_TYPE_F16;
+                    cur->type = GGML_TYPE_F16;  // Allocate at F16 size for Stage 2 dequant
                 }
                 tensors_to_load.push_back(cur);
                 // add tensors to context
@@ -3760,12 +3760,10 @@ struct clip_model_loader {
                     throw std::runtime_error(string_format("%s: failed to seek for tensor %s\n", __func__, t->name));
                 }
                 size_t num_bytes = ggml_nbytes(cur);
-                // NVFP4 tensors were converted to F16 at tensor duplication time (get_tensor lambda).
-                // The GGUF still has NVFP4 tiles — dequantize them at load time.
-                // TODO: Replace with direct OMMA dispatch via den::k1_dense::launch_dense_adaptive()
-                // once clip.cpp has NVFP4-aware graph building.
+                // NVFP4 tensors: dequant to F16 at load time (Stage 2).
+                // Stage 3 (OMMA routing) deferred to Phase 5 Governor integration.
                 if (nvfp4_tensor_names.count(t->name)) {
-                    // Read NVFP4 tiles (144B per 256 elements) from GGUF
+                    // Read NVFP4 tiles from GGUF
                     size_t tile_bytes = (ggml_nelements(cur) + 255) / 256 * 144;
                     read_buf.resize(tile_bytes);
                     fin.read(reinterpret_cast<char *>(read_buf.data()), tile_bytes);
@@ -5251,6 +5249,10 @@ bool clip_image_batch_encode(clip_ctx * ctx, const int n_threads, const clip_ima
     ggml_backend_sched_reset(ctx->sched.get());
     ggml_cgraph * gf = clip_image_build_graph(ctx, imgs);
     ggml_backend_sched_alloc_graph(ctx->sched.get(), gf);
+
+    // Stage 3 deferred: OMMA-native ViT routing needs Phase 5 Governor
+    // integration into ggml-backend dispatch. Current Stage 2 (NVFP4→F16
+    // dequant at load time) is correct and adequate for saliency-gated
 
     // set inputs
     const auto & model   = ctx->model;
