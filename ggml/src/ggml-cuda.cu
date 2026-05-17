@@ -2524,12 +2524,16 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
             }
         }
         if (!sm120_ok) {
-            // TODO: K1-Dense adaptive dispatch needs kernel debugging.
-            // Fallback to proven GEMV loop until variants are verified.
-            for (int i = 0; i < M; i++) {
-                den_mxf4nvf4_gemv_launch(
-                    src0->data, (const float *)src1->data + i * K, (float *)dst->data + i * N,
-                    N, K, stream, tile_norms, (int)n_norms);
+            if (M == 1) {
+                den_k1_dense_dispatch(
+                    src0->data, (const float *)src1->data, (float *)dst->data,
+                    M, N, K, stream, tile_norms, (int)n_norms);
+            } else {
+                for (int i = 0; i < M; i++) {
+                    den_mxf4nvf4_gemv_launch(
+                        src0->data, (const float *)src1->data + i * K, (float *)dst->data + i * N,
+                        N, K, stream, tile_norms, (int)n_norms);
+                }
             }
         }
     } else if (src0->type == GGML_TYPE_NVFP4 && src1->ne[1] == 1) {

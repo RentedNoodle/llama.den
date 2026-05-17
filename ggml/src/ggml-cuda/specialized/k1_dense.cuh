@@ -498,27 +498,14 @@ inline void launch_dense_adaptive(
     const int nwarps = 8;
 
     if (M == 1) {
+        // stream_k_decode: warp-cooperative, identical architecture to proven GEMV.
         const int grid = (N + nwarps * 16 - 1) / (nwarps * 16);
         stream_k_decode_nvfp4<<<grid, nwarps * 32, 8 * 1024, stream>>>(
             (const uint8_t*)weights, act, dst, N, K, kt_per_row, tile_norms, n_norms);
-    } else if (M <= 32) {
-        // warp_gemv_small — same as before
-        const int grid = (N + nwarps * 16 - 1) / (nwarps * 16);
-        dim3 block(32, (M + 7) / 8);
-        warp_gemv_small_m_nvfp4<<<grid, block, 0, stream>>>(
-            (const uint8_t*)weights, act, dst, M, N, K, kt_per_row, tile_norms, n_norms);
-    } else if (M <= 63) {
-        // mid_batch_gemm: 64 threads/CTA, 2-stage pipeline, 96 regs/thread
-        const int grid = M;  // One CTA per row
-        mid_batch_gemm_nvfp4<<<grid, 64, 0, stream>>>(
-            (const uint8_t*)weights, act, dst, M, N, K, kt_per_row, tile_norms, n_norms);
-    } else {
-        const int grid_n = (N + 127) / 128;
-        const int grid_m = (M + 127) / 128;
-        dim3 grid(grid_n, grid_m);
-        prefill_tile_gemm_nvfp4<<<grid, 256, 99 * 1024, stream>>>(
-            (const uint8_t*)weights, act, dst, M, N, K, kt_per_row, tile_norms, n_norms);
     }
+    // M>1: handled by ggml-cuda.cu with proven GEMV loop.
+    // warp_gemv_small, mid_batch_gemm, prefill_tile_gemm need warp-cooperative
+    // redesign to match the proven GEMV's lane-to-row OMMA mapping.
     CUDA_CHECK(cudaGetLastError());
 }
 
