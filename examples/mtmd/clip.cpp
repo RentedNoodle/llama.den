@@ -3343,6 +3343,31 @@ struct clip_model_loader {
             throw std::runtime_error(string_format("%s: failed to init ggml context\n", __func__));
         }
 
+        // NVFP4 → F16 dequant helpers (simple CPU path for vision encoder weights)
+        // OMMA byte → UE4M3 float (16 valid values: 0x00,0x18,0x20,0x24,0x28,0x2A,0x2C,0x2E,0x38-0x3F)
+        static const float omma_byte_scale[256] = {
+            0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,1.0f/64,0,0, 0,0,0,0,
+            0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0,
+            1.0f/16,0,0,0, 0,0,0,0, 2.0f/16,0,0,0, 3.0f/16,0,0,0,
+            4.0f/16,0,0,0, 5.0f/16,0,0,0, 6.0f/16,0,0,0, 7.0f/16,0,0,0,
+            8.0f/16,9.0f/16,10.0f/16,11.0f/16, 12.0f/16,13.0f/16,14.0f/16,15.0f/16};
+        static const float e2m1_tbl_f32[16] = {0,0.5f,1,1.5f,2,3,4,6,-0,-0.5f,-1,-1.5f,-2,-3,-4,-6};
+        auto dequant_nvfp4_tile_to_f16_cpu = [](const uint8_t* tile, uint16_t* out, int n) {
+            for (int i = 0; i < n; i++) {
+                int sg = i / 16, sw = sg / 4, sb = sg % 4;
+                uint8_t sv = ((const uint32_t*)tile)[sw] >> (sb * 8);
+                float scale = (sv < 0x7F) ? omma_byte_scale[sv] : 15.0f/16;
+                int bi = i / 2, ns = i & 1;
+                uint8_t nib = (tile[16 + bi] >> (ns * 4)) & 0x0F;
+                float val = e2m1_tbl_f32[nib] * scale;
+                uint32_t bits; memcpy(&bits, &val, 4);
+                out[i] = (uint16_t)(bits >> 16);
+            }
+        };
+
+        // Track which meta-tensors were NVFP4 before we change them to F16 for allocation
+        std::unordered_set<std::string> nvfp4_tensor_names;
+
         // helper function
         auto get_tensor = [&](const std::string & name, bool required = true) {
             ggml_tensor * cur = ggml_get_tensor(ctx_meta.get(), name.c_str());
@@ -3350,6 +3375,11 @@ struct clip_model_loader {
                 throw std::runtime_error(string_format("%s: unable to find tensor %s\n", __func__, name.c_str()));
             }
             if (cur) {
+                // NVFP4 (type 40): remember original type, promote to F16 for allocation
+                if (cur->type == GGML_TYPE_NVFP4) {
+                    nvfp4_tensor_names.insert(name);
+                    cur->type = GGML_TYPE_F16;
+                }
                 tensors_to_load.push_back(cur);
                 // add tensors to context
                 ggml_tensor * data_tensor = ggml_dup_tensor(ctx_clip.ctx_data.get(), cur);
@@ -3711,6 +3741,7 @@ struct clip_model_loader {
         // load data
         {
             std::vector<uint8_t> read_buf;
+            std::vector<uint8_t> dequant_buf;
 
             auto fin = std::ifstream(fname, std::ios::binary);
             if (!fin) {
@@ -3729,19 +3760,22 @@ struct clip_model_loader {
                     throw std::runtime_error(string_format("%s: failed to seek for tensor %s\n", __func__, t->name));
                 }
                 size_t num_bytes = ggml_nbytes(cur);
-                // NVFP4 tensors (GGML_TYPE_NVFP4 = 40): weights are tile-packed.
-                // The mtmd runtime does not have OMMA dispatch yet, so we
-                // dequantize to BF16 at load time for correctness. Replace
-                // this with direct OMMA GEMV kernel dispatch once clip.cpp
-                // has NVFP4-aware graph building.
-                if (cur->type == 40) {
-                    // Load tile-packed NVFP4 data, dequantize to BF16
-                    read_buf.resize(num_bytes);
-                    fin.read(reinterpret_cast<char *>(read_buf.data()), num_bytes);
-                    // TODO: call dequant_nvfp4_to_bf16() CUDA kernel here
-                    // For now, store as-is (correct if the backend handles NVFP4,
-                    // otherwise the first mul_mat will produce garbage)
-                    ggml_backend_tensor_set(cur, read_buf.data(), 0, num_bytes);
+                // NVFP4 tensors were converted to F16 at tensor duplication time (get_tensor lambda).
+                // The GGUF still has NVFP4 tiles — dequantize them at load time.
+                // TODO: Replace with direct OMMA dispatch via den::k1_dense::launch_dense_adaptive()
+                // once clip.cpp has NVFP4-aware graph building.
+                if (nvfp4_tensor_names.count(t->name)) {
+                    // Read NVFP4 tiles (144B per 256 elements) from GGUF
+                    size_t tile_bytes = (ggml_nelements(cur) + 255) / 256 * 144;
+                    read_buf.resize(tile_bytes);
+                    fin.read(reinterpret_cast<char *>(read_buf.data()), tile_bytes);
+                    // Dequantize to F16 on CPU
+                    dequant_buf.resize(num_bytes);
+                    dequant_nvfp4_tile_to_f16_cpu(
+                        read_buf.data(),
+                        reinterpret_cast<uint16_t *>(dequant_buf.data()),
+                        ggml_nelements(cur));
+                    ggml_backend_tensor_set(cur, dequant_buf.data(), 0, num_bytes);
                 } else if (ggml_backend_buft_is_host(buft)) {
                     // for the CPU and Metal backend, we can read directly into the tensor
                     fin.read(reinterpret_cast<char *>(cur->data), num_bytes);

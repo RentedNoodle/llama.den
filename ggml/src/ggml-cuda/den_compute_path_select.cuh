@@ -41,7 +41,7 @@ __host__ inline ComputePath select_compute_path(
         return blackwell_mma_available ? ComputePath::NATIVE_MXFP4
                                        : ComputePath::PADDED_FALLBACK;
 
-    if (weight_type == GGML_TYPE_NVFP4 || weight_type == GGML_TYPE_BLOCK_FP4_MMQ) {
+    if (weight_type == GGML_TYPE_NVFP4) {
         if (blackwell_mma_available) return ComputePath::NATIVE_NVFP4;
         return ComputePath::PADDED_FALLBACK;
     }

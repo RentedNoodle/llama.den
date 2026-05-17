@@ -35,7 +35,8 @@
 #include "ggml-cuda/den_mxf4nvf4_gemv.cuh"    // Path A — must precede den_dispatch.cuh
 #include "ggml-cuda/den_sm120_driver_bridge.hpp"
 #include "ggml-cuda/den_dispatch.cuh"          // A/B path selector — after gemv/driver
-#include "ggml-cuda/den_route_dispatcher.hpp"
+#include "ggml-cuda/specialized/k1_dense.cuh"  // K1-Dense adaptive kernel family (Phase 1+2)
+#include "ggml-cuda/specialized/k1_moe_35b.cuh" // K1-MoE-35B elastic persistence (Phase 2)
 #include "ggml-cuda/den_mxf8f6f4_gemv.cuh"
 #include "ggml-cuda/rope.cuh"
 #include "ggml-cuda/scale.cuh"
