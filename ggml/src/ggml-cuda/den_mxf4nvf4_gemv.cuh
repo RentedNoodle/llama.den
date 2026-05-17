@@ -1,64 +1,7 @@
 #pragma once
 // den_mxf4nvf4_gemv.cuh — SM120 Native NVFP4 GEMV (SINGLE-OMMA, E010-FIXED)
 #include "common.cuh"
-
-// E010 fix: runtime zero register (not literal "r"(0))
-#define OMMA_MXF4NVF4_4X(d0,d1,d2,d3, a0,a1,a2,a3, b0,b1, c0,c1,c2,c3, sfa,sfb) \
-    do { \
-        uint32_t zero_reg = 0; \
-        asm volatile( \
-            "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X " \
-            ".m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 " \
-            "{%0,%1,%2,%3},{%4,%5,%6,%7},{%8,%9}," \
-            "{%10,%11,%12,%13}," \
-            "{%14},{%15,%16},{%17},{%18,%19};" \
-            :"=f"(d0),"=f"(d1),"=f"(d2),"=f"(d3) \
-            :"r"(a0),"r"(a1),"r"(a2),"r"(a3),"r"(b0),"r"(b1), \
-             "f"(c0),"f"(c1),"f"(c2),"f"(c3), \
-             "r"(sfa),"h"((uint16_t)0),"h"((uint16_t)0), \
-             "r"(sfb),"h"((uint16_t)0),"h"((uint16_t)0) \
-            : "memory"); \
-    } while(0)
-
-static __device__ __forceinline__ uint8_t quant_f32_e2m1(float fv) {
-    float av = fabsf(fv); int sign = (fv < 0);
-    uint8_t n = 0;
-    if      (av >= 5.0f) n = 7;
-    else if (av >= 3.5f) n = 6;
-    else if (av >= 2.5f) n = 5;
-    else if (av >= 1.75f) n = 4;
-    else if (av >= 1.25f) n = 3;
-    else if (av >= 0.75f) n = 2;
-    else if (av >= 0.125f) n = 1;
-    if (sign) n |= 8;
-    return n;
-}
-
-// 4-bit code → full 8-bit UE4M3 byte for OMMA hardware.
-// Without this mapping, code 8 (1.0) becomes byte 0x08 which HW decodes as 0.015625.
-__device__ constexpr uint8_t ue4m3_code_to_byte[16] = {
-    0x00, 0x18, 0x20, 0x24, 0x28, 0x2A, 0x2C, 0x2E,
-    0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
-};
-
-static __device__ __forceinline__ uint8_t quant_f32_ue4m3(float v) {
-    if (v <= 0.03125f) return 0;
-    if (v <= 0.09375f) return 1;
-    if (v <= 0.15625f) return 2;
-    if (v <= 0.21875f) return 3;
-    if (v <= 0.28125f) return 4;
-    if (v <= 0.34375f) return 5;
-    if (v <= 0.40625f) return 6;
-    if (v <= 0.71875f) return 7;
-    if (v <= 1.0625f) return 8;
-    if (v <= 1.1875f) return 9;
-    if (v <= 1.3125f) return 10;
-    if (v <= 1.4375f) return 11;
-    if (v <= 1.5625f) return 12;
-    if (v <= 1.6875f) return 13;
-    if (v <= 1.8125f) return 14;
-    return 15;
-}
+#include "den_omma_shared.cuh"    // OMMA macro, LUT, quant helpers
 
 template <int NWARPS>
 __global__ void den_gemv_mxf4nvf4_kernel(

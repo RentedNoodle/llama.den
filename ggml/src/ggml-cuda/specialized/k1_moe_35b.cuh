@@ -9,7 +9,7 @@
 // All OMMA calls reuse the proven macro from den_mxf4nvf4_gemv.cuh verbatim.
 #pragma once
 #include "../common.cuh"
-#include "../den_mxf4nvf4_gemv.cuh"
+#include "../den_omma_shared.cuh"  // OMMA macro, LUT, quant helpers only (not full GEMV)
 #include "../den_l2_residency.cuh"
 #include "../governor/den_governor_fsm.cuh"
 

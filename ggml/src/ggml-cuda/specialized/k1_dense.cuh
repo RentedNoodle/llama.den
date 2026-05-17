@@ -10,7 +10,7 @@
 // and the ue4m3_code_to_byte[] LUT.
 #pragma once
 #include "../common.cuh"
-#include "../den_mxf4nvf4_gemv.cuh"
+#include "../den_omma_shared.cuh"  // OMMA macro, LUT, quant helpers only (not full GEMV)
 
 namespace den { namespace k1_dense {
 
