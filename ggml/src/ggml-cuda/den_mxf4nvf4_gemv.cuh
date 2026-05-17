@@ -95,19 +95,33 @@ __global__ void den_gemv_mxf4nvf4_kernel(
             const uint32_t * q1 = (const uint32_t *)(tile1 + 16 + mm * 32);
 
             // Load A-fragments from BOTH rows (single-OMMA requires all 4 regs valid)
-            uint32_t a0 = q0[kg * 2];
-            uint32_t a2 = q0[kg * 2 + 1];
-            uint32_t a1 = q1[kg * 2];
-            uint32_t a3 = q1[kg * 2 + 1];
+            // K-HALF INTERLEAVE: a0 from lower K-half, a2 from upper K-half.
+            // kg=0: a0=q0[0], a2=q0[4]; kg=1: a0=q0[1], a2=q0[5]; etc.
+            // This matches the INT4 m16n8k64 reference layout where each register
+            // contributes 32 elements (32.0 in identity test).
+            uint32_t a0 = q0[kg];
+            uint32_t a2 = q0[4 + kg];
+            uint32_t a1 = q1[kg];
+            uint32_t a3 = q1[4 + kg];
 
-            // B-fragment: dynamic sfb (same as before)
-            int kb = kt * 256 + mm * 64 + kg * 16;
+            // B-fragment: dynamic sfb — load 8 from lower K-half and 8 from upper
+            // K-half (32 apart), matching the A-fragment K-half interleave layout.
+            int kb = kt * 256 + mm * 64;
             float x_local[16];
             float local_max = 0.0f;
             #pragma unroll
-            for (int i = 0; i < 16; i++) {
-                float val = ((kb+i) < K) ? x[kb+i] : 0.0f;
+            for (int i = 0; i < 8; i++) {
+                int ki = kb + kg * 8 + i;                // lower K-half
+                float val = (ki < K) ? x[ki] : 0.0f;
                 x_local[i] = val;
+                float av = fabsf(val);
+                if (av > local_max) local_max = av;
+            }
+            #pragma unroll
+            for (int i = 0; i < 8; i++) {
+                int ki = kb + 32 + kg * 8 + i;           // upper K-half
+                float val = (ki < K) ? x[ki] : 0.0f;
+                x_local[8 + i] = val;
                 float av = fabsf(val);
                 if (av > local_max) local_max = av;
             }
@@ -139,14 +153,9 @@ __global__ void den_gemv_mxf4nvf4_kernel(
             acc0 = d0; acc1 = d1; acc2 = d2; acc3 = d3;
         }
 
-        // Shuffle-reduce across kg
-        #pragma unroll
-        for (int mask = 1; mask <= 2; mask *= 2) {
-            acc0 += __shfl_xor_sync(0xffffffff, acc0, mask);
-            acc1 += __shfl_xor_sync(0xffffffff, acc1, mask);
-            acc2 += __shfl_xor_sync(0xffffffff, acc2, mask);
-            acc3 += __shfl_xor_sync(0xffffffff, acc3, mask);
-        }
+        // NOTE: OMMA returns full K=64 sum per lane with the corrected
+        // A-fragment K-half interleave. No shuffle-reduce needed — doing so
+        // would quadruple the output (E012 fixed).
 
         // Apply per-tile norm and accumulate
         if (kg == 0) {
