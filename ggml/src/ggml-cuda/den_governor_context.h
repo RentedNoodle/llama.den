@@ -36,7 +36,7 @@ struct GovernorContext {
 
     // [4] Routing & safety (packed)
     uint32_t route_tier_gwt;             // [route:16][gwt_ignition:8][veto:1][reserved:7]
-    uint32_t reserved1;
+    float    kv_evict_ratio;             // was reserved1 — fraction to evict (default 0.03)
 
     // [5] Feature flags + reserved for Volition + Memory bridge fields
     uint32_t cats_config;                        // CATS: [tree_depth:8][fan_out:8][reserved:16]
@@ -47,7 +47,8 @@ struct GovernorContext {
     uint32_t tma_tile_load_enabled          : 1;  // TMA-based tile loading
     uint32_t vort_enabled                   : 1;  // VORT power-law time decay
     uint32_t cats_enabled                   : 1;  // CATS self-speculative decoding
-    uint32_t                                : 25; // remaining reserved
+    uint32_t kv_tier_enabled                : 1;  // Semantic KV cache hierarchy
+    uint32_t                                : 24; // remaining reserved
 };
 #pragma pack(pop)
 
