@@ -59,7 +59,8 @@ struct GovernorContext {
     uint32_t texture_latent_filtering       : 1;  // texture unit latent filtering for diffusion (default 0)
     uint32_t attn_region_pruning            : 1;  // attention region pruning for diffusion UNet (default 0)
     uint32_t cuda_graph_supercapture        : 1;  // CUDA Graph supercapture for diffusion pipeline (default 0)
-    uint32_t                                : 13; // remaining reserved
+    uint32_t latent_video_codec             : 1;  // latent AV1 video codec for denoising trajectory (default 0)
+    uint32_t                                : 12; // remaining reserved
 };
 #pragma pack(pop)
 
