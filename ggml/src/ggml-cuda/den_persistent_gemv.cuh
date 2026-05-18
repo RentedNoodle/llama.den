@@ -136,9 +136,20 @@ __global__ void persistent_gemv_omma(
 
 static void den_persistent_gemv_launch(
     const void * weights, const float * act, float * dst,
-    int N, int K, cudaStream_t stream)
+    int N, int K, cudaStream_t stream,
+    const GovernorContext* ctx = nullptr)
 {
-    const int kt_per_row = K / 256;
+    // Adaptive tile sizing: PAD arousal selects K-group granularity.
+    // Default: 256 (kt_per_row), High arousal: 512 (faster, coarser),
+    // Calm/low arousal: 128 (higher quality, slower).
+    int tile_k = 256;  // default
+    if (ctx) {
+        uint16_t a_bits = (ctx->pad_packed >> 32) & 0xFFFF;
+        float arousal = (int16_t)a_bits / 32767.0f;  // decode FP16 arousal
+        if (arousal > 0.6f)      tile_k = 512;
+        else if (arousal < 0.2f) tile_k = 128;
+    }
+    const int kt_per_row = K / tile_k;
     int32_t zero = 0;
     cudaMemcpyToSymbolAsync(g_persistent_work_counter, &zero, sizeof(int32_t), 0,
                             cudaMemcpyHostToDevice, stream);
