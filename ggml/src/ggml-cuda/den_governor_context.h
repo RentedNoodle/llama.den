@@ -39,7 +39,10 @@ struct GovernorContext {
     float    kv_evict_ratio;             // was reserved1 — fraction to evict (default 0.03)
 
     // [5] Feature flags + reserved for Volition + Memory bridge fields
-    uint32_t cats_config;                        // CATS: [tree_depth:8][fan_out:8][reserved:16]
+    uint32_t cats_tree_depth : 8;                // CATS tree depth (default 3)
+    uint32_t cats_fan_out : 8;                   // CATS fan-out (default 4)
+    uint32_t cats_reserved : 15;                 // reserved for CATS flags
+    uint32_t pdl_launch_enabled : 1;             // PDL device-side kernel launch (default 0)
     uint32_t omma_attention_enabled         : 1;  // OMMA-as-attention
     uint32_t speculative_attention_enabled  : 1;  // warp-divergence attention
     uint32_t register_kv_cache_enabled      : 1;  // register-cached KV

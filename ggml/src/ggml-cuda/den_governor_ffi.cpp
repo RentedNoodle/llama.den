@@ -38,7 +38,9 @@ void* den_governor_init(void) {
     ctx->neuro_da_5ht = 0; // will be written by den_neuromod_write
     ctx->neuro_ach_ne = 0;
     ctx->route_tier_gwt = 0;
-    ctx->cats_config = (3 & 0xFF) | ((4 & 0xFF) << 8); // default depth=3, fan_out=4
+    ctx->cats_tree_depth = 3;  // default CATS depth=3
+    ctx->cats_fan_out = 4;     // default CATS fan-out=4
+    ctx->pdl_launch_enabled = 0; // PDL device-side launch disabled by default
     ctx->cats_enabled = 0;
     ctx->omma_attention_enabled = 0;
     ctx->speculative_attention_enabled = 0;
