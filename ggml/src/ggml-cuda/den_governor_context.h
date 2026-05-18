@@ -54,7 +54,11 @@ struct GovernorContext {
     uint32_t phase_attn_enabled             : 1;  // Phase-conjugate attention
     uint32_t rmsnorm_fusion_enabled         : 1;  // fused RMSNorm in GEMV (default 0)
     uint32_t vae_unet_overlap               : 1;  // dual-stream VAE/UNet overlap for progressive preview
-    uint32_t                                : 18; // remaining reserved
+    uint32_t cfg_fusion_enabled             : 1;  // fused CFG: dual-condition UNet single-pass (default 0)
+    uint32_t fractal_latent_cache           : 1;  // fractal latent region cache for diffusion UNet
+    uint32_t texture_latent_filtering       : 1;  // texture unit latent filtering for diffusion (default 0)
+    uint32_t attn_region_pruning            : 1;  // attention region pruning for diffusion UNet (default 0)
+    uint32_t                                : 14; // remaining reserved
 };
 #pragma pack(pop)
 
