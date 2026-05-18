@@ -20,14 +20,14 @@
 
 #pragma once
 #include <cstdint>
-#include "den_governor_context.h"
+#include <cfloat>
+#include <cassert>
 
 namespace den { namespace regcache {
 
 // ── Constants ────────────────────────────────────────────────────
 
 constexpr int ENTRIES_PER_WARP = 40;       // each warp owns 40 slots
-constexpr int WARPS_PER_SM    = 4;         // 4 warps per block
 constexpr int CACHE_SET_SIZE  = 8;         // 8-way set associative
 constexpr int CACHE_NUM_SETS  = ENTRIES_PER_WARP / CACHE_SET_SIZE; // 5 sets
 
@@ -40,7 +40,7 @@ constexpr int CACHE_NUM_SETS  = ENTRIES_PER_WARP / CACHE_SET_SIZE; // 5 sets
 
 struct alignas(16) KVCacheEntry {
     int32_t  block_id;      // 4B -- token position
-    float    k_proj;        // 4B -- FP32 projected key
+    float    k_proj;        // 4B -- FP32 projected key (reserved for future use by persistent attention kernel)
     float    score_hint;    // 4B -- last attention score
     uint32_t flags;         // 4B -- metadata
 };
@@ -55,7 +55,6 @@ static_assert(sizeof(KVCacheEntry) == 16,
 
 struct alignas(128) WarpRegisterCache {
     KVCacheEntry sets[CACHE_NUM_SETS][CACHE_SET_SIZE];
-    int          lru_age_counter;
 };
 
 // ── Random projection vector ─────────────────────────────────────
@@ -68,6 +67,9 @@ __constant__ float g_proj_vector[4096];  // up to 4096-dim projection
 // ── Device functions ─────────────────────────────────────────────
 
 // Compute k_proj = dot(K_block, g_proj_vector) for a KV block
+// NOTE: This function uses warp-level __shfl_xor_sync and requires
+// blockDim.x <= 32 (single warp). Callers with larger block sizes
+// must reduce across warps independently after calling this function.
 __device__ __forceinline__ float compute_k_proj(
     const float* kv_block,
     int dim)
@@ -76,7 +78,7 @@ __device__ __forceinline__ float compute_k_proj(
     for (int i = threadIdx.x; i < dim; i += blockDim.x) {
         result += kv_block[i] * g_proj_vector[i];
     }
-    // Warp reduction
+    // Warp reduction (all lanes in the warp get the same sum)
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) {
         result += __shfl_xor_sync(0xffffffff, result, off);
@@ -84,19 +86,21 @@ __device__ __forceinline__ float compute_k_proj(
     return result;
 }
 
-// Lookup: returns true on hit with cached score_hint
+// Lookup: returns true on hit with cached score_hint.
+// Does NOT mutate the cache (lookup is a read-only operation).
 // If block_id matches and the entry is valid, returns the cached score hint.
+// out_score must be non-null.
 __device__ __forceinline__ bool cache_lookup(
     WarpRegisterCache& cache,
     int set,
     int block_id,
-    float* out_score)
+    float* __restrict__ out_score)
 {
+    assert(out_score != nullptr);
     for (int w = 0; w < CACHE_SET_SIZE; w++) {
         auto& entry = cache.sets[set][w];
         if (entry.block_id == block_id && (entry.flags & 1)) {
             *out_score = entry.score_hint;
-            entry.flags |= 0x100;  // mark recently used (age bit 8)
             return true;
         }
     }
@@ -114,7 +118,7 @@ __device__ __forceinline__ void cache_insert(
     // Find eviction candidate: lowest score_hint among valid entries,
     // or first invalid entry
     int evict_way = 0;
-    float min_score = 1.0f;
+    float min_score = FLT_MAX;
 
     for (int w = 0; w < CACHE_SET_SIZE; w++) {
         auto& e = cache.sets[set][w];
@@ -142,7 +146,6 @@ __device__ __forceinline__ void cache_init(WarpRegisterCache& cache) {
             cache.sets[s][w].score_hint = 0.0f;
         }
     }
-    cache.lru_age_counter = 0;
 }
 
 }} // namespace den::regcache

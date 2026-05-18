@@ -36,8 +36,9 @@ __global__ void test_entry_format_kernel() {
 // ── Test 2: Cache init ───────────────────────────────────────────
 
 __global__ void test_cache_init_kernel() {
-    WarpRegisterCache cache;
+    __shared__ WarpRegisterCache cache;
     cache_init(cache);
+    __syncthreads();
 
     if (threadIdx.x == 0) {
         printf("Test cache_init:\n");
@@ -60,8 +61,9 @@ __global__ void test_cache_init_kernel() {
 // ── Test 3: Cache insert and lookup ─────────────────────────────
 
 __global__ void test_cache_insert_lookup_kernel() {
-    WarpRegisterCache cache;
+    __shared__ WarpRegisterCache cache;
     cache_init(cache);
+    __syncthreads();
 
     // Insert an entry at set derived from block_id
     KVCacheEntry e;
@@ -71,6 +73,7 @@ __global__ void test_cache_insert_lookup_kernel() {
     e.flags = 1;
     int set = 7 % CACHE_NUM_SETS;
     cache_insert(cache, set, e);
+    __syncthreads();
 
     // Look it up
     float score;
@@ -93,8 +96,9 @@ __global__ void test_cache_insert_lookup_kernel() {
 // ── Test 4: Cache eviction (lowest score replaced) ───────────────
 
 __global__ void test_cache_eviction_kernel() {
-    WarpRegisterCache cache;
+    __shared__ WarpRegisterCache cache;
     cache_init(cache);
+    __syncthreads();
 
     // Fill all 8 ways in set 0 with descending scores
     int set = 0;
@@ -114,6 +118,7 @@ __global__ void test_cache_eviction_kernel() {
     e.score_hint = 0.15f;
     e.flags = 1;
     cache_insert(cache, set, e);
+    __syncthreads();
 
     // block_id=7 (lowest score 0.2) should be gone, block_id=99 should be present
     float score;
@@ -134,8 +139,9 @@ __global__ void test_cache_eviction_kernel() {
 // ── Test 5: Multiple sets work independently ─────────────────────
 
 __global__ void test_multi_set_kernel() {
-    WarpRegisterCache cache;
+    __shared__ WarpRegisterCache cache;
     cache_init(cache);
+    __syncthreads();
 
     // Insert one entry per set
     for (int s = 0; s < CACHE_NUM_SETS; s++) {
@@ -146,6 +152,7 @@ __global__ void test_multi_set_kernel() {
         e.flags = 1;
         cache_insert(cache, s, e);
     }
+    __syncthreads();
 
     // Verify each set independently
     bool all_ok = true;
@@ -241,7 +248,7 @@ int main() {
     err = cudaDeviceSynchronize();
     if (err != cudaSuccess) { fprintf(stderr, "FAIL test_multi_set: %s\n", cudaGetErrorString(err)); return 1; }
 
-    test_k_proj_structure_kernel<<<1, 64>>>();
+    test_k_proj_structure_kernel<<<1, 32>>>();
     err = cudaDeviceSynchronize();
     if (err != cudaSuccess) { fprintf(stderr, "FAIL test_k_proj_structure: %s\n", cudaGetErrorString(err)); return 1; }
 
