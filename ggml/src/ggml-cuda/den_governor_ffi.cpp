@@ -118,7 +118,7 @@ void den_dawn_write(void* ctx_ptr, float urgency) {
 // ── Cognitive clock + tick ───────────────────────────────────────────
 
 void den_cognitive_clock_set(void* ctx_ptr, uint8_t mode) {
-    if (!ctx_ptr || mode > 4) return;
+    if (!ctx_ptr || mode > 5) return;
     auto* ctx = static_cast<GovernorContext*>(ctx_ptr);
     ctx->cognitive_clock = mode;
     ctx->seq.fetch_add(1, std::memory_order_release);
@@ -251,4 +251,21 @@ bool den_volition_promote_pending(const void* ctx_ptr) {
     auto* ctx = static_cast<const GovernorContext*>(ctx_ptr);
     uint32_t gwt_ignition = (ctx->route_tier_gwt >> 8) & 0xFF;
     return gwt_ignition >= 2;
+}
+
+// ── Subvocal path enable/disable ───────────────────────────────────────
+// Called from Rust kairos_tick() when CognitiveMode::InternalThought is set.
+
+void den_subvocal_enable(void* ctx_ptr) {
+    if (!ctx_ptr) return;
+    auto* ctx = static_cast<GovernorContext*>(ctx_ptr);
+    ctx->subvocal_path_enabled = 1;
+    ctx->seq.fetch_add(1, std::memory_order_release);
+}
+
+void den_subvocal_disable(void* ctx_ptr) {
+    if (!ctx_ptr) return;
+    auto* ctx = static_cast<GovernorContext*>(ctx_ptr);
+    ctx->subvocal_path_enabled = 0;
+    ctx->seq.fetch_add(1, std::memory_order_release);
 }

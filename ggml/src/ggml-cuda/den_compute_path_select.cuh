@@ -14,7 +14,8 @@ enum class ComputePath : uint8_t {
     NATIVE_MXFP4    = 2,  // mxf4 2X UE8M0 m16n8k64 — SECONDARY (MXFP4 models only)
     PADDED_FALLBACK = 3,  // mxf8f6f4 1X UE8M0 m16n8k32 — TERTIARY
     DP4A_MMQ        = 4,  // ik_llama.cpp generic INT4 MMQ — QUATERNARY
-    CPU_VNNI        = 5   // 7800X3D AVX-512 VNNI — QUINARY
+    CPU_VNNI        = 5,  // 7800X3D AVX-512 VNNI — QUINARY
+    SUBVOCAL        = 6   // Subvocal Tensor Truncation (internal cognition, layer 20 cutoff)
 };
 
 inline const char* compute_path_name(ComputePath p) {
@@ -24,6 +25,7 @@ inline const char* compute_path_name(ComputePath p) {
         case ComputePath::PADDED_FALLBACK: return "PADDED_FALLBACK";
         case ComputePath::DP4A_MMQ:        return "DP4A_MMQ";
         case ComputePath::CPU_VNNI:        return "CPU_VNNI";
+        case ComputePath::SUBVOCAL:        return "SUBVOCAL";
     }
     return "UNKNOWN";
 }

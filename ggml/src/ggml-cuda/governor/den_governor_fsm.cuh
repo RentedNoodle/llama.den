@@ -86,7 +86,8 @@ enum GovState : uint8_t {
     GOV_HOT_SWAP,
     GOV_TDR_RECOVERY,
     GOV_SLEEP,
-    GOV_DREAM
+    GOV_DREAM,
+    GOV_SUBVOCAL        // Layer-20 truncation for internal cognition ticks
 };
 
 struct GovernorContext {
@@ -101,6 +102,8 @@ struct GovernorContext {
     size_t vram_total_bytes;
     bool blackwell_mma_available;
     bool tdr_triggered;
+    bool subvocal_path_enabled;          // SUBVOCAL: layer-20 truncation active
+    float* d_landscape_buf;              // SUBVOCAL: device ptr to [8][256][256] landscape
     cudaStream_t compute_stream;
     cudaStream_t dma_stream;
     cudaEvent_t hotswap_complete;
@@ -152,6 +155,9 @@ __host__ inline GovState transition_state(GovernorContext* ctx, GovState request
             break;
         case GOV_MOE_DISPATCH:
             ctx->active_path = ComputePath::NATIVE_NVFP4;
+            break;
+        case GOV_SUBVOCAL:
+            ctx->active_path = ComputePath::SUBVOCAL;
             break;
         case GOV_TDR_RECOVERY:
             ctx->active_path = ComputePath::CPU_VNNI;

@@ -5,10 +5,22 @@
 // ═══════════════════════════════════════════════════════════════════════════════════
 //
 // Pins Dreya's 256x256x8 f32 cognitive landscape (2 MB) permanently in L2 cache
-// via cudaAccessPropertyPersisting. The LLM sampling loop reads PAD values with
-// zero-latency L2 access and applies emotional bias to token logits before softmax.
+// via cudaStreamSetAttribute with cudaAccessPropertyPersisting. The LLM sampling
+// loop reads PAD values with zero-latency L2 access and applies emotional bias
+// to token logits before softmax.
 //
 // Gated by GovernorContext.l2_cognitive_enabled (default 0).
+//
+// ── L2 persistence mechanism ──
+// Uses CUDA 12.8 stream-level access policy window
+// (cudaStreamAttributeAccessPolicyWindow = cudaLaunchAttributeAccessPolicyWindow).
+// Sets hitProp=cudaAccessPropertyPersisting on the inference stream so the L2
+// controller retains the cognitive buffer's cache lines across kernel launches.
+//
+// The access policy window is set on the default stream (stream 0). The inference
+// pipeline must launch its kernels on stream 0 for the persistence to apply.
+// On GB203-300-A1, cudaDevAttrMaxAccessPolicyWindowSize is ~48 MB (full L2),
+// so the 2 MB buffer fits with headroom.
 //
 // ── Usage ──
 //   1. cudaMalloc(&buf, COGNITIVE_BUFFER_SIZE * sizeof(float));
@@ -30,16 +42,16 @@
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Cognitive landscape dimensions: 256×256×8 f32 = 2 MB
+// Cognitive landscape dimensions: 256x256x8 f32 = 2 MB
 // Fits comfortably in GB203's 48 MB L2 with room for kernel data.
 #define COGNITIVE_BUFFER_SIZE (256 * 256 * 8)  // 2 MB f32
 
-// Maximum number of emotional tokens with pre-computed PAD→logit bias weights.
-// 128 tokens × 4 ints + 4 floats each = 2 KB — negligible VRAM overhead.
+// Maximum number of emotional tokens with pre-computed PAD->logit bias weights.
+// 128 tokens x 4 ints + 4 floats each = 2 KB -- negligible VRAM overhead.
 #define PAD_BIAS_TOKENS 128
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PadBiasWeights — pre-computed token→PAD bias vectors loaded at model init
+// PadBiasWeights -- pre-computed token->PAD bias vectors loaded at model init
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // One instance lives in device-accessible memory (either cudaMalloc or
@@ -60,39 +72,43 @@ struct PadBiasWeights {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// den_cognitive_buffer_pin — pin buffer in L2 via persistent access policy
+// den_cognitive_buffer_pin -- pin buffer in L2 via persistent access policy
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Sets the CUDA memory range access policy to cudaAccessPropertyPersisting
-// for the cognitive buffer, instructing the L2 cache to retain the data
-// across kernel launches. Combined with cudaMemPrefetchAsync to warm caches.
+// Sets the stream-level access policy window to cudaAccessPropertyPersisting
+// for the cognitive buffer's VA range. The L2 controller retains these cache
+// lines across kernel launches, giving the sampling loop zero-latency access
+// to PAD state and cognitive landscape data.
 //
-// The buffer must already be allocated via cudaMalloc on the target device.
-// Must be called once at model load time, before any inference launches.
+// Prefetches the buffer to GPU first to warm caches and establish residency.
+//
+// The policy is set on stream 0 (default stream). If the inference pipeline
+// uses a non-default stream, call den_cognitive_buffer_pin_on_stream() instead.
 //
 // Parameters:
-//   gpu_buffer — device pointer to the cognitive buffer (must be cudaMalloc'd)
-//   bytes      — size of the buffer in bytes (should be COGNITIVE_BUFFER_SIZE * 4)
+//   gpu_buffer -- device pointer to the cognitive buffer (cudaMalloc'd)
+//   bytes      -- size of the buffer in bytes
 //
 // Returns:
-//    0 — success, buffer pinned in L2
-//   -1 — null pointer or zero size
-//   -2 — cudaMemPrefetchAsync failed (device not ready or invalid pointer)
-//   -3 — cudaMemRangeSetAttribute failed (L2 persistence not supported on this device)
-//   -4 — cudaStreamSynchronize failed
+//    0 -- success, buffer pinned in L2
+//   -1 -- null pointer or zero size
+//   -2 -- cudaMemPrefetchAsync failed
+//   -3 -- cudaStreamSetAttribute failed (L2 persistence not supported)
+//   -4 -- cudaStreamSynchronize failed
 //
 // Architecture notes:
-//   - GB203 has 48 MB L2 — the 2 MB buffer occupies ~4.2% of L2.
-//   - L2 persistence works by setting per-page access policy in the L2 controller.
-//   - Setting hitRatio too aggressively for large ranges can starve other data.
-//     2 MB is small enough that this is not a concern.
-//   - On SM120, cudaAccessPropertyPersisting is supported through the
-//     cudaMemRangeSetAttribute API (CUDA 11.0+, well-tested on CUDA 12.8).
+//   - GB203 has 48 MB L2 -- the 2 MB buffer occupies ~4.2% of L2.
+//   - hitRatio=1.0 tells the L2 controller to use Persisting property for
+//     ALL accesses to this range. Cache lines tagged Persistent survive
+//     across kernel boundaries and global sync points.
+//   - cudaAccessPropertyStreaming would be the inverse (evict eagerly).
+//   - On SM120/Blackwell, the access policy window is a first-class feature
+//     exposed via cudaStreamSetAttribute (CUDA 11.0+, tested on CUDA 12.8).
 
 inline __host__ int den_cognitive_buffer_pin(float* gpu_buffer, size_t bytes) {
     if (!gpu_buffer || bytes == 0) {
         fprintf(stderr,
-            "DEN_COG_BUF: den_cognitive_buffer_pin — invalid args "
+            "DEN_COG_BUF: den_cognitive_buffer_pin -- invalid args "
             "(ptr=%p, bytes=%zu)\n",
             (void*)gpu_buffer, bytes);
         return -1;
@@ -101,7 +117,6 @@ inline __host__ int den_cognitive_buffer_pin(float* gpu_buffer, size_t bytes) {
     // ── Step 1: Prefetch to GPU ──
     // Bring the buffer into GPU-accessible memory and warm the L2 cache.
     // Uses the default stream (0) since this is a one-time init operation.
-    // After prefetch, the data is resident and accessible with low latency.
 
     cudaError_t err = cudaMemPrefetchAsync(gpu_buffer, bytes, 0, 0);
     if (err != cudaSuccess) {
@@ -111,23 +126,36 @@ inline __host__ int den_cognitive_buffer_pin(float* gpu_buffer, size_t bytes) {
         return -2;
     }
 
-    // ── Step 2: Set L2 persistence ──
-    // Mark the memory range with cudaAccessPropertyPersisting so the L2
-    // controller retains cache lines across kernel boundaries. Without this,
-    // prefetched data can be evicted between decode steps.
+    // ── Step 2: Set L2 persistence via stream access policy window ──
+    // The access policy window is a stream-level attribute that tells the
+    // L2 controller: "for this virtual address range, use the given access
+    // property for hitRatio fraction of accesses."
     //
-    // cudaMemRangeSetAttribute with cudaMemRangeAttributeAccessPolicy:
-    //   value = cudaAccessPropertyPersisting (2) — persist in L2
-    //   Setting back to cudaAccessPropertyNormal (0) removes persistence.
+    // hitProp = cudaAccessPropertyPersisting:
+    //   Cache lines in this range are tagged Persistent and survive across
+    //   kernel boundaries. They are only evicted when the L2 is under
+    //   extreme pressure (all other lines exhausted first).
+    //
+    // missProp = cudaAccessPropertyNormal:
+    //   When a miss does occur (the (1-hitRatio) fraction), use default
+    //   caching behavior. Since we set hitRatio=1.0, this never triggers.
+    //
+    // The window parameters (base_ptr, num_bytes) must match the buffer.
+    // The window is applied to stream 0; all kernels on this stream inherit
+    // the persistence policy.
 
-    int policy = cudaAccessPropertyPersisting;
-    err = cudaMemRangeSetAttribute(
-        gpu_buffer, bytes,
-        cudaMemRangeAttributeAccessPolicy,
-        &policy, sizeof(policy));
+    cudaStreamAttrValue attr_val = {};
+    attr_val.accessPolicyWindow.base_ptr  = (void*)gpu_buffer;
+    attr_val.accessPolicyWindow.num_bytes = bytes;
+    attr_val.accessPolicyWindow.hitRatio  = 1.0f;
+    attr_val.accessPolicyWindow.hitProp   = cudaAccessPropertyPersisting;
+    attr_val.accessPolicyWindow.missProp  = cudaAccessPropertyNormal;
+
+    err = cudaStreamSetAttribute(
+        0, cudaStreamAttributeAccessPolicyWindow, &attr_val);
     if (err != cudaSuccess) {
         fprintf(stderr,
-            "DEN_COG_BUF: cudaMemRangeSetAttribute (PERSISTING) failed (%d): %s "
+            "DEN_COG_BUF: cudaStreamSetAttribute(PERSISTING) failed (%d): %s "
             "- L2 persistence not supported on this device\n",
             (int)err, cudaGetErrorString(err));
         return -3;
@@ -135,8 +163,7 @@ inline __host__ int den_cognitive_buffer_pin(float* gpu_buffer, size_t bytes) {
 
     // ── Step 3: Synchronize ──
     // Ensure the prefetch and policy updates are fully applied before any
-    // inference kernel accesses the buffer. This avoids transient states
-    // where partial data is in L2.
+    // inference kernel accesses the buffer.
 
     err = cudaStreamSynchronize(0);
     if (err != cudaSuccess) {
@@ -147,65 +174,120 @@ inline __host__ int den_cognitive_buffer_pin(float* gpu_buffer, size_t bytes) {
     }
 
     fprintf(stderr,
-        "DEN_COG_BUF: pinned %zu bytes at %p in L2 cache (policy=PERSISTING)\n",
+        "DEN_COG_BUF: pinned %zu bytes at %p in L2 cache "
+        "(hitRatio=1.0, hitProp=PERSISTING)\n",
         bytes, (void*)gpu_buffer);
     return 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// den_cognitive_buffer_unpin — remove L2 persistence from the buffer
+// den_cognitive_buffer_pin_on_stream -- pin on a non-default stream
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Reverts the access policy to cudaAccessPropertyNormal so the L2 cache can
-// evict the buffer's cache lines normally. Typically called at model unload
-// or when the cognitive buffer is being freed.
+// Same as den_cognitive_buffer_pin but allows specifying a stream. Use this
+// if the inference pipeline runs on a dedicated stream rather than stream 0.
+
+inline __host__ int den_cognitive_buffer_pin_on_stream(
+    float* gpu_buffer, size_t bytes, cudaStream_t stream)
+{
+    if (!gpu_buffer || bytes == 0) {
+        fprintf(stderr,
+            "DEN_COG_BUF: den_cognitive_buffer_pin_on_stream -- invalid args "
+            "(ptr=%p, bytes=%zu)\n",
+            (void*)gpu_buffer, bytes);
+        return -1;
+    }
+
+    cudaError_t err = cudaMemPrefetchAsync(gpu_buffer, bytes, 0, stream);
+    if (err != cudaSuccess) {
+        fprintf(stderr,
+            "DEN_COG_BUF: prefetch failed on stream (%d): %s\n",
+            (int)err, cudaGetErrorString(err));
+        return -2;
+    }
+
+    cudaStreamAttrValue attr_val = {};
+    attr_val.accessPolicyWindow.base_ptr  = (void*)gpu_buffer;
+    attr_val.accessPolicyWindow.num_bytes = bytes;
+    attr_val.accessPolicyWindow.hitRatio  = 1.0f;
+    attr_val.accessPolicyWindow.hitProp   = cudaAccessPropertyPersisting;
+    attr_val.accessPolicyWindow.missProp  = cudaAccessPropertyNormal;
+
+    err = cudaStreamSetAttribute(
+        stream, cudaStreamAttributeAccessPolicyWindow, &attr_val);
+    if (err != cudaSuccess) {
+        fprintf(stderr,
+            "DEN_COG_BUF: cudaStreamSetAttribute failed on stream (%d): %s\n",
+            (int)err, cudaGetErrorString(err));
+        return -3;
+    }
+
+    err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess) {
+        fprintf(stderr,
+            "DEN_COG_BUF: cudaStreamSynchronize failed on stream (%d): %s\n",
+            (int)err, cudaGetErrorString(err));
+        return -4;
+    }
+
+    fprintf(stderr,
+        "DEN_COG_BUF: pinned %zu bytes at %p (stream, hitRatio=1.0, PERSISTING)\n",
+        bytes, (void*)gpu_buffer);
+    return 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// den_cognitive_buffer_unpin -- remove L2 persistence from the buffer
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Clears the access policy window on stream 0 by setting a zero-length window.
+// After this, the L2 controller treats the buffer's cache lines as normal
+// (eligible for eviction under pressure).
 //
 // Safe to call with nullptr or zero bytes (no-op).
 
 inline __host__ void den_cognitive_buffer_unpin(float* gpu_buffer, size_t bytes) {
-    if (!gpu_buffer || bytes == 0) return;
+    (void)gpu_buffer;
+    (void)bytes;
 
-    int policy = cudaAccessPropertyNormal;
-    cudaError_t err = cudaMemRangeSetAttribute(
-        gpu_buffer, bytes,
-        cudaMemRangeAttributeAccessPolicy,
-        &policy, sizeof(policy));
+    // Clear the access policy window by setting a zero-length window.
+    // A zero-initialized cudaStreamAttrValue has num_bytes=0, which
+    // effectively disables the window on the stream.
+    cudaStreamAttrValue attr_val = {};
+    cudaError_t err = cudaStreamSetAttribute(
+        0, cudaStreamAttributeAccessPolicyWindow, &attr_val);
     if (err != cudaSuccess) {
         fprintf(stderr,
-            "DEN_COG_BUF: den_cognitive_buffer_unpin — "
-            "cudaMemRangeSetAttribute (NORMAL) failed (%d): %s\n",
+            "DEN_COG_BUF: den_cognitive_buffer_unpin failed (%d): %s\n",
             (int)err, cudaGetErrorString(err));
-    } else {
-        fprintf(stderr,
-            "DEN_COG_BUF: unpinned %zu bytes at %p (policy=NORMAL)\n",
-            bytes, (void*)gpu_buffer);
     }
+    // Unpin is silent on success -- the caller knows the buffer is being freed.
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// den_pad_unpack — unpack PAD (Pleasure, Arousal, Dominance) from packed uint64
+// den_pad_unpack -- unpack PAD (Pleasure, Arousal, Dominance) from packed uint64
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Packed format (matching GovernorContext.pad_packed):
-//   Bits [63:48] — Pleasure   (FP16)
-//   Bits [47:32] — Arousal    (FP16)
-//   Bits [31:16] — Dominance  (FP16)
-//   Bits [15: 0] — reserved   (unused padding)
+//   Bits [63:48] -- Pleasure   (FP16)
+//   Bits [47:32] -- Arousal    (FP16)
+//   Bits [31:16] -- Dominance  (FP16)
+//   Bits [15: 0] -- reserved   (unused padding)
 //
-// Uses cuda_fp16 intrinsics for safe host/device FP16→F32 conversion.
-// Works under both nvcc (device) and host compiler (via CUDA's built-in
-// half-precision support in cuda_fp16.h).
+// Uses cuda_fp16 intrinsics for host/device FP16->F32 conversion.
+// Works under nvcc (device) and host compiler (via CUDA's half support).
 
 __host__ __device__ __forceinline__ void den_pad_unpack(
     float* pleasure, float* arousal, float* dominance,
     uint64_t pad_packed)
 {
-    // Extract FP16 halves from their bit positions
+    // Extract FP16 halves from their bit positions in the packed uint64.
+    // Layout: [63:48]=Pleasure, [47:32]=Arousal, [31:16]=Dominance, [15:0]=pad
     uint16_t p_bits = (uint16_t)(pad_packed >> 48);
     uint16_t a_bits = (uint16_t)(pad_packed >> 32);
     uint16_t d_bits = (uint16_t)(pad_packed >> 16);
 
-    // Convert via cuda_fp16 intrinsics
+    // Convert via cuda_fp16 intrinsics (supported on host and device in CUDA 12.8)
     half p_h = __ushort_as_half(p_bits);
     half a_h = __ushort_as_half(a_bits);
     half d_h = __ushort_as_half(d_bits);
@@ -216,7 +298,7 @@ __host__ __device__ __forceinline__ void den_pad_unpack(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// den_pad_logit_bias_kernel — apply PAD emotional bias to logits before softmax
+// den_pad_logit_bias_kernel -- apply PAD emotional bias to logits before softmax
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Each thread processes one emotional token from PadBiasWeights. The bias
@@ -234,7 +316,7 @@ __host__ __device__ __forceinline__ void den_pad_unpack(
 //   Shared memory: 0 bytes
 //   Registers: ~12 per thread (float unpack + 3 FMAs + bounds check)
 //
-// The kernel is intentionally lightweight — the 3 FMAs finish in ~10 cycles
+// The kernel is intentionally lightweight -- the 3 FMAs finish in ~10 cycles
 // on SM120 and the atomic-add-free scatter patterns are bank-conflict-free
 // since each thread writes to a unique logit position.
 
@@ -266,12 +348,12 @@ __global__ void den_pad_logit_bias_kernel(
         d * bias_weights->dominance_bias[idx]);
 
     // ── Step 4: Apply bias in-place ──
-    // Each thread writes to a unique logit index — no atomic needed.
+    // Each thread writes to a unique logit index -- no atomic needed.
     logits[token_id] += bias;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// den_apply_pad_bias — host launcher for den_pad_logit_bias_kernel
+// den_apply_pad_bias -- host launcher for den_pad_logit_bias_kernel
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // Checks GovernorContext.l2_cognitive_enabled gate before launching.
@@ -279,11 +361,11 @@ __global__ void den_pad_logit_bias_kernel(
 // forward pass produces raw logits and before softmax/argmax sampling.
 //
 // Parameters:
-//   logits       — device pointer to [vocab_size] f32 raw logits
-//   vocab_size   — vocabulary size (typically 152,064 for Qwen3.5)
-//   ctx          — GovernorContext pointer (GPU-mapped, for pad_packed + gate)
-//   bias_weights — device pointer to PadBiasWeights struct
-//   stream       — CUDA stream for the launch (default 0 if uncertain)
+//   logits       -- device pointer to [vocab_size] f32 raw logits
+//   vocab_size   -- vocabulary size (typically 152,064 for Qwen3.5)
+//   ctx          -- GovernorContext pointer (GPU-mapped, for pad_packed + gate)
+//   bias_weights -- device pointer to PadBiasWeights struct
+//   stream       -- CUDA stream for the launch (use stream 0 if uncertain)
 //
 // The kernel launch is skipped if any of:
 //   - ctx is null
@@ -307,7 +389,7 @@ inline __host__ void den_apply_pad_bias(
         return;
     }
 
-    // ── Launch one warp per bias token ──
+    // ── Launch one thread per bias token ──
     // Thread count = min(n_loaded, PAD_BIAS_TOKENS) for bounds safety.
     int n = bias_weights->n_loaded;
     if (n > PAD_BIAS_TOKENS) {

@@ -71,7 +71,7 @@ struct GovernorContext {
     uint32_t bar1_nvme_enabled              : 1;  // BAR1 NVMe mapping for VRAM overflow (default 0)
     uint32_t l2_cognitive_enabled           : 1;  // L2-resident cognitive buffer for emotional logit biasing (default 0)
     uint32_t conditional_graph_enabled      : 1;  // conditional CUDA graph for conversational turn (default 0)
-    uint32_t                                : 1;  // remaining reserved
+    uint32_t subvocal_path_enabled          : 1;  // Subvocal Tensor Truncation PATH_SUBVOCAL (default 0)
 };
 #pragma pack(pop)
 
@@ -130,6 +130,10 @@ uint32_t den_volition_route(void* ctx);
 
 // Read promote status from GovernorContext. Returns gwt_ignition > 0.
 bool den_volition_promote_pending(const void* ctx);
+
+// Subvocal Tensor Truncation: enable/disable PATH_SUBVOCAL.
+void den_subvocal_enable(void* ctx);
+void den_subvocal_disable(void* ctx);
 
 #ifdef __cplusplus
 }
