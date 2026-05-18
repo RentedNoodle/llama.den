@@ -15,9 +15,8 @@
 // Personality-Adaptive Quantization scale factor.
 // Written by Rust cognitive daemon via cudaMemcpyToSymbolAsync before each decode step.
 // Value = f32 modulation factor based on PAD state (range ~0.65-1.4).
-#ifdef PERSONALITY_QUANTIZATION
+// Defined unconditionally so the extern in den_governor_ffi.cpp links correctly.
 __constant__ float g_personality_scale = 1.0f;
-#endif
 
 // Pre-loaded tile register data: 4 mm iterations × (4 A-fragments + 1 sfa).
 // 20 uint32s per buffer (22 uint32s with DenScale-V coarse scales).
