@@ -277,6 +277,12 @@ void den_subvocal_disable(void* ctx_ptr) {
 
 extern __constant__ float g_personality_scale;
 
-void den_personality_scale_write(float scale) {
-    cudaMemcpyToSymbol(g_personality_scale, &scale, sizeof(float), 0, cudaMemcpyHostToDevice);
+void den_personality_scale_write(void* ctx_ptr, float scale) {
+    if (!ctx_ptr) return;
+    // Write to a reserved slot in GovernorContext (byte offset 56, after kv_evict_ratio).
+    // The GEMV kernel reads this via mapped memory — no cudaMemcpy needed.
+    auto* ctx = static_cast<GovernorContext*>(ctx_ptr);
+    // Store at the start of the feature flags region as a float.
+    // The personality_scale is at offset 56 in the 64B struct.
+    *reinterpret_cast<float*>(reinterpret_cast<char*>(ctx) + 56) = scale;
 }

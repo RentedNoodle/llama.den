@@ -1,6 +1,12 @@
 // ══════════════════════════════════════════════════════════════════════════
 // den_rt_memory_query.cu — RT Core BVH traversal for NOMAD memory navigation
 // ══════════════════════════════════════════════════════════════════════════
+
+// Forward declarations for functions defined later in this file.
+extern "C" int rt_memory_bvh_upload(const float* nodes, int n, int max_nodes, int* out_n);
+extern "C" int rt_memory_bvh_query(float ox, float oy, float oz, uint32_t ray_mask, float* out_hits, float* out_dists);
+extern "C" void rt_memory_bvh_destroy();
+extern "C" int rt_memory_bvh_benchmark(float ox, float oy, float oz, uint32_t n_rays, float* out_hits, float* out_dists);
 //
 // Uploads a BVH-over-memory-nodes to the GPU and queries it via RT Core ray
 // traversal. RT Cores (70 on GB203-300-A1) find the k-nearest memory nodes
