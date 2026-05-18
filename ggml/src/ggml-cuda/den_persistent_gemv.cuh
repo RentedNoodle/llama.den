@@ -88,6 +88,19 @@ __global__ void persistent_gemv_omma(
                 float c0=0, c1=0, c2=0, c3=0;
                 OMMA_MXF4NVF4_4X(d0,d1,d2,d3, a_val,a_val,a_val,a_val,
                                  b0,b1, c0,c1,c2,c3, scale_a, 0x38383838u);
+            #ifdef DENSCALE_V
+                // DenScale-V correction: fine_scale / coarse_scale
+                // kg = (lane % 32) / 8 for this kernel (8 threads per K-group)
+                if (TILE_BYTES == 152) {
+                    int kg = (lane % 32) / 8;
+                    uint8_t fine_code = (uint8_t)((scale_a >> (kg * 8)) & 0xFF);
+                    uint8_t coarse_code = s_tile[COARSE_OFFSET + mm * 2 + (kg >> 1)];
+                    float fine_scale = (float)ue4m3_code_to_byte[fine_code & 0xF]
+                                       / 255.0f * 6.0f;
+                    float coarse_scale = (float)coarse_code / 32.0f;
+                    d0 *= fine_scale / (coarse_scale + 1e-10f);
+                }
+            #endif
                 acc += d0;
             }
             __syncthreads(); // tile repack done, next iteration can overwrite

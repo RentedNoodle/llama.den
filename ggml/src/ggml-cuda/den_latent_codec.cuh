@@ -68,13 +68,11 @@ static const char* den_nvenc_status_str(NVENCSTATUS s) {
         case NV_ENC_ERR_OUT_OF_MEMORY:         return "NV_ENC_ERR_OUT_OF_MEMORY";
         case NV_ENC_ERR_ENCODER_NOT_INITIALIZED: return "NV_ENC_ERR_ENCODER_NOT_INITIALIZED";
         case NV_ENC_ERR_ENCODER_BUSY:          return "NV_ENC_ERR_ENCODER_BUSY";
-        case NV_ENC_ERR_ENCODER_NOT_FOUND:     return "NV_ENC_ERR_ENCODER_NOT_FOUND";
         case NV_ENC_ERR_INVALID_CALL:          return "NV_ENC_ERR_INVALID_CALL";
         case NV_ENC_ERR_GENERIC:               return "NV_ENC_ERR_GENERIC";
         case NV_ENC_ERR_INVALID_VERSION:       return "NV_ENC_ERR_INVALID_VERSION";
         case NV_ENC_ERR_MAP_FAILED:            return "NV_ENC_ERR_MAP_FAILED";
         case NV_ENC_ERR_NEED_MORE_INPUT:       return "NV_ENC_ERR_NEED_MORE_INPUT";
-        case NV_ENC_ERR_ENCODER_STREAMING_NOT_SUPPORTED: return "NV_ENC_ERR_ENCODER_STREAMING_NOT_SUPPORTED";
         default:                               return "UNKNOWN_NVENC_ERROR";
     }
 }
@@ -206,7 +204,7 @@ __host__ int den_latent_codec_init(int quality) {
     enc_config.frameIntervalP   = 1;   // IPP... (no B-frames for lowest latency)
     enc_config.monoChromeEncoding = 0;  // use full color (but we fill UV=128)
     enc_config.frameFieldMode   = NV_ENC_PARAMS_FRAME_FIELD_MODE_FRAME;
-    enc_config.mvPrecision      = NV_ENC_MV_PRECISION_INTEGER;
+    enc_config.mvPrecision      = NV_ENC_MV_PRECISION_DEFAULT;
 
     // Rate control: CONSTQP with QP=0 for lossless
     enc_config.rcParams.version          = NV_ENC_RC_PARAMS_VER;
