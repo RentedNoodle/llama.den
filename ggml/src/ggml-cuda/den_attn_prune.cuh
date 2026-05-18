@@ -96,8 +96,10 @@ __device__ __forceinline__ float block_reduce_sum(
     }
     __syncthreads();
 
-    // Broadcast from lane 0 of warp 0
-    return (tid < 32) ? __shfl_sync(0xFFFFFFFFu, block_val, 0) : block_val;
+    // Store result from warp 0 into shared, broadcast to all threads
+    if (wid == 0 && lane == 0) smem[0] = block_val;
+    __syncthreads();
+    return smem[0];
 }
 
 __device__ __forceinline__ float block_reduce_max(
@@ -122,7 +124,36 @@ __device__ __forceinline__ float block_reduce_max(
     }
     __syncthreads();
 
-    return (tid < 32) ? __shfl_sync(0xFFFFFFFFu, block_val, 0) : block_val;
+    if (wid == 0 && lane == 0) smem[0] = block_val;
+    __syncthreads();
+    return smem[0];
+}
+
+__device__ __forceinline__ float block_reduce_min(
+    float val,
+    float* smem,
+    int tid)
+{
+    int lane = tid & 31;
+    int wid  = tid >> 5;
+    int nwarps = (blockDim.x + 31) / 32;
+
+    float warp_val = warp_reduce_min(val);
+    if (lane == 0) smem[wid] = warp_val;
+    __syncthreads();
+
+    float block_val = INFINITY;
+    if (wid == 0) {
+        for (int w = lane; w < nwarps; w += 32) {
+            block_val = fminf(block_val, smem[w]);
+        }
+        block_val = warp_reduce_min(block_val);
+    }
+    __syncthreads();
+
+    if (wid == 0 && lane == 0) smem[0] = block_val;
+    __syncthreads();
+    return smem[0];
 }
 
 // ── Top-k Attention Pruning (Device) ─────────────────────────────────────────
@@ -181,21 +212,9 @@ __device__ __forceinline__ void prune_attention_topk(
             if (scores[i] >= mid) count++;
         }
 
-        // Block-level sum of counts
-        int warp_count = __popc(__ballot_sync(__activemask(), count));
-        // Simpler cross-warp approach: use smem
-        if ((tid & 31) == 0) smem[tid >> 5] = (float)count;
-        __syncthreads();
-        if ((tid >> 5) == 0) {
-            int total = 0;
-            int nwarps = (nthreads + 31) / 32;
-            for (int w = 0; w < nwarps; w++) {
-                total += (int)smem[w];
-            }
-            if ((tid & 31) == 0) smem[0] = (float)total;
-        }
-        __syncthreads();
-        int total = (int)smem[0];
+        // Block-level sum of per-thread counts via reduction
+        float count_f = block_reduce_sum((float)count, smem, tid);
+        int total = (int)count_f;
 
         if (total > k) {
             lo = mid;  // raise threshold
