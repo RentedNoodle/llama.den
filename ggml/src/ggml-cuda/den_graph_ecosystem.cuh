@@ -4,6 +4,17 @@
 #include <cuda_runtime.h>
 #include <cstdio>
 
+// Allow stand-alone compile check via: nvcc -x cu -arch=sm_120a -DEN_GRAPH_ECO ... -c
+#ifndef CUDA_CHECK
+#define CUDA_CHECK(x) x
+#endif
+
+// Forward declarations for example kernels used in capture().
+// Real implementations reference g_kv_ptr_table and g_seq_len device symbols internally,
+// so they only need the layer index as a kernel argument.
+__global__ void attention_kernel(int layer);
+__global__ void ffn_kernel(int layer);
+
 namespace den { namespace graph {
 
 constexpr int MAX_LAYERS = 64;
@@ -18,10 +29,10 @@ struct GraphEcosystem {
     cudaGraphExec_t exec_graph;
     int n_layers;
 
-    // Capture the entire forward pass
-    // This is called once at session start.
-    // All kernels launched during capture reference g_kv_ptr_table and g_seq_len
-    // instead of literal pointers — so they survive pointer changes.
+    // Capture the entire forward pass.
+    // Called once at session start. Kernels read g_kv_ptr_table and g_seq_len
+    // from __device__ symbols internally — NOT from kernel arguments — so the
+    // captured graph survives per-token pointer/sequence length changes.
     cudaError_t capture(
         cudaStream_t stream,
         int n_layers)
@@ -31,15 +42,12 @@ struct GraphEcosystem {
 
         CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeRelaxed));
 
-        // During capture, launch all inference kernels normally.
-        // Kernels read from g_kv_ptr_table[l] and g_seq_len — device symbols,
-        // not kernel arguments — so the graph can be replayed with updated values.
+        // During capture, launch all inference kernels with minimal arguments.
+        // Kernels internally reference g_kv_ptr_table[l] and g_seq_len via
+        // device symbols — these are updated per-token by update() without
+        // requiring graph re-capture.
         for (int l = 0; l < n_layers; l++) {
-            // Example: attention reads g_kv_ptr_table[l] for its KV base pointer
-            attention_kernel<<<dim3(1,1,1), 256, 0, stream>>>(
-                g_kv_ptr_table[l], g_seq_len, l);
-
-            // FFN has static weights — no patching needed
+            attention_kernel<<<dim3(1,1,1), 256, 0, stream>>>(l);
             ffn_kernel<<<dim3(64,1,1), 256, 0, stream>>>(l);
         }
 
