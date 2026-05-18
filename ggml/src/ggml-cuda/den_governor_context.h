@@ -66,7 +66,9 @@ struct GovernorContext {
     uint32_t l2_pinning_enabled             : 1;  // L2 stream pinning for im2col conv (default 0)
     uint32_t sm_partitioning_enabled        : 1;  // SM spatial partitioning for concurrent inference+TTS (default 0)
     uint32_t cuda_ipc_bridge_enabled        : 1;  // CUDA IPC bridge for cognitive daemon zero-copy (default 0)
-    uint32_t                                : 6;  // remaining reserved
+    uint32_t ptx_gen_enabled                : 1;  // PTX dynamic kernel generation via NVRTC (default 0)
+    uint32_t copy_engine_overlap_enabled    : 1;  // dual DMA copy engine overlap for weight streaming (default 0)
+    uint32_t                                : 4;  // remaining reserved
 };
 #pragma pack(pop)
 
