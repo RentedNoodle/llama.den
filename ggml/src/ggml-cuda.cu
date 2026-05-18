@@ -5168,7 +5168,7 @@ static cuda_params ggml_cuda_parse_params(const char * params_string) {
                 is_good = read_value(parsed[1], params.enable_p2p);
             }
             else if (parsed[0] == "fa-offset") {
-                float tmp;
+                float tmp = 0.0f;
                 is_good = read_value(parsed[1], tmp);
                 if (is_good) {
                     if (tmp < 0.0f || tmp > 3.0f) {

@@ -64,13 +64,17 @@ struct PdlAsrParams {
 };
 
 // ─── Host-side PDL probe ───────────────────────────────────────────────────
-// Tests whether PDL/CDP is supported on the current CUDA device.
-// Returns bitmask of DEN_PDL_CAP_* flags, or 0 if PDL unsupported.
+// Tests whether PDL/CDP is potentially available on the current device.
+// Returns bitmask of DEN_PDL_CAP_* flags based on SM version and compile
+// configuration. Does NOT run a device-side kernel (use the standalone
+// tools/den_pdl_probe binary for a full runtime verification).
 //
-// This function runs a small device-side probe to determine actual runtime
-// capability (not just compile-time feature flags). Call once at init.
+// This is conservative: reports gridDep as available on SM 8.0+ (the PTX
+// instruction is valid) and CDP as available when linked with -rdc=true.
+// Runtime failures in cudaLaunchDevice are caught by the return code of
+// den_device_launch_tts() / den_device_launch_asr().
 //
-// Thread-safe: yes (idempotent, no mutable state beyond CUDA driver calls).
+// Thread-safe: yes (read-only CUDA driver queries).
 
 __host__ static inline int den_pdl_probe_host() {
     int dev;
@@ -81,78 +85,14 @@ __host__ static inline int den_pdl_probe_host() {
     // Conservatively require SM 8.0+ for any PDL support
     if (props.major < 8) return 0;
 
-    int caps = 0;
+    int caps = DEN_PDL_CAP_GRIDDEP;  // gridDep is PTX 8.x — valid on SM 80+
 
-    // griddepcontrol.launch_dependents is a PTX 8.x instruction
-    // Available on SM 8.0+ (Ampere and later). Test via small kernel.
-    int* d_status = nullptr;
-    cudaMalloc(&d_status, sizeof(int));
-    cudaMemset(d_status, 0, sizeof(int));
-
-    // Small kernel — only tests if griddepcontrol compiles and executes
-    // without fault on the active device.
-    auto probe_griddep = [&]() -> bool {
-        if (!d_status) return false;
-        cudaMemset(d_status, 0, sizeof(int));
-
-        // Launch a minimal kernel that runs griddepcontrol
-        auto kernel = [] __global__ (int* status) {
-            if (threadIdx.x == 0) {
-                asm volatile("griddepcontrol.launch_dependents;");
-                *status = 1;
-            }
-        };
-        kernel<<<1, 32>>>(d_status);
-        cudaDeviceSynchronize();
-
-        int result = 0;
-        cudaMemcpy(&result, d_status, sizeof(int), cudaMemcpyDeviceToHost);
-        return result == 1;
-    };
-
-    // CDP probe: test if <<<>>> device launch compiles and executes.
-    // This requires the binary to be linked with -rdc=true.
-    // Without it, the device-link step would have failed before reaching here,
-    // so a successful link implies CDP device code is present.
-    auto probe_cdp = [&]() -> bool {
-        if (!d_status) return false;
-        cudaMemset(d_status, 0, sizeof(int));
-
-        // NOTE: CDP <<<>>> in device code requires separate compilation.
-        // If the binary was not linked with -rdc=true, this lambda body
-        // would not compile. We guard at compile time.
-        auto parent_kernel = [] __global__ (int* status) {
-            if (threadIdx.x == 0) {
-                auto child_kernel = [] __global__ (int* s) {
-                    if (threadIdx.x == 0) *s = 2;
-                };
-                child_kernel<<<1, 32>>>(status);
-                cudaError_t err = cudaGetLastError();
-                if (err != cudaSuccess) *status = 0;
-            }
-        };
-        parent_kernel<<<1, 32>>>(d_status);
-        cudaDeviceSynchronize();
-
-        int result = 0;
-        cudaMemcpy(&result, d_status, sizeof(int), cudaMemcpyDeviceToHost);
-        return result == 2;
-    };
-
-    bool gd = probe_griddep();
-    if (gd) caps |= DEN_PDL_CAP_GRIDDEP;
-
-    // Only probe CDP if the binary was linked with -rdc=true.
-    // In a single-translation-unit build, device-side <<<>>> won't link.
+    // CDP v2 requires: SM 8.0+ hardware + -rdc=true compilation
 #ifdef __CUDACC_RDC__
-    bool cdp = probe_cdp();
-    if (cdp) {
-        caps |= DEN_PDL_CAP_CDP_SYNTAX;
-        caps |= DEN_PDL_CAP_CDP_API;  // CDP v2 includes the explicit API
-    }
+    caps |= DEN_PDL_CAP_CDP_SYNTAX;
+    caps |= DEN_PDL_CAP_CDP_API;
 #endif
 
-    if (d_status) cudaFree(d_status);
     return caps;
 }
 
