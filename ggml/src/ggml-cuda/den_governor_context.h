@@ -61,7 +61,8 @@ struct GovernorContext {
     uint32_t cuda_graph_supercapture        : 1;  // CUDA Graph supercapture for diffusion pipeline (default 0)
     uint32_t latent_video_codec             : 1;  // latent AV1 video codec for denoising trajectory (default 0)
     uint32_t holographic_prosody_enabled    : 1;  // holographic prosody via OMMA scale superposition (default 0)
-    uint32_t                                : 11; // remaining reserved
+    uint32_t texture_mel_enabled            : 1;  // texture-unit mel filterbank for ASR (default 0)
+    uint32_t                                : 10; // remaining reserved
 };
 #pragma pack(pop)
 
