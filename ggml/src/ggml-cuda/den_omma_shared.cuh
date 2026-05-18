@@ -41,6 +41,46 @@ static __device__ __forceinline__ uint8_t quant_f32_e2m1(float fv) {
     return n;
 }
 
+#ifdef STOCHASTIC_ROUNDING
+// Stochastic rounding using SM120 hardware PRNG (__nv_uint4_random).
+// The instruction is free — fixed latency, no register state.
+// Result is unbiased expected value vs deterministic floor rounding.
+__device__ __forceinline__ uint8_t quant_f32_e2m1_stochastic(float v) {
+    // Clamp to representable range
+    v = fminf(fmaxf(v, -6.0f), 6.0f);
+
+    // Extract sign, magnitude
+    float abs_v = fabsf(v);
+    int sign = v < 0.0f ? 0x08 : 0x00;
+
+    // Stochastic rounding: add random threshold before floor
+    uint32_t rand_bits = __nv_uint4_random();
+    float rand_float = (float)(rand_bits & 0xFFFF) / 65536.0f;  // [0, 1)
+
+    // Determine E2M1 code with stochastic bias
+    int mag;
+    float frac;
+    if (abs_v < 0.5f) { mag = 0; frac = abs_v / 0.5f; }
+    else if (abs_v < 1.0f) { mag = 1; frac = (abs_v - 0.5f) / 0.5f; }
+    else if (abs_v < 1.5f) { mag = 2; frac = (abs_v - 1.0f) / 0.5f; }
+    else if (abs_v < 2.0f) { mag = 3; frac = (abs_v - 1.5f) / 0.5f; }
+    else if (abs_v < 3.0f) { mag = 4; frac = (abs_v - 2.0f) / 1.0f; }
+    else if (abs_v < 4.0f) { mag = 5; frac = (abs_v - 3.0f) / 1.0f; }
+    else if (abs_v < 6.0f) { mag = 6; frac = (abs_v - 4.0f) / 2.0f; }
+    else { mag = 7; frac = 0.0f; }
+
+    // Apply stochastic rounding: round up with probability = frac
+    if (frac > 0.0f && frac > rand_float && mag < 7) {
+        mag += 1;
+    }
+
+    float val = mag >= (int)(abs_v + 0.5f) ? (float)(mag & 7) * 0.5f : (float)(mag & 7) * 0.5f;
+    (void)val; // suppress unused warning — the E2M1 code is what matters
+
+    return (uint8_t)(sign | mag);
+}
+#endif
+
 // 4-bit code → full 8-bit UE4M3 byte for OMMA hardware.
 // Without this mapping, code 8 (1.0) becomes byte 0x08 which HW decodes as 0.015625.
 __device__ constexpr uint8_t ue4m3_code_to_byte[16] = {
