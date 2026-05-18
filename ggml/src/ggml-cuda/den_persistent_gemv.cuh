@@ -8,6 +8,10 @@
 #include "common.cuh"
 #include "den_mxf4nvf4_gemv.cuh"
 
+#ifdef ENABLE_REGISTER_CACHE
+#include "den_register_kv_cache.cuh"
+#endif
+
 __device__ int32_t g_persistent_work_counter = 0;
 
 #ifdef DENSCALE_V
@@ -30,6 +34,17 @@ __global__ void persistent_gemv_omma(
 {
     __shared__ uint8_t s_tile[TILE_BYTES];
     int lane = threadIdx.x;
+
+#ifdef ENABLE_REGISTER_CACHE
+    // Register cache -- persists across work-loop iterations
+    // (only initialized on first launch, keeps hot KV data across tokens)
+    __shared__ den::regcache::WarpRegisterCache regcache;
+    if (threadIdx.x < 32) {
+        den::regcache::cache_init(regcache);
+    }
+    __syncthreads();
+#endif
+
     const size_t row_stride = (size_t)kt_per_row * TILE_BYTES;
     const uint8_t * wptr = (const uint8_t *)weights;
 
@@ -110,6 +125,11 @@ __global__ void persistent_gemv_omma(
         for (int off = 16; off > 0; off >>= 1)
             acc += __shfl_xor_sync(0xffffffff, acc, off);
         if (lane == 0) dst[row] = acc;
+
+#ifdef ENABLE_REGISTER_CACHE
+        // Yield between tokens -- registers/SMEM survive
+        __nanosleep(1000);  // 1us pause
+#endif
     }
 }
 
