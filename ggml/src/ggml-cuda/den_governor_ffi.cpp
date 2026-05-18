@@ -46,6 +46,11 @@ void* den_governor_init(void) {
     ctx->vcache_prefetch_enabled = 0;
     ctx->tma_tile_load_enabled = 0;
     ctx->vort_enabled = 0;
+    ctx->kv_tier_enabled = 0;
+    ctx->fractal_kv_enabled = 0;
+    ctx->gaussian_attn_enabled = 0;
+    ctx->reservoir_enabled = 0;
+    ctx->phase_attn_enabled = 0;
 
     fprintf(stderr, "[GOVERNOR] ctx=%p size=%zu initialized\n",
             (void*)ctx, sizeof(GovernorContext));

@@ -48,7 +48,11 @@ struct GovernorContext {
     uint32_t vort_enabled                   : 1;  // VORT power-law time decay
     uint32_t cats_enabled                   : 1;  // CATS self-speculative decoding
     uint32_t kv_tier_enabled                : 1;  // Semantic KV cache hierarchy
-    uint32_t                                : 24; // remaining reserved
+    uint32_t fractal_kv_enabled             : 1;  // Fractal KV cache compression
+    uint32_t gaussian_attn_enabled          : 1;  // Gaussian splatting attention
+    uint32_t reservoir_enabled              : 1;  // Reservoir OMMA computing
+    uint32_t phase_attn_enabled             : 1;  // Phase-conjugate attention
+    uint32_t                                : 20; // remaining reserved
 };
 #pragma pack(pop)
 
