@@ -555,7 +555,11 @@ __host__ int den_calibration_optimize(
         if (d_sfa_out) cudaFreeAsync(d_sfa_out, stream);
         if (d_mse_out) cudaFreeAsync(d_mse_out, stream);
 
-        return (int)(total_mse * 1.0e6f);  // Return scaled MSE for monitoring
+        // Return scaled MSE. Clamp to INT32 range to avoid overflow.
+        float scaled = total_mse * 1.0e3f;
+        if (scaled > 2147483647.0f) scaled = 2147483647.0f;
+        if (scaled < -2147483647.0f) scaled = -2147483647.0f;
+        return (int)scaled;
     }
 
 cleanup:
