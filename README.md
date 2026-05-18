@@ -31,6 +31,21 @@ If you have a Blackwell GPU and want to run language models at 4-bit block-scale
 
 ---
 
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [NVFP4 at a Glance](#nvfp4-at-a-glance)
+- [Multi-Kernel Architecture](#multi-kernel-architecture-phases-1-2-delivered)
+- [AXIOM Phase-II Engine Features](#axiom-phase-ii-engine-features)
+- [Kernel Stack](#kernel-stack-45-cuda-files)
+- [Hardware Constraints](#hardware-constraints-sm120)
+- [Known Errata](#known-errata)
+- [Supported Models](#supported-models)
+- [Building in Detail](#building-in-detail)
+- [The Den Ecosystem](#the-den-ecosystem)
+
+---
+
 ## Quick Start
 
 ### Prerequisites
@@ -187,4 +202,4 @@ All in `ggml/src/ggml-cuda/`:
 
 MIT License.
 
-*llama.den — Project Den inference engine | 45+ CUDA files | 50 novel concepts | 5206 OMMA.SF.16864 | Paris Gate PASSED | 2026-05-18*
+*llama.den — Blackwell NVFP4 | 5206 OMMA.SF.16864 | Paris Gate PASSED | 50+ CUDA files | 2026-05-18*

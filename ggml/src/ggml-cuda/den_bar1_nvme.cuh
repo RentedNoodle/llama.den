@@ -94,14 +94,13 @@ inline __host__ size_t den_bar1_aperture_size(void) {
         DEN_BAR1_DEVICE);
 
     if (res == CUDA_SUCCESS && vmm) {
-        // VMM-capable: query max sysmem allocation (BAR1-accessible host memory)
-        int max_bytes = 0;
-        res = cuDeviceGetAttribute(
-            &max_bytes,
-            CU_DEVICE_ATTRIBUTE_MAXIMUM_SYSMEM_ALLOCATION_SIZE,
-            DEN_BAR1_DEVICE);
-        if (res == CUDA_SUCCESS && max_bytes > 0) {
-            return (size_t)max_bytes;
+        // VMM-capable: check if the device can map host memory through BAR1.
+        // cuDeviceTotalMem gives us the full VRAM, which on ReBAR systems is
+        // the effective BAR1-accessible range for host-backed mappings.
+        size_t total = 0;
+        res = cuDeviceTotalMem(&total, DEN_BAR1_DEVICE);
+        if (res == CUDA_SUCCESS && total > 0) {
+            return total;
         }
     }
 
@@ -418,10 +417,10 @@ fallback:
 
         fprintf(stderr,
             "DEN_BAR1: FALLBACK path — mapped %zu bytes at %p "
-            "(device=%d, managed=%d)\n",
+            "(type=%d, device=%d)\n",
             size, cpu_ptr,
-            (int)attrs.device,
-            (int)attrs.isManaged);
+            (int)attrs.type,
+            (int)attrs.device);
 
         return cpu_ptr;
     }

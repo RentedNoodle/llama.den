@@ -3,6 +3,7 @@
 #pragma once
 #include <cstdint>
 #include <cuda_runtime.h>
+#include "common.cuh"
 #include "governor/den_governor_fsm.cuh"
 
 namespace den { namespace residency {
@@ -75,6 +76,37 @@ __host__ inline void precompress_r2_tensors(
             tensors[i].l2_footprint /= 2;
         }
     }
+}
+
+// L2 pin refresh kernel — touch hot KV lines between tokens to prevent L2 eviction
+__global__ void l2_pin_refresh(
+    const void** kv_blocks,
+    const int* hot_list,
+    int n_hot,
+    int block_size)
+{
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    if (bid >= n_hot) return;
+
+    const volatile char* block = (const char*)kv_blocks[hot_list[bid]];
+
+    // Sequential touch of all cache lines in the block
+    for (int i = tid * 128; i < block_size; i += blockDim.x * 128) {
+        volatile char tmp = block[i];
+    }
+}
+
+// L2-colored allocation — memory aligned to L2 slice stride (GB203: 16 slices × 128B = 2048B)
+__host__ inline void* l2_colored_alloc(size_t size, int color, cudaStream_t stream) {
+    constexpr size_t L2_STRIDE = 128 * 16;  // 2048B — full L2 slice rotation
+    size_t aligned = (size + L2_STRIDE - 1) & ~(L2_STRIDE - 1);
+    void* ptr;
+    CUDA_CHECK(cudaMalloc(&ptr, aligned + L2_STRIDE));
+    // Offset to align with desired color
+    void* colored = (char*)ptr + ((size_t)color * 128 % L2_STRIDE);
+    CUDA_CHECK(cudaMemPrefetchAsync(colored, aligned, 0, stream));
+    return colored;
 }
 
 }} // namespace den::residency
