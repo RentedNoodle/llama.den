@@ -51,6 +51,7 @@ void* den_governor_init(void) {
     ctx->gaussian_attn_enabled = 0;
     ctx->reservoir_enabled = 0;
     ctx->phase_attn_enabled = 0;
+    ctx->holographic_prosody_enabled = 0;
 
     fprintf(stderr, "[GOVERNOR] ctx=%p size=%zu initialized\n",
             (void*)ctx, sizeof(GovernorContext));
