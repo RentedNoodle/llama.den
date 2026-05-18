@@ -82,6 +82,9 @@ option(LLAMA_BUILD_SERVER   "llama: build server example" ${LLAMA_STANDALONE})
 
 # 3rd party libs
 option(LLAMA_CURL "llama: use libcurl to download model from an URL" OFF)
+
+# DenQuant extensions
+option(LLAMA_DENSCALE_V "llama: enable DenScale-V 152B tile dual-scale support" OFF)
 option(LLAMA_LLGUIDANCE "llama-common: include LLGuidance library for structured output in common utils" OFF)
 
 # Required for relocatable CMake package
@@ -101,6 +104,10 @@ endif()
 
 if (NOT DEFINED GGML_CUDA_USE_GRAPHS)
     set(GGML_CUDA_USE_GRAPHS ON)
+endif()
+
+if (LLAMA_DENSCALE_V)
+    set(GGML_DENSCALE_V ON)
 endif()
 
 # transition helpers

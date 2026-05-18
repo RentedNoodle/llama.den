@@ -12,4 +12,6 @@ void den_k1_dense_dispatch(
     int M, int N, int K,
     cudaStream_t stream,
     const float* tile_norms,
-    int n_norms);
+    int n_norms,
+    bool fused_rmsnorm = false,
+    float rms_eps = 1e-6f);

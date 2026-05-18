@@ -30,7 +30,9 @@ static __global__ void stream_k_decode_nvfp4(
     int N, int K,
     int M, int kt_per_row,
     const float*   __restrict__ tile_norms,
-    int n_norms
+    int n_norms,
+    bool fused_rmsnorm = false,
+    float rms_eps = 1e-6f
 ) {
     const int warp_id = threadIdx.x / 32;
     const int lane    = threadIdx.x & 31;
@@ -52,6 +54,7 @@ static __global__ void stream_k_decode_nvfp4(
 
     float total0 = 0.0f, total1 = 0.0f;
     float total2 = 0.0f, total3 = 0.0f;
+    float rms_sum_sq = 0.0f;
 
     for (int kt = 0; kt < kt_per_row; kt++) {
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
@@ -79,6 +82,7 @@ static __global__ void stream_k_decode_nvfp4(
                 float v_hi = ((kb_hi + i) < K) ? x_row[kb_hi + i] : 0.0f;
                 x_local[i]     = v_lo;
                 x_local[8 + i] = v_hi;
+                if (fused_rmsnorm) { rms_sum_sq += v_lo * v_lo; rms_sum_sq += v_hi * v_hi; }
                 float av_lo = fabsf(v_lo);
                 float av_hi = fabsf(v_hi);
                 if (av_lo > local_max) local_max = av_lo;
@@ -126,10 +130,19 @@ static __global__ void stream_k_decode_nvfp4(
         }
     }
 
+    // ── RMSNorm output scaling (fused) ───────────────────────────────
+    float rms_scale_f = 1.0f;
+    if (fused_rmsnorm) {
+        rms_sum_sq += __shfl_xor_sync(0xffffffff, rms_sum_sq, 1);
+        rms_sum_sq += __shfl_xor_sync(0xffffffff, rms_sum_sq, 2);
+        float mean = rms_sum_sq / K;
+        rms_scale_f = rsqrtf(mean + rms_eps);
+    }
+
     float* y_row = y + (size_t)batch_row * (size_t)N;
     if (kg == 0) {
-        if (row0 < N) y_row[row0] = total0;
-        if (row1 < N) y_row[row1] = total2;
+        if (row0 < N) y_row[row0] = total0 * rms_scale_f;
+        if (row1 < N) y_row[row1] = total2 * rms_scale_f;
     }
 }
 
@@ -145,7 +158,9 @@ static __global__ void warp_gemv_small_m_nvfp4(
     int M, int N, int K,
     int kt_per_row,
     const float*   __restrict__ tile_norms,
-    int n_norms
+    int n_norms,
+    bool fused_rmsnorm = false,
+    float rms_eps = 1e-6f
 ) {
     const int row = blockIdx.x * blockDim.y + threadIdx.y;
     const int warp_id = threadIdx.x / 32;
@@ -169,6 +184,7 @@ static __global__ void warp_gemv_small_m_nvfp4(
 
     float total0 = 0.0f, total1 = 0.0f;
     float total2 = 0.0f, total3 = 0.0f;
+    float rms_sum_sq = 0.0f;
 
     for (int kt = 0; kt < kt_per_row; kt++) {
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
@@ -195,6 +211,7 @@ static __global__ void warp_gemv_small_m_nvfp4(
                 float v_hi = ((kb_hi + i) < K) ? x_row[kb_hi + i] : 0.0f;
                 x_local[i]     = v_lo;
                 x_local[8 + i] = v_hi;
+                if (fused_rmsnorm) { rms_sum_sq += v_lo * v_lo; rms_sum_sq += v_hi * v_hi; }
                 float av_lo = fabsf(v_lo), av_hi = fabsf(v_hi);
                 if (av_lo > local_max) local_max = av_lo;
                 if (av_hi > local_max) local_max = av_hi;
@@ -240,10 +257,18 @@ static __global__ void warp_gemv_small_m_nvfp4(
         }
     }
 
+    float rms_scale_f = 1.0f;
+    if (fused_rmsnorm) {
+        rms_sum_sq += __shfl_xor_sync(0xffffffff, rms_sum_sq, 1);
+        rms_sum_sq += __shfl_xor_sync(0xffffffff, rms_sum_sq, 2);
+        float mean = rms_sum_sq / K;
+        rms_scale_f = rsqrtf(mean + rms_eps);
+    }
+
     if (kg == 0) {
         float* y_row = y + (size_t)row * N;
-        if (row0 < N) y_row[row0] = total0;
-        if (row1 < N) y_row[row1] = total2;
+        if (row0 < N) y_row[row0] = total0 * rms_scale_f;
+        if (row1 < N) y_row[row1] = total2 * rms_scale_f;
     }
 }
 
@@ -264,7 +289,9 @@ static __global__ void mid_batch_gemm_nvfp4(
     int M, int N, int K,
     int kt_per_row,
     const float*   __restrict__ tile_norms,
-    int n_norms
+    int n_norms,
+    bool fused_rmsnorm = false,
+    float rms_eps = 1e-6f
 ) {
     const int row = blockIdx.x;  // One CTA per row in M dimension
     if (row >= M) return;
@@ -284,6 +311,7 @@ static __global__ void mid_batch_gemm_nvfp4(
 
     float total0 = 0.0f, total1 = 0.0f;
     float total2 = 0.0f, total3 = 0.0f;
+    float rms_sum_sq = 0.0f;
 
     for (int kt = 0; kt < kt_per_row; kt++) {
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
@@ -316,6 +344,7 @@ static __global__ void mid_batch_gemm_nvfp4(
                     float v_hi = ((kb_hi + i) < K) ? x_row[kb_hi + i] : 0.0f;
                     x_local[i]     = v_lo;
                     x_local[8 + i] = v_hi;
+                    if (fused_rmsnorm) { rms_sum_sq += v_lo * v_lo; rms_sum_sq += v_hi * v_hi; }
                     float av_lo = fabsf(v_lo), av_hi = fabsf(v_hi);
                     if (av_lo > local_max) local_max = av_lo;
                     if (av_hi > local_max) local_max = av_hi;
@@ -362,14 +391,23 @@ static __global__ void mid_batch_gemm_nvfp4(
         }
     }
 
+    // ── RMSNorm output scaling (fused) ───────────────────────────────
+    float rms_scale_f = 1.0f;
+    if (fused_rmsnorm) {
+        rms_sum_sq += __shfl_xor_sync(0xffffffff, rms_sum_sq, 1);
+        rms_sum_sq += __shfl_xor_sync(0xffffffff, rms_sum_sq, 2);
+        float mean = rms_sum_sq / K;
+        rms_scale_f = rsqrtf(mean + rms_eps);
+    }
+
     // Write results for this row
     if (kg == 0) {
         float* y_row = y + (size_t)row * N;
         for (int nt = 0; nt < N; nt += 16) {
             int row0 = nt + r;
             int row1 = nt + r + 8;
-            if (row0 < N) y_row[row0] = total0;
-            if (row1 < N) y_row[row1] = total2;
+            if (row0 < N) y_row[row0] = total0 * rms_scale_f;
+            if (row1 < N) y_row[row1] = total2 * rms_scale_f;
         }
     }
 }
@@ -386,7 +424,9 @@ static __global__ void prefill_tile_gemm_nvfp4(
     int M, int N, int K,
     int kt_per_row,
     const float*   __restrict__ tile_norms,
-    int n_norms
+    int n_norms,
+    bool fused_rmsnorm = false,
+    float rms_eps = 1e-6f
 ) {
     const int n_block = blockIdx.x * 128;
     const int m_block = blockIdx.y * 128;
@@ -409,6 +449,7 @@ static __global__ void prefill_tile_gemm_nvfp4(
 
         float total0 = 0.0f, total1 = 0.0f;
         float total2 = 0.0f, total3 = 0.0f;
+        float rms_sum_sq = 0.0f;
 
         const float* x0 = x + (size_t)mt * K;
         const float* x1 = ((mt + 1) < M) ? x + (size_t)(mt + 1) * K : nullptr;
@@ -438,6 +479,7 @@ static __global__ void prefill_tile_gemm_nvfp4(
                     float v_hi = ((kb_hi + i) < K) ? x0[kb_hi + i] : 0.0f;
                     x_local[i]     = v_lo;
                     x_local[8 + i] = v_hi;
+                    if (fused_rmsnorm) { rms_sum_sq += v_lo * v_lo; rms_sum_sq += v_hi * v_hi; }
                     float av_lo = fabsf(v_lo), av_hi = fabsf(v_hi);
                     if (av_lo > local_max) local_max = av_lo;
                     if (av_hi > local_max) local_max = av_hi;
@@ -483,10 +525,19 @@ static __global__ void prefill_tile_gemm_nvfp4(
             }
         }
 
+        // ── RMSNorm output scaling (fused) ───────────────────────────
+        float rms_scale_f = 1.0f;
+        if (fused_rmsnorm) {
+            rms_sum_sq += __shfl_xor_sync(0xffffffff, rms_sum_sq, 1);
+            rms_sum_sq += __shfl_xor_sync(0xffffffff, rms_sum_sq, 2);
+            float mean = rms_sum_sq / K;
+            rms_scale_f = rsqrtf(mean + rms_eps);
+        }
+
         if (kg == 0) {
             float* y0 = y + (size_t)mt * N;
-            if (row0 < N) y0[row0] = total0;
-            if (row1 < N) y0[row1] = total2;
+            if (row0 < N) y0[row0] = total0 * rms_scale_f;
+            if (row1 < N) y0[row1] = total2 * rms_scale_f;
         }
     }
 }
@@ -501,7 +552,9 @@ inline void launch_dense_adaptive(
     int M, int N, int K,
     cudaStream_t stream,
     const float* tile_norms = nullptr,
-    int n_norms = 0
+    int n_norms = 0,
+    bool fused_rmsnorm = false,
+    float rms_eps = 1e-6f
 ) {
     const int kt_per_row = K / 256;
     const int nwarps = 8;
@@ -511,15 +564,15 @@ inline void launch_dense_adaptive(
     const int grid_n_blocks = (N + nwarps * 16 - 1) / (nwarps * 16);
     if (M == 1) {
         stream_k_decode_nvfp4<<<grid_n_blocks, nwarps * 32, 8 * 1024, stream>>>(
-            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms);
+            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms, fused_rmsnorm, rms_eps);
     } else if (M <= 63) {
         dim3 grid(grid_n_blocks, M);
         stream_k_decode_nvfp4<<<grid, nwarps * 32, 0, stream>>>(
-            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms);
+            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms, fused_rmsnorm, rms_eps);
     } else {
         dim3 grid(grid_n_blocks, (M + 7) / 8);
         stream_k_decode_nvfp4<<<grid, nwarps * 32, 99 * 1024, stream>>>(
-            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms);
+            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms, fused_rmsnorm, rms_eps);
     }
     CUDA_CHECK(cudaGetLastError());
 }

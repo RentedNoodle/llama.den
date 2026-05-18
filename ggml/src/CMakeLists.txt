@@ -404,6 +404,10 @@ if (GGML_CUDA)
             add_compile_definitions(GGML_CUDA_FORCE_CUBLAS)
         endif()
 
+        if (GGML_DENSCALE_V)
+            add_compile_definitions(DENSCALE_V)
+        endif()
+
         if (GGML_CUDA_NO_VMM)
             add_compile_definitions(GGML_CUDA_NO_VMM)
         endif()

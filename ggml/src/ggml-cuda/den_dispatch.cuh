@@ -148,14 +148,15 @@ inline DenComputePath den_select_compute_path(
 inline void den_nvfp4_gemv_dispatch(
     const void * weights, const float * act, float * dst,
     int N, int K, cudaStream_t stream,
-    const float * tile_norms, int n_norms)
+    const float * tile_norms, int n_norms,
+    bool fused_rmsnorm = false, float rms_eps = 1e-6f)
 {
     // ── Env override: force specific path for debugging ─────────────────────────
     if (getenv("DEN_ROUTE") && getenv("DEN_ROUTE")[0] != '\0') {
         DenComputePath forced = den_parse_env_override();
         if (forced == DenComputePath::OMMA_MXF4NVF4_GEMV) {
             // Force Path A
-            den_mxf4nvf4_gemv_launch(weights, act, dst, N, K, stream, tile_norms, n_norms);
+            den_mxf4nvf4_gemv_launch(weights, act, dst, N, K, stream, tile_norms, n_norms, fused_rmsnorm, rms_eps);
             return;
         }
         if (forced == DenComputePath::OMMA_SM120_PERSISTENT) {
@@ -176,7 +177,7 @@ inline void den_nvfp4_gemv_dispatch(
     // GPU hang in cuLaunchKernel (fatbin compiled with CUDA 12.8, kernel
     // deadlocks in persistent loop). Enable via DEN_ROUTE=sm120 for debugging.
     // Path A: proven OMMA GEMV (always available, 5201 OMMA.SF.16864).
-    den_mxf4nvf4_gemv_launch(weights, act, dst, N, K, stream, tile_norms, n_norms);
+    den_mxf4nvf4_gemv_launch(weights, act, dst, N, K, stream, tile_norms, n_norms, fused_rmsnorm, rms_eps);
 }
 
 

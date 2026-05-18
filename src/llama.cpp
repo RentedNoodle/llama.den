@@ -2858,8 +2858,15 @@ static bool llm_load_tensors(
     int i_gpu_start = std::max((int) hparams.n_layer - n_gpu_layers, (int) 0);
     bool use_mmap_buffer = true;
 
-    // there is very little benefit to offloading the input layer, so always keep it on the CPU
-    model.buft_input = llama_default_buffer_type_cpu(true);
+    // Offload input embedding to GPU when layers are offloaded, to eliminate
+    // the CPU->CUDA scheduler split (saves ~400us per-step graph launch overhead).
+    // The token embedding table is ~778 MB (BF16 4B) but the GPU-side GET_ROWS
+    // avoids a graph boundary that otherwise creates 2 CUDA graphs per decode.
+    if (n_gpu_layers > 0) {
+        model.buft_input = llama_default_buffer_type_offload(model, main_gpu);
+    } else {
+        model.buft_input = llama_default_buffer_type_cpu(true);
+    }
 
     model.buft_layer.resize(n_layer);
 

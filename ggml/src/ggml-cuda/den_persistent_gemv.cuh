@@ -10,15 +10,27 @@
 
 __device__ int32_t g_persistent_work_counter = 0;
 
+#ifdef DENSCALE_V
+    const int TILE_BYTES = 152;
+    const int NIB_OFFSET = 0;
+    const int SFA_OFFSET = 136;
+    const int COARSE_OFFSET = 128;
+#else
+    const int TILE_BYTES = 144;
+    const int NIB_OFFSET = 16;
+    const int SFA_OFFSET = 0;
+    const int COARSE_OFFSET = 144; // sentinel: not present in 144B tiles
+#endif
+
 __global__ void persistent_gemv_omma(
     const void * __restrict__ weights,
     const float * __restrict__ act,
     float       * __restrict__ dst,
     int N, int K, int kt_per_row)
 {
-    __shared__ uint8_t s_tile[144];
+    __shared__ uint8_t s_tile[TILE_BYTES];
     int lane = threadIdx.x;
-    const size_t row_stride = (size_t)kt_per_row * 144;
+    const size_t row_stride = (size_t)kt_per_row * TILE_BYTES;
     const uint8_t * wptr = (const uint8_t *)weights;
 
     while (true) {
@@ -28,19 +40,19 @@ __global__ void persistent_gemv_omma(
         float acc = 0.0f;
 
         for (int kt = 0; kt < kt_per_row; kt++) {
-            // Cooperative load of one 144B tile into SMEM
-            const uint8_t * tile = wptr + (size_t)row * row_stride + kt * 144;
-            for (int i = lane; i < 144; i += 256) s_tile[i] = tile[i];
+            // Cooperative load of one tile into SMEM
+            const uint8_t * tile = wptr + (size_t)row * row_stride + kt * TILE_BYTES;
+            for (int i = lane; i < TILE_BYTES; i += 256) s_tile[i] = tile[i];
             __syncthreads();
 
-            // Broadcast d4 scales (4 lanes → all)
-            uint32_t s0 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)s_tile)[0] : 0, 0);
-            uint32_t s1 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)s_tile)[1] : 0, 1);
-            uint32_t s2 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)s_tile)[2] : 0, 2);
-            uint32_t s3 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)s_tile)[3] : 0, 3);
+            // Broadcast d4 scales (4 lanes → all) — loaded from SFA_OFFSET
+            uint32_t s0 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)(s_tile + SFA_OFFSET))[0] : 0, 0);
+            uint32_t s1 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)(s_tile + SFA_OFFSET))[1] : 0, 1);
+            uint32_t s2 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)(s_tile + SFA_OFFSET))[2] : 0, 2);
+            uint32_t s3 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)(s_tile + SFA_OFFSET))[3] : 0, 3);
 
             // Pre-load qs data for this lane (4 uint32 = lane's K-slice for all 4 MMAs)
-            const uint32_t * qs_ptr = (const uint32_t *)(s_tile + 16);
+            const uint32_t * qs_ptr = (const uint32_t *)(s_tile + NIB_OFFSET);
             uint32_t qs_data[4];
             for (int i = 0; i < 4; i++) {
                 int idx = lane % 32 * 4 + i;

@@ -52,7 +52,9 @@ struct GovernorContext {
     uint32_t gaussian_attn_enabled          : 1;  // Gaussian splatting attention
     uint32_t reservoir_enabled              : 1;  // Reservoir OMMA computing
     uint32_t phase_attn_enabled             : 1;  // Phase-conjugate attention
-    uint32_t                                : 20; // remaining reserved
+    uint32_t rmsnorm_fusion_enabled         : 1;  // fused RMSNorm in GEMV (default 0)
+    uint32_t vae_unet_overlap               : 1;  // dual-stream VAE/UNet overlap for progressive preview
+    uint32_t                                : 18; // remaining reserved
 };
 #pragma pack(pop)
 

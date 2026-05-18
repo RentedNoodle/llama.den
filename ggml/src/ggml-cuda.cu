@@ -202,6 +202,10 @@ struct {
     GovernorContext* governor_ctx;  // cudaHostAllocMapped, shared with GPU + Rust
 } g_gov;
 static bool g_gov_init = false;
+
+// ── RMSNorm fusion state (single-pass fusion into NVFP4 GEMV) ──────
+static const ggml_tensor* g_rms_fusion_src = nullptr;
+static float             g_rms_fusion_eps  = 1e-6f;
 static ggml_cuda_device_info ggml_cuda_init() {
 #ifdef __HIP_PLATFORM_AMD__
     // Workaround for a rocBLAS bug when using multiple graphics cards:
@@ -2556,9 +2560,15 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
             }
         }
         if (!sm120_ok) {
+            bool fused_rms = (g_rms_fusion_src != nullptr);
+            const float* act_data = fused_rms
+                ? (const float*)g_rms_fusion_src->data
+                : (const float*)src1->data;
             den_k1_dense_dispatch(
-                src0->data, (const float *)src1->data, (float *)dst->data,
-                M, N, K, stream, tile_norms, (int)n_norms);
+                src0->data, act_data, (float *)dst->data,
+                M, N, K, stream, tile_norms, (int)n_norms,
+                fused_rms, fused_rms ? g_rms_fusion_eps : 1e-6f);
+            if (fused_rms) g_rms_fusion_src = nullptr;
         }
     } else if (src0->type == GGML_TYPE_NVFP4 && src1->ne[1] == 1) {
         // NVFP4 M=1 (decode): try SM120 driver bridge, fall back to legacy GEMV
@@ -2584,9 +2594,15 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
             }
         }
         if (!sm120_ok) {
+            bool fused_rms = (g_rms_fusion_src != nullptr);
+            const float* act_data = fused_rms
+                ? (const float*)g_rms_fusion_src->data
+                : (const float*)src1->data;
             den_mxf4nvf4_gemv_launch(
-                src0->data, (const float *)src1->data, (float *)dst->data,
-                N, K, stream, tile_norms, (int)n_norms);
+                src0->data, act_data, (float *)dst->data,
+                N, K, stream, tile_norms, (int)n_norms,
+                fused_rms, fused_rms ? g_rms_fusion_eps : 1e-6f);
+            if (fused_rms) g_rms_fusion_src = nullptr;
         }
     } else if (use_dequantize_mul_mat_vec) {
         if (debug) printf("%s(%s): ggml_cuda_op_mul_mat(ggml_cuda_op_dequantize_mul_mat_vec)\n", __func__, dst->name);
@@ -3796,6 +3812,17 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             ggml_cuda_op_leaky_relu(ctx, dst);
             break;
         case GGML_OP_RMS_NORM:
+            // Fused RMSNorm + NVFP4 MUL_MAT: governor flag + next op check
+            if (fusion && next && next->op == GGML_OP_MUL_MAT &&
+                next->src[0] && next->src[0]->type == GGML_TYPE_NVFP4 &&
+                next->src[1] == dst &&
+                g_gov_init && g_gov.governor_ctx &&
+                g_gov.governor_ctx->rmsnorm_fusion_enabled) {
+                // Fuse: skip RMS_NORM, signal MUL_MAT to compute RMS internally
+                g_rms_fusion_src = dst->src[0];
+                memcpy(&g_rms_fusion_eps, dst->op_params, sizeof(float));
+                break;
+            }
             ggml_cuda_op_rms_norm(ctx, dst);
             break;
         case GGML_OP_FUSED_RMS_NORM:
@@ -4748,6 +4775,7 @@ GGML_CALL static bool ggml_backend_cuda_supports_op(ggml_backend_t backend, cons
                 switch (op->src[0]->type) {
                     case GGML_TYPE_F16:
                     case GGML_TYPE_F32:
+                    case GGML_TYPE_BF16:
                     case GGML_TYPE_Q4_0:
                     case GGML_TYPE_Q4_1:
                     case GGML_TYPE_Q5_0:

@@ -13,7 +13,8 @@
 #include "den_omma_shared.cuh"    // OMMA macro, LUT, quant helpers
 
 // Pre-loaded tile register data: 4 mm iterations × (4 A-fragments + 1 sfa).
-// 20 uint32s per buffer. Compiler promotes array members to individual registers.
+// 20 uint32s per buffer (22 uint32s with DenScale-V coarse scales).
+// Compiler promotes array members to individual registers.
 // Buffer A holds current tile's data; buffer B holds next tile's prefetched data.
 struct alignas(16) TileData {
     uint32_t a0[4];  // row0 lower K-half (q0[kg] for each mm)
@@ -21,6 +22,9 @@ struct alignas(16) TileData {
     uint32_t a2[4];  // row0 upper K-half (q0[4+kg] for each mm)
     uint32_t a3[4];  // row1 upper K-half (q1[4+kg] for each mm)
     uint32_t sfa[4]; // scale factor A    (((const uint32_t*)tile0)[mm])
+#ifdef DENSCALE_V
+    uint8_t  coarse[8]; // DenScale-V: 8 UE8M0 coarse scales (tile bytes 128-135)
+#endif
 };
 
 // Load one tile's A-fragments and scales into a register struct.
@@ -36,29 +40,46 @@ struct alignas(16) TileData {
 __forceinline__ __device__ void load_tile_data(
     TileData &td,
     const uint8_t * __restrict__ w,
-    int row0, int row1, size_t row_stride, int kt, int kg)
+    int row0, int row1, size_t row_stride, int kt, int kg,
+    int tile_bytes = 144)
 {
-    const uint8_t * tile0 = w + (size_t)row0 * row_stride + (size_t)kt * 144;
-    const uint8_t * tile1 = w + (size_t)row1 * row_stride + (size_t)kt * 144;
+    const uint8_t * tile0 = w + (size_t)row0 * row_stride + (size_t)kt * tile_bytes;
+    const uint8_t * tile1 = w + (size_t)row1 * row_stride + (size_t)kt * tile_bytes;
+#ifdef DENSCALE_V
+    const int nib_offset = (tile_bytes == 152) ? 0 : 16;
+    const int sfa_offset = (tile_bytes == 152) ? 136 : 0;
+#else
+    const int nib_offset = 16;
+    const int sfa_offset = 0;
+#endif
     #pragma unroll
     for (int mm = 0; mm < 4; mm++) {
-        const uint32_t * q0 = (const uint32_t *)(tile0 + 16 + mm * 32);
-        const uint32_t * q1 = (const uint32_t *)(tile1 + 16 + mm * 32);
+        const uint32_t * q0 = (const uint32_t *)(tile0 + nib_offset + mm * 32);
+        const uint32_t * q1 = (const uint32_t *)(tile1 + nib_offset + mm * 32);
         td.a0[mm] = q0[kg];
         td.a2[mm] = q0[4 + kg];
         td.a1[mm] = q1[kg];
         td.a3[mm] = q1[4 + kg];
-        td.sfa[mm] = ((const uint32_t *)tile0)[mm];
+        td.sfa[mm] = ((const uint32_t *)(tile0 + sfa_offset))[mm];
     }
+#ifdef DENSCALE_V
+    // Load 8 UE8M0 coarse scales from tile bytes 128-135 (152B tiles only)
+    if (tile_bytes == 152) {
+        for (int i = 0; i < 8; i++) {
+            td.coarse[i] = tile0[128 + i];
+        }
+    }
+#endif
 }
 
-template <int NWARPS>
+template <int NWARPS, bool FUSE_RMSNORM = false>
 __global__ void den_gemv_mxf4nvf4_kernel(
     const uint8_t * __restrict__ w,
     const float   * __restrict__ x,
     float         * __restrict__ y,
     int N, int K, int kt_per_row,
-    const float * tile_norms, int n_norms)
+    const float * tile_norms, int n_norms,
+    float rms_eps = 1e-6f)
 {
     const int warp_id = threadIdx.x / 32;
     const int lane    = threadIdx.x & 31;
@@ -71,9 +92,15 @@ __global__ void den_gemv_mxf4nvf4_kernel(
     const int row0 = out_base + r;   // rows 0-7
     const int row1 = out_base + r + 8; // rows 8-15
 
-    const size_t row_stride = (size_t)kt_per_row * 144; // 144-byte tiles
+#ifdef DENSCALE_V
+    const int tile_bytes = 152;
+#else
+    const int tile_bytes = 144;
+#endif
+    const size_t row_stride = (size_t)kt_per_row * tile_bytes; // 144/152-byte tiles
 
     float total0 = 0.0f, total1 = 0.0f, total2 = 0.0f, total3 = 0.0f;
+    float rms_sum_sq = 0.0f; // RMSNorm sum(x^2) accumulator (only if FUSE_RMSNORM)
 
     if (kt_per_row <= 0) return;
 
@@ -81,7 +108,7 @@ __global__ void den_gemv_mxf4nvf4_kernel(
     // PRIME: pre-load tile 0's A-fragments and scales into register buffer A
     // ========================================================================
     TileData bufA;
-    load_tile_data(bufA, w, row0, row1, row_stride, 0, kg);
+    load_tile_data(bufA, w, row0, row1, row_stride, 0, kg, tile_bytes);
 
     TileData bufB;
 
@@ -103,7 +130,7 @@ __global__ void den_gemv_mxf4nvf4_kernel(
     for (int kt = 0; kt < kt_per_row; kt++) {
         // ---- PREFETCH: issue async global loads for tile kt+1 ----
         if (kt + 1 < kt_per_row)
-            load_tile_data(bufB, w, row0, row1, row_stride, kt + 1, kg);
+            load_tile_data(bufB, w, row0, row1, row_stride, kt + 1, kg, tile_bytes);
 
         // ---- COMPUTE: 4 × OMMA for this tile from bufA ----
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
@@ -120,6 +147,7 @@ __global__ void den_gemv_mxf4nvf4_kernel(
                 int ki = kb + kg * 8 + i;
                 float val = (ki < K) ? x[ki] : 0.0f;
                 x_local[i] = val;
+                if constexpr (FUSE_RMSNORM) rms_sum_sq += val * val;
                 float av = fabsf(val);
                 if (av > local_max) local_max = av;
             }
@@ -128,6 +156,7 @@ __global__ void den_gemv_mxf4nvf4_kernel(
                 int ki = kb + 32 + kg * 8 + i;
                 float val = (ki < K) ? x[ki] : 0.0f;
                 x_local[8 + i] = val;
+                if constexpr (FUSE_RMSNORM) rms_sum_sq += val * val;
                 float av = fabsf(val);
                 if (av > local_max) local_max = av;
             }
@@ -156,6 +185,31 @@ __global__ void den_gemv_mxf4nvf4_kernel(
                 bufA.sfa[mm], sfb_packed);
 
             acc0 = d0; acc1 = d1; acc2 = d2; acc3 = d3;
+
+#ifdef DENSCALE_V
+            // DenScale-V correction: multiply accumulator by fine_scale / coarse_scale
+            //   Fine UE4M3 from sfa (tile bytes 136-151): 4 bytes per K=64 block,
+            //     each byte covers 16 weights (1 K-group). Selected by kg (0..3).
+            //   Coarse UE8M0 from tile bytes 128-135: 2 bytes per K=64 block,
+            //     each byte covers 32 weights (2 K-groups). Selected by kg/2.
+            //
+            // Correction: fine_scale / coarse_scale recovers the fine quantization
+            //   fidelity from the coarse-grained sfa used in OMMA.
+            if (tile_bytes == 152) {
+                uint32_t sfa_reg = bufA.sfa[mm];
+                uint8_t fine_code = (uint8_t)((sfa_reg >> (kg * 8)) & 0xFF);
+                uint8_t coarse_code = bufA.coarse[mm * 2 + (kg >> 1)];
+                float fine_scale = (float)ue4m3_code_to_byte[fine_code & 0xF]
+                                   / 255.0f * 6.0f;
+                float coarse_scale = (float)coarse_code / 32.0f;
+                float correction = fine_scale / (coarse_scale + 1e-10f);
+                d0 *= correction;
+                d1 *= correction;
+                d2 *= correction;
+                d3 *= correction;
+                acc0 = d0; acc1 = d1; acc2 = d2; acc3 = d3;
+            }
+#endif
         }
 
         // NOTE: OMMA returns full K=64 sum per lane with the corrected
@@ -183,10 +237,28 @@ __global__ void den_gemv_mxf4nvf4_kernel(
             bufA = bufB;
     }
 
+    // ── RMSNorm output scaling (fused) ───────────────────────────
+    // After the main OMMA loop, compute rms_scale = 1/sqrt(mean(x^2) + eps)
+    // and multiply each output element by it. This is mathematically
+    // equivalent to: y = W * rms_norm(x) when fused_rmsnorm is true.
+    //
+    // Since W * (x * s) = s * (W * x) for scalar s, we can scale the
+    // final accumulator rather than individual x values in the OMMA loop.
+    float rms_scale_f = 1.0f;
+    if constexpr (FUSE_RMSNORM) {
+        // Warp-reduce sum_sq across all 4 kg lanes within the 32-lane warp.
+        // Each kg lane accumulated sum_sq for its disjoint 1/4 of K elements.
+        rms_sum_sq += __shfl_xor_sync(0xffffffff, rms_sum_sq, 1);
+        rms_sum_sq += __shfl_xor_sync(0xffffffff, rms_sum_sq, 2);
+        // All 32 lanes now have the full-K sum_sq.
+        float mean = rms_sum_sq / K;
+        rms_scale_f = rsqrtf(mean + rms_eps);
+    }
+
     // Write output for both rows
     if (kg == 0) {
-        float row0_out = total0;
-        float row1_out = total2;
+        float row0_out = total0 * rms_scale_f;
+        float row1_out = total2 * rms_scale_f;
         if (row0 < N) y[row0] = row0_out;
         if (row1 < N) y[row1] = row1_out;
     }
@@ -195,14 +267,20 @@ __global__ void den_gemv_mxf4nvf4_kernel(
 static void den_mxf4nvf4_gemv_launch(
     const void * weights, const float * act, float * dst,
     int N, int K, cudaStream_t stream,
-    const float * tile_norms = nullptr, int n_norms = 0)
+    const float * tile_norms = nullptr, int n_norms = 0,
+    bool fused_rmsnorm = false, float rms_eps = 1e-6f)
 {
     const int kt_per_row = K / 256;
     const int nwarps = 8;
     const int grid = (N + nwarps * 16 - 1) / (nwarps * 16);
 
     CUDA_CHECK(cudaGetLastError());
-    den_gemv_mxf4nvf4_kernel<nwarps><<<grid, nwarps * 32, 0, stream>>>(
-        (const uint8_t*)weights, act, dst, N, K, kt_per_row, tile_norms, n_norms);
+    if (fused_rmsnorm) {
+        den_gemv_mxf4nvf4_kernel<nwarps, true><<<grid, nwarps * 32, 0, stream>>>(
+            (const uint8_t*)weights, act, dst, N, K, kt_per_row, tile_norms, n_norms, rms_eps);
+    } else {
+        den_gemv_mxf4nvf4_kernel<nwarps, false><<<grid, nwarps * 32, 0, stream>>>(
+            (const uint8_t*)weights, act, dst, N, K, kt_per_row, tile_norms, n_norms, rms_eps);
+    }
     CUDA_CHECK(cudaGetLastError());
 }

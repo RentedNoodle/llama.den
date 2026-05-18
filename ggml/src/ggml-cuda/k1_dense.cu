@@ -29,7 +29,9 @@ void den_k1_dense_dispatch(
     int M, int N, int K,
     cudaStream_t stream,
     const float* tile_norms,
-    int n_norms)
+    int n_norms,
+    bool fused_rmsnorm,
+    float rms_eps)
 {
-    den::k1_dense::launch_dense_adaptive(weights, act, dst, M, N, K, stream, tile_norms, n_norms);
+    den::k1_dense::launch_dense_adaptive(weights, act, dst, M, N, K, stream, tile_norms, n_norms, fused_rmsnorm, rms_eps);
 }
