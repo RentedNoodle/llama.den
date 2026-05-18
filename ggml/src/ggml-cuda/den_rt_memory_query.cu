@@ -10,7 +10,7 @@ struct RtMemoryQueryResult { float x, y, z, dist; uint32_t id; };
 extern "C" int rt_memory_bvh_upload(const void* flat_buffer, size_t buffer_size, uint32_t num_nodes, uint32_t num_memories);
 extern "C" int rt_memory_bvh_query(float query_x, float query_y, float query_z, uint32_t k, RtMemoryQueryResult* out_results, uint32_t* out_count);
 extern "C" void rt_memory_bvh_destroy();
-extern "C" int rt_memory_bvh_benchmark(float ox, float oy, float oz, int k, float* out_hits, float* out_dists);
+extern "C" int rt_memory_bvh_benchmark(float ox, float oy, float oz, uint32_t k, float* out_hits, float* out_dists);
 //
 // Uploads a BVH-over-memory-nodes to the GPU and queries it via RT Core ray
 // traversal. RT Cores (70 on GB203-300-A1) find the k-nearest memory nodes
