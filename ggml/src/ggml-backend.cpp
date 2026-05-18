@@ -1300,10 +1300,6 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
     // graph input
     if (tensor->flags & GGML_TENSOR_FLAG_INPUT) {
         cur_backend_id = sched->n_backends - 1; // last backend (assumed CPU)
-        if (strcmp(tensor->name, "inp_embd") == 0) {
-            fprintf(stderr, "DEBUG BACKEND_FROM_CUR: inp_embd has INPUT flag! name=%s op=%s flags=0x%x\n",
-                tensor->name, ggml_op_name(tensor->op), tensor->flags);
-        }
         SET_CAUSE(tensor, "1.inp");
         return cur_backend_id;
     }
@@ -1317,12 +1313,6 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
         }
         if (src->buffer != NULL && src->buffer->usage == GGML_BACKEND_BUFFER_USAGE_WEIGHTS) {
             int src_backend_id = ggml_backend_sched_backend_from_buffer(sched, src, tensor);
-            if (strcmp(tensor->name, "inp_embd") == 0) {
-                fprintf(stderr, "DEBUG BACKEND_FROM_CUR: inp_embd weight branch, src[%d]=%s->buffer=%p buft=%s src_backend_id=%d\n",
-                    i, src->name, (void*)src->buffer,
-                    src->buffer ? ggml_backend_buffer_name(src->buffer) : "NULL",
-                    src_backend_id);
-            }
             // check if a backend with higher prio wants to offload the op
             if (offload_enabled && src_backend_id == sched->n_backends - 1) {
                 for (int b = 0; b < src_backend_id; b++) {
@@ -1335,10 +1325,6 @@ static int ggml_backend_sched_backend_id_from_cur(ggml_backend_sched_t sched, st
             SET_CAUSE(tensor, "1.wgt%d", i);
             return src_backend_id;
         }
-    }
-
-    if (strcmp(tensor->name, "inp_embd") == 0) {
-        fprintf(stderr, "DEBUG BACKEND_FROM_CUR: inp_embd returning -1 (unassigned)\n");
     }
     return -1;
 }
@@ -1499,10 +1485,6 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
         // do not overwrite user assignments
         if (*node_backend_id == -1) {
             *node_backend_id = ggml_backend_sched_backend_id_from_cur(sched, node);
-            if (i == 0 || i == 1) {
-                fprintf(stderr, "DEBUG PASS1: node %d (%s, op=%s) assigned backend %d\n",
-                    i, node->name, ggml_op_name(node->op), *node_backend_id);
-            }
 
 #if 0
             // src
@@ -1770,30 +1752,6 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
 
             if (node_backend_id != cur_backend_id || need_new_split) {
                 if (i_split > 0 || node_backend_id != cur_backend_id) {
-                    fprintf(stderr, "DEBUG SPLIT: split %d -> %d at node %d (%s, op=%s), cur_backend=%d, node_backend=%d, need_new_split=%d, reason:",
-                        i_split, i_split+1, i, node->name, ggml_op_name(node->op), cur_backend_id, node_backend_id, (int)need_new_split);
-                    if (node_backend_id != cur_backend_id) fprintf(stderr, " backend_transition");
-                    if (node->op == GGML_OP_REDUCE) fprintf(stderr, " REDUCE");
-                    if (node->op == GGML_OP_FAKE_CPY) fprintf(stderr, " FAKE_CPY");
-                            if (node->op == GGML_OP_ADD && node->op_params[0] == 0xff) fprintf(stderr, " ADD_0xff");
-                    if (node->op_params[GGML_MAX_OP_PARAMS / sizeof(int32_t) - 1] == 0xff) fprintf(stderr, " FORCE_SPLIT");
-                    fprintf(stderr, "\n");
-                }
-                // DEBUG: log node 0 info specifically
-                if (i_split == 0 && i == 0) {
-                    fprintf(stderr, "DEBUG NODE0: op=%s name=%s backend=%d flags=0x%x\n",
-                        ggml_op_name(node->op), node->name, node_backend_id, node->flags);
-                    for (int j = 0; j < GGML_MAX_SRC; j++) {
-                        if (node->src[j]) {
-                            fprintf(stderr, "DEBUG NODE0 src[%d]: op=%s name=%s backend=%d flags=0x%x buf=%p usage=%d\n",
-                                j, ggml_op_name(node->src[j]->op), node->src[j]->name,
-                                tensor_backend_id(node->src[j]), node->src[j]->flags,
-                                (void*)node->src[j]->buffer,
-                                node->src[j]->buffer ? node->src[j]->buffer->usage : -1);
-                        } else {
-                            fprintf(stderr, "DEBUG NODE0 src[%d]: NULL\n", j);
-                        }
-                    }
                 }
                 split->i_end = i;
                 i_split++;
@@ -1882,11 +1840,6 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
         split->i_end = graph->n_nodes;
         sched->n_splits = i_split + 1;
 
-        // DEBUG: log all split backends
-        for (int s = 0; s < (int)sched->n_splits; s++) {
-            fprintf(stderr, "DEBUG SPLIT FINAL: split %d: backend_id=%d nodes[%d..%d]\n",
-                s, sched->splits[s].backend_id, sched->splits[s].i_start, sched->splits[s].i_end-1);
-        }
     }
 
     if (sched->debug) {
