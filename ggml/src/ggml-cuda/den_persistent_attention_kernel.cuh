@@ -73,7 +73,8 @@ static_assert(sizeof(AttentionPhase) <= 64,
 __global__ void persistent_attention_l0(
     AttentionPhase* sync,
     const float*    proj_vector,   // random projection vector (__constant__ mirror)
-    int             d_model)       // KV dimension per token
+    int             d_model,       // KV dimension per token
+    const GovernorContext* ctx)    // Governor context (register_kv_cache_enabled flag)
 {
     int warp_id = threadIdx.x / 32;
     int lane    = threadIdx.x & 31;
@@ -135,17 +136,20 @@ __global__ void persistent_attention_l0(
 
         float my_scores[TOKENS_PER_WARP];
 
+        // Check if register KV cache is enabled via GovernorContext
+        bool regcache_active = ctx && ctx->register_kv_cache_enabled;
+
         for (int t = 0; t < num_blocks; t++) {
             int block_id   = token_base + t;
             int set        = block_id & (CACHE_NUM_SETS - 1);
             float cached_score;
 
-            if (cache_lookup(cache, set, block_id, &cached_score)) {
+            if (regcache_active && cache_lookup(cache, set, block_id, &cached_score)) {
                 // L0 HIT: use cached score_hint from previous iteration
                 // (1 cycle shared memory access)
                 my_scores[t] = cached_score;
             } else {
-                // L0 MISS: load KV block from HBM (~300 cycles)
+                // L0 MISS or cache disabled: load KV block from HBM (~300 cycles)
                 const float* kv_block = (const float*)kv_base
                     + (size_t)block_id * d_model;
 
@@ -161,28 +165,31 @@ __global__ void persistent_attention_l0(
                 }
                 my_scores[t] = score * rsqrtf((float)d_model);
 
-                // Compute k_proj = dot(K_block, proj_vector) for fast
-                // similarity scoring on future lookups. Each lane
-                // contributes 32 dims, then warp-reduced.
-                float kproj_val = 0.0f;
-                for (int i = 0; i < 32 && (lane * 32 + i) < d_model; i++) {
-                    kproj_val += kv_block[lane * 32 + i] * proj_local[i];
-                }
-                #pragma unroll
-                for (int off = 16; off > 0; off >>= 1) {
-                    kproj_val += __shfl_xor_sync(0xffffffff, kproj_val, off);
-                }
+                // Cache insertion (only when cache active)
+                if (regcache_active) {
+                    // Compute k_proj = dot(K_block, proj_vector) for fast
+                    // similarity scoring on future lookups. Each lane
+                    // contributes 32 dims, then warp-reduced.
+                    float kproj_val = 0.0f;
+                    for (int i = 0; i < 32 && (lane * 32 + i) < d_model; i++) {
+                        kproj_val += kv_block[lane * 32 + i] * proj_local[i];
+                    }
+                    #pragma unroll
+                    for (int off = 16; off > 0; off >>= 1) {
+                        kproj_val += __shfl_xor_sync(0xffffffff, kproj_val, off);
+                    }
 
-                // Insert new entry into register cache
-                KVCacheEntry entry;
-                entry.block_id   = block_id;
-                entry.k_proj     = kproj_val;
-                entry.score_hint = my_scores[t];
-                entry.flags      = 1;      // valid
+                    // Insert new entry into register cache
+                    KVCacheEntry entry;
+                    entry.block_id   = block_id;
+                    entry.k_proj     = kproj_val;
+                    entry.score_hint = my_scores[t];
+                    entry.flags      = 1;      // valid
 
-                __syncthreads();            // sync before cache modify
-                cache_insert(cache, set, entry);
-                __syncthreads();            // sync after cache modify
+                    __syncthreads();            // sync before cache modify
+                    cache_insert(cache, set, entry);
+                    __syncthreads();            // sync after cache modify
+                }
             }
         }
 
@@ -315,6 +322,7 @@ __host__ inline void launch_persistent_attention(
     AttentionPhase* sync,
     const float*    proj_vector,
     int             d_model,
+    const GovernorContext* ctx,
     cudaStream_t    stream)
 {
     // Shared memory: WarpRegisterCache (640 bytes) + attn_scores (512 bytes)
@@ -326,7 +334,7 @@ __host__ inline void launch_persistent_attention(
         PERSISTENT_BLOCKS,
         THREADS_PER_BLOCK,
         shared_mem_size,
-        stream>>>(sync, proj_vector, d_model);
+        stream>>>(sync, proj_vector, d_model, ctx);
 
     cudaGetLastError();  // clear any pending errors from kernel launch
 }
