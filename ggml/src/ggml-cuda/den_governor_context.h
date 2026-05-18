@@ -69,7 +69,9 @@ struct GovernorContext {
     uint32_t ptx_gen_enabled                : 1;  // PTX dynamic kernel generation via NVRTC (default 0)
     uint32_t copy_engine_overlap_enabled    : 1;  // dual DMA copy engine overlap for weight streaming (default 0)
     uint32_t bar1_nvme_enabled              : 1;  // BAR1 NVMe mapping for VRAM overflow (default 0)
-    uint32_t                                : 3;  // remaining reserved
+    uint32_t l2_cognitive_enabled           : 1;  // L2-resident cognitive buffer for emotional logit biasing (default 0)
+    uint32_t conditional_graph_enabled      : 1;  // conditional CUDA graph for conversational turn (default 0)
+    uint32_t                                : 1;  // remaining reserved
 };
 #pragma pack(pop)
 

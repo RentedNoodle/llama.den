@@ -44,29 +44,23 @@
 // (sfa, sfb) scale pair — this maps naturally to 4 calibration sub-blocks.
 #define CAL_SUBBLOCKS_PER_TILE  4
 
-// ── E2M1 magnitude LUT ────────────────────────────────────────────────
-// Standard E2M1 unsigned magnitude values (1 sign + 2 exp + 1 mant bits).
-// 8 representable values anchored at quantization thresholds.
-// The grid is the same on GPU and CPU — guarantees bit-exact MSE ranking.
-static constexpr float CAL_E2M1_MAGS[8] = {
-    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f
-};
-
-// Midpoint thresholds between consecutive E2M1 magnitudes.
-// Used for nearest-magnitude search without branching LUT comparison.
-static constexpr float CAL_E2M1_THRESH[7] = {
-    0.25f, 0.75f, 1.25f, 1.75f, 2.50f, 3.50f, 5.00f
-};
-
-// ── Decoded OMMA UE4M3 scale values ──────────────────────────────────
-// Pre-computed from ue4m3_code_to_byte[] LUT × FP8 E4M3 decode.
-// Each uint8 byte from ue4m3_code_to_byte[c] is decoded as:
-//   sign=0, exp=(byte>>3)&0xF, mant=byte&0x7
-//   value = (1 + mant/8) * 2^(exp-7)  if exp>0
-//   value = mant * 2^(-7)             if exp=0 (denormal)
+// ═══════════════════════════════════════════════════════════════════════════════════
+// DEVICE HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════════
 //
+// All LUTs are defined INSIDE the device functions that use them.
+// This avoids CUDA linker issues with file-scope constexpr arrays in device code.
+// CUDA 12.8 supports local constexpr arrays inside __device__ functions correctly.
+//
+// ── E2M1 magnitude grid ─────────────────────────────────────────────
+// Standard E2M1: 1 sign + 2 exp + 1 mant (8 unsigned magnitudes).
+// Representable values: 0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0
+// Midpoint thresholds: 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0
+//
+// ── OMMA UE4M3 scale grid ───────────────────────────────────────────
+// 16 OMMA-valid scale values from ue4m3_code_to_byte[] × E4M3 decode.
 // code   byte   exp mant   decoded
-//  0     0x00    0   0     0.0         (zero)
+//  0     0x00    0   0     0.0
 //  1     0x18    3   0     0.0625
 //  2     0x20    4   0     0.125
 //  3     0x24    4   1     0.1875
@@ -82,21 +76,6 @@ static constexpr float CAL_E2M1_THRESH[7] = {
 // 13     0x3D    7   5     1.625
 // 14     0x3E    7   6     1.75
 // 15     0x3F    7   7     1.875
-static constexpr float CAL_UE4M3_DECODED[16] = {
-    0.0f, 0.0625f, 0.125f, 0.1875f,
-    0.25f, 0.3125f, 0.375f, 0.4375f,
-    1.0f, 1.125f, 1.25f, 1.375f,
-    1.5f, 1.625f, 1.75f, 1.875f
-};
-
-// Thresholds matching quant_f32_ue4m3() + _PY_UE4M3_THRESH.
-// These partition the float range into 16 OMMA-valid bins.
-static constexpr float CAL_UE4M3_THRESH[15] = {
-    0.03125f, 0.09375f, 0.15625f, 0.21875f,
-    0.28125f, 0.34375f, 0.40625f, 0.71875f,
-    1.0625f, 1.1875f, 1.3125f, 1.4375f,
-    1.5625f, 1.6875f, 1.8125f
-};
 
 // ═══════════════════════════════════════════════════════════════════════════════════
 // DEVICE HELPERS
@@ -105,36 +84,47 @@ static constexpr float CAL_UE4M3_THRESH[15] = {
 // ── Nearest E2M1 unsigned magnitude ───────────────────────────────────
 // Returns the E2M1 magnitude closest to |v|, using midpoint thresholds.
 // Equivalent to: argmin_{m in E2M1_MAGS} |v - m|
+// Local constexpr arrays inside __device__ functions compile correctly on CUDA 12.8.
 __device__ __forceinline__ float nearest_e2m1_mag(float v_abs) {
-    if (v_abs < CAL_E2M1_THRESH[0]) return CAL_E2M1_MAGS[0];
-    if (v_abs < CAL_E2M1_THRESH[1]) return CAL_E2M1_MAGS[1];
-    if (v_abs < CAL_E2M1_THRESH[2]) return CAL_E2M1_MAGS[2];
-    if (v_abs < CAL_E2M1_THRESH[3]) return CAL_E2M1_MAGS[3];
-    if (v_abs < CAL_E2M1_THRESH[4]) return CAL_E2M1_MAGS[4];
-    if (v_abs < CAL_E2M1_THRESH[5]) return CAL_E2M1_MAGS[5];
-    if (v_abs < CAL_E2M1_THRESH[6]) return CAL_E2M1_MAGS[6];
-    return CAL_E2M1_MAGS[7];
+    constexpr float thresh[7] = {0.25f, 0.75f, 1.25f, 1.75f, 2.50f, 3.50f, 5.00f};
+    constexpr float mags[8]   = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+    if (v_abs < thresh[0]) return mags[0];
+    if (v_abs < thresh[1]) return mags[1];
+    if (v_abs < thresh[2]) return mags[2];
+    if (v_abs < thresh[3]) return mags[3];
+    if (v_abs < thresh[4]) return mags[4];
+    if (v_abs < thresh[5]) return mags[5];
+    if (v_abs < thresh[6]) return mags[6];
+    return mags[7];
 }
 
 // ── Float value to nearest OMMA UE4M3 code (4-bit, 0-15) ─────────────
 // Uses the same threshold bins as kernel quant_f32_ue4m3().
 // Returns the 4-bit code index (not the byte).
 __device__ __forceinline__ uint8_t nearest_ue4m3_code(float val) {
-    if (val <= CAL_UE4M3_THRESH[0])  return 0;
-    if (val <= CAL_UE4M3_THRESH[1])  return 1;
-    if (val <= CAL_UE4M3_THRESH[2])  return 2;
-    if (val <= CAL_UE4M3_THRESH[3])  return 3;
-    if (val <= CAL_UE4M3_THRESH[4])  return 4;
-    if (val <= CAL_UE4M3_THRESH[5])  return 5;
-    if (val <= CAL_UE4M3_THRESH[6])  return 6;
-    if (val <= CAL_UE4M3_THRESH[7])  return 7;
-    if (val <= CAL_UE4M3_THRESH[8])  return 8;
-    if (val <= CAL_UE4M3_THRESH[9])  return 9;
-    if (val <= CAL_UE4M3_THRESH[10]) return 10;
-    if (val <= CAL_UE4M3_THRESH[11]) return 11;
-    if (val <= CAL_UE4M3_THRESH[12]) return 12;
-    if (val <= CAL_UE4M3_THRESH[13]) return 13;
-    if (val <= CAL_UE4M3_THRESH[14]) return 14;
+    // Thresholds matching quant_f32_ue4m3() + _PY_UE4M3_THRESH.
+    // These partition float range into 16 OMMA-valid bins.
+    constexpr float thresh[15] = {
+        0.03125f, 0.09375f, 0.15625f, 0.21875f,
+        0.28125f, 0.34375f, 0.40625f, 0.71875f,
+        1.0625f, 1.1875f, 1.3125f, 1.4375f,
+        1.5625f, 1.6875f, 1.8125f
+    };
+    if (val <= thresh[0])  return 0;
+    if (val <= thresh[1])  return 1;
+    if (val <= thresh[2])  return 2;
+    if (val <= thresh[3])  return 3;
+    if (val <= thresh[4])  return 4;
+    if (val <= thresh[5])  return 5;
+    if (val <= thresh[6])  return 6;
+    if (val <= thresh[7])  return 7;
+    if (val <= thresh[8])  return 8;
+    if (val <= thresh[9])  return 9;
+    if (val <= thresh[10]) return 10;
+    if (val <= thresh[11]) return 11;
+    if (val <= thresh[12]) return 12;
+    if (val <= thresh[13]) return 13;
+    if (val <= thresh[14]) return 14;
     return 15;
 }
 
@@ -254,12 +244,19 @@ __global__ void den_calibration_search_kernel(
 
     // ── Candidate evaluation ──────────────────────────────────────────
     // Each thread evaluates one UE4M3 scale code.
-    // The scale sfb = CAL_UE4M3_DECODED[cand].
+    // The decoded scale value for each code is from a local constexpr array
+    // matching the OMMA ue4m3_code_to_byte[] × E4M3 decode.
+    constexpr float cal_ue4m3_scale[16] = {
+        0.0f, 0.0625f, 0.125f, 0.1875f,
+        0.25f, 0.3125f, 0.375f, 0.4375f,
+        1.0f, 1.125f, 1.25f, 1.375f,
+        1.5f, 1.625f, 1.75f, 1.875f
+    };
 
     float best_mse = INFINITY;
     uint8_t best_sfa_code = 0;
 
-    const float sfb = CAL_UE4M3_DECODED[cand];
+    const float sfb = cal_ue4m3_scale[cand];
     const float inv_sfb = (sfb > 1e-10f) ? 1.0f / sfb : 0.0f;
 
     if (cand > 0 && sfb > 1e-10f) {
@@ -298,7 +295,7 @@ __global__ void den_calibration_search_kernel(
             uint8_t local_best = 0;
             #pragma unroll
             for (int sfa_c = 1; sfa_c < CAL_N_CANDIDATES; sfa_c++) {
-                float sfa = CAL_UE4M3_DECODED[sfa_c];
+                float sfa = cal_ue4m3_scale[sfa_c];
                 float sfa_mse = 0.0f;
                 #pragma unroll
                 for (int i = 0; i < CAL_BLOCK_SIZE; i++) {
@@ -315,7 +312,7 @@ __global__ void den_calibration_search_kernel(
         } else {
             // CFO-sfa: analytic sfa rounded to nearest UE4M3 code (fast, accurate)
             best_sfa_code = nearest_ue4m3_code(sfa_opt);
-            float sfa = CAL_UE4M3_DECODED[best_sfa_code];
+            float sfa = cal_ue4m3_scale[best_sfa_code];
 
             // ── Step 4: Compute MSE with best (sfb, sfa) pair ─────────
             float mse = 0.0f;
@@ -662,12 +659,16 @@ __host__ static inline int den_calibration_optimize_matrix(
 // SELF-TEST — build-time verification
 // ═══════════════════════════════════════════════════════════════════════════════════
 //
+// NOTE: This test runs on HOST. The device functions (nearest_e2m1_mag etc.) are
+// __device__-only, so the test provides its own inline host implementations.
+//
 // Compile with:
 //   nvcc -c den_calibration.cuh -I . -arch sm_120a -std=c++17 -x cu -o /dev/null
 //
-// Or as a standalone test:
-//   nvcc -DEN_CALIBRATION_TEST -I . -arch sm_120a -std=c++17 \
-//        den_calibration.cuh -o den_calibration_test
+// Or as a standalone test (host-only, no GPU needed):
+//   g++ -std=c++17 -DEN_CALIBRATION_TEST -x c++ \
+//        -I ggml/src/ggml-cuda den_calibration.cuh -o den_calibration_test
+//   ./den_calibration_test
 //
 #if defined(DEN_CALIBRATION_TEST)
 
@@ -675,23 +676,63 @@ __host__ static inline int den_calibration_optimize_matrix(
 #include <cstdlib>
 #include <cmath>
 
+// Host-side copy of ue4m3_code_to_byte[16] (from den_omma_shared.cuh)
+static constexpr uint8_t test_ue4m3_code_to_byte[16] = {
+    0x00, 0x18, 0x20, 0x24, 0x28, 0x2A, 0x2C, 0x2E,
+    0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
+};
+
+// Host-side decode_ue4m3_byte
+static float test_decode_ue4m3_byte(uint8_t byte_val) {
+    if (byte_val == 0) return 0.0f;
+    int exp = (byte_val >> 3) & 0x0F;
+    int mant = byte_val & 0x07;
+    if (exp == 0) return (float)mant * 0.0078125f;
+    return (1.0f + (float)mant * 0.125f) * exp2f((float)(exp)-7.0f);
+}
+
+// Host-side nearest_e2m1_mag
+static float test_nearest_e2m1_mag(float v_abs) {
+    constexpr float t[7] = {0.25f, 0.75f, 1.25f, 1.75f, 2.50f, 3.50f, 5.00f};
+    constexpr float m[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+    if (v_abs < t[0]) return m[0]; if (v_abs < t[1]) return m[1];
+    if (v_abs < t[2]) return m[2]; if (v_abs < t[3]) return m[3];
+    if (v_abs < t[4]) return m[4]; if (v_abs < t[5]) return m[5];
+    if (v_abs < t[6]) return m[6]; return m[7];
+}
+
+// Host-side nearest_ue4m3_code
+static uint8_t test_nearest_ue4m3_code(float val) {
+    constexpr float t[15] = {0.03125f,0.09375f,0.15625f,0.21875f,0.28125f,
+        0.34375f,0.40625f,0.71875f,1.0625f,1.1875f,1.3125f,1.4375f,
+        1.5625f,1.6875f,1.8125f};
+    if (val <= t[0]) return 0;  if (val <= t[1]) return 1;
+    if (val <= t[2]) return 2;  if (val <= t[3]) return 3;
+    if (val <= t[4]) return 4;  if (val <= t[5]) return 5;
+    if (val <= t[6]) return 6;  if (val <= t[7]) return 7;
+    if (val <= t[8]) return 8;  if (val <= t[9]) return 9;
+    if (val <= t[10]) return 10; if (val <= t[11]) return 11;
+    if (val <= t[12]) return 12; if (val <= t[13]) return 13;
+    if (val <= t[14]) return 14; return 15;
+}
+
 void run_self_test() {
     printf("=== den_calibration.cuh self-test ===\n");
 
-    // ── Test device helpers on host ────────────────────────────────────
+    // ── Test E2M1 nearest-magnitude ─────────────────────────────────────
     printf("\n[1] E2M1 nearest-magnitude:\n");
     float test_vals[] = {0.0f, 0.1f, 0.3f, 0.6f, 1.0f, 2.2f, 3.7f, 5.5f, 10.0f};
     float expected[] = {0.0f, 0.0f, 0.5f, 0.5f, 1.0f, 2.0f, 4.0f, 6.0f, 6.0f};
     bool e2m1_ok = true;
     for (int i = 0; i < 9; i++) {
-        float r = nearest_e2m1_mag(test_vals[i]);
+        float r = test_nearest_e2m1_mag(test_vals[i]);
         bool ok = fabsf(r - expected[i]) < 1e-6f;
         printf("  nearest_e2m1_mag(%.2f) = %.2f (expected %.2f) %s\n",
                test_vals[i], r, expected[i], ok ? "PASS" : "FAIL");
         if (!ok) e2m1_ok = false;
     }
 
-    // ── Test UE4M3 code → scale decode ────────────────────────────────
+    // ── Test UE4M3 code → scale decode ──────────────────────────────────
     printf("\n[2] UE4M3 decode vs expected OMMA values:\n");
     bool ue4m3_ok = true;
     float expected_scales[16] = {
@@ -701,47 +742,99 @@ void run_self_test() {
         1.5f, 1.625f, 1.75f, 1.875f
     };
     for (int c = 0; c < 16; c++) {
-        float dec = decode_ue4m3_byte(ue4m3_code_to_byte[c]);
+        float dec = test_decode_ue4m3_byte(test_ue4m3_code_to_byte[c]);
         bool ok = fabsf(dec - expected_scales[c]) < 1e-5f;
-        printf("  code %2d: byte 0x%02X → %.4f (expected %.4f) %s\n",
-               c, ue4m3_code_to_byte[c], dec, expected_scales[c],
+        printf("  code %2d: byte 0x%02X -> %.4f (expected %.4f) %s\n",
+               c, test_ue4m3_code_to_byte[c], dec, expected_scales[c],
                ok ? "PASS" : "FAIL");
         if (!ok) ue4m3_ok = false;
     }
 
-    // ── Test nearest_ue4m3_code roundtrip ─────────────────────────────
+    // ── Test nearest_ue4m3_code roundtrip ───────────────────────────────
     printf("\n[3] nearest_ue4m3_code roundtrip:\n");
     bool nq_ok = true;
     for (int c = 0; c < 16; c++) {
         float scale = expected_scales[c];
-        uint8_t code = nearest_ue4m3_code(scale);
-        // Scale should round-trip to same code (for well-behaved thresholds)
+        uint8_t code = test_nearest_ue4m3_code(scale);
         bool ok = (code == c) || (c == 0 && scale == 0.0f);
-        if (scale == 0.0f) ok = true;  // zero maps to code 0
+        if (scale == 0.0f) ok = true;
         if (!ok) {
-            printf("  FAIL: scale %.4f → code %d (expected %d)\n", scale, code, c);
+            printf("  FAIL: scale %.4f -> code %d (expected %d)\n", scale, code, c);
             nq_ok = false;
         }
     }
-    // Test at thresholds — should map correctly
+    // Test at thresholds
     for (int c = 0; c < 15; c++) {
         float mid = (expected_scales[c] + expected_scales[c+1]) * 0.5f;
-        uint8_t code = nearest_ue4m3_code(mid);
-        // Midpoint should map to the nearer code
+        uint8_t code = test_nearest_ue4m3_code(mid);
         if (code != c && code != c+1) {
-            printf("  FAIL: midpoint %.4f → code %d (expected %d or %d)\n",
+            printf("  FAIL: midpoint %.4f -> code %d (expected %d or %d)\n",
                    mid, code, c, c+1);
             nq_ok = false;
         }
     }
     if (nq_ok) printf("  All nearest_ue4m3_code tests PASS\n");
 
+    // ── Test calibration MSE for a synthetic block ──────────────────────
+    printf("\n[4] Synthetic MSE:\n");
+    // Create a simple block: uniform weights at 3.0
+    // With sfb=8 (scale=1.0): normed=3.0, nearest E2M1=3.0, W_q=3.0
+    // sfa_opt = sum(1/16 * 3.0 * |3.0|) / sum(1/16 * 9.0) = 3.0 / 3.0 = 1.0
+    // MSE at sfb=8, sfa=8 (1.0): each element |3.0| - 1.0*3.0 = 0, MSE = 0
+    // Other scales should give non-zero MSE.
+    float block[16];
+    for (int i = 0; i < 16; i++) block[i] = 3.0f;
+
+    int best_sfb = 0, best_sfa = 0;
+    float best_mse_val = 1e20f;
+
+    for (int sfb_c = 1; sfb_c < 16; sfb_c++) {
+        float sfb = expected_scales[sfb_c];
+        float inv_sfb = 1.0f / sfb;
+
+        // Quantize
+        float W_q[16];
+        for (int i = 0; i < 16; i++) {
+            W_q[i] = test_nearest_e2m1_mag(fabsf(block[i]) * inv_sfb) * sfb;
+        }
+
+        // CFO-sfa
+        float num = 0.0f, den = 0.0f;
+        for (int i = 0; i < 16; i++) {
+            float w_abs = fabsf(block[i]);
+            num += (1.0f/16.0f) * W_q[i] * w_abs;
+            den += (1.0f/16.0f) * W_q[i] * W_q[i];
+        }
+        float sfa_opt = (den > 1e-12f) ? num / den : 0.0f;
+        sfa_opt = fmaxf(0.0f, sfa_opt);
+        uint8_t sfa_c = test_nearest_ue4m3_code(sfa_opt);
+        float sfa = expected_scales[sfa_c];
+
+        float mse = 0.0f;
+        for (int i = 0; i < 16; i++) {
+            float err = fabsf(block[i]) - sfa * W_q[i];
+            mse += (1.0f/16.0f) * err * err;
+        }
+
+        if (mse < best_mse_val) {
+            best_mse_val = mse;
+            best_sfb = sfb_c;
+            best_sfa = sfa_c;
+        }
+    }
+
+    printf("  Best (sfb=%d, sfa=%d) MSE=%.8f (expected sfb=8, sfa=8, MSE=0)\n",
+           best_sfb, best_sfa, best_mse_val);
+    bool synth_ok = (best_sfb == 8 && best_sfa == 8 && best_mse_val < 1e-6f);
+    printf("  Synthetic test: %s\n", synth_ok ? "PASS" : "FAIL");
+
     printf("\n=== Summary ===\n");
     printf("  E2M1 nearest:     %s\n", e2m1_ok ? "PASS" : "FAIL");
     printf("  UE4M3 decode:     %s\n", ue4m3_ok ? "PASS" : "FAIL");
     printf("  nearest_ue4m3:    %s\n", nq_ok ? "PASS" : "FAIL");
+    printf("  Synthetic MSE:    %s\n", synth_ok ? "PASS" : "FAIL");
 
-    if (e2m1_ok && ue4m3_ok && nq_ok) {
+    if (e2m1_ok && ue4m3_ok && nq_ok && synth_ok) {
         printf("\nAll self-tests PASS.\n");
     } else {
         printf("\nSome tests FAILED.\n");
