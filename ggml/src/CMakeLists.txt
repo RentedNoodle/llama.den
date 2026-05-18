@@ -1640,4 +1640,14 @@ endif()
 if (BUILD_SHARED_LIBS)
     set_target_properties(ggml PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_compile_definitions(ggml PRIVATE GGML_SHARED GGML_BUILD)
+
+    # SASS interleave: post-build FFMA yield/reuse patching
+    find_program(CUDA_FATBINARY fatbinary HINT /usr/local/cuda-12.8/bin)
+    if (CUDA_FATBINARY AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/den_sass_interleave.py")
+        add_custom_command(TARGET ggml POST_BUILD
+            COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/den_sass_interleave.py"
+                    --so "$<TARGET_FILE:ggml>"
+            COMMENT "SASS interleave: patching FFMA yield/reuse bits in cubins"
+            VERBATIM)
+    endif()
 endif()
