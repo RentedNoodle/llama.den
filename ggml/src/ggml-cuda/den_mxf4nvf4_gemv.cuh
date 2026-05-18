@@ -12,6 +12,13 @@
 #include "common.cuh"
 #include "den_omma_shared.cuh"    // OMMA macro, LUT, quant helpers
 
+// Personality-Adaptive Quantization scale factor.
+// Written by Rust cognitive daemon via cudaMemcpyToSymbolAsync before each decode step.
+// Value = f32 modulation factor based on PAD state (range ~0.65-1.4).
+#ifdef PERSONALITY_QUANTIZATION
+__constant__ float g_personality_scale = 1.0f;
+#endif
+
 // Pre-loaded tile register data: 4 mm iterations × (4 A-fragments + 1 sfa).
 // 20 uint32s per buffer (22 uint32s with DenScale-V coarse scales).
 // Compiler promotes array members to individual registers.
@@ -167,6 +174,16 @@ __global__ void den_gemv_mxf4nvf4_kernel(
                 if (other > block_max) block_max = other;
             }
             float sfb_f = fmaxf(0.0625f, fminf(1.875f, block_max * 0.333333f));
+
+            // Personality-Adaptive Quantization: modulate sfb by PAD emotional state.
+            // The modulation factor is written to __constant__ memory by the Rust
+            // cognitive daemon before each decode step via cudaMemcpyToSymbolAsync.
+            // Range: ~0.65x to ~1.4x (clamped to UE4M3 valid range 0.0625-1.875).
+#ifdef PERSONALITY_QUANTIZATION
+            sfb_f *= g_personality_scale;
+            sfb_f = fmaxf(0.0625f, fminf(1.875f, sfb_f));
+#endif
+
             float sfb_inv = 1.0f / sfb_f;
             uint8_t sfb_code = quant_f32_ue4m3(sfb_f);
             uint32_t sfb_packed = 0x01010101u * (uint32_t)ue4m3_code_to_byte[sfb_code];

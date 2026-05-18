@@ -269,3 +269,14 @@ void den_subvocal_disable(void* ctx_ptr) {
     ctx->subvocal_path_enabled = 0;
     ctx->seq.fetch_add(1, std::memory_order_release);
 }
+
+// ── Personality-Adaptive Quantization scale ─────────────────────────
+// Writes the PAD-derived sfb modulation factor to GPU constant memory.
+// The OMMA GEMV kernel reads g_personality_scale from its __constant__ space.
+// No ctx needed — this goes to constant memory directly.
+
+extern __constant__ float g_personality_scale;
+
+void den_personality_scale_write(float scale) {
+    cudaMemcpyToSymbol(g_personality_scale, &scale, sizeof(float), 0, cudaMemcpyHostToDevice);
+}
