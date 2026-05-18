@@ -38,6 +38,42 @@ inline bool den_pin_tensor_l2(const char* name, void* ptr, size_t bytes) {
     return true;
 }
 
-// Integration: call after each CUDA tensor allocation in the GGUF loader.
-// Total pinned: norm weights (~40 × 2560 × 2B = 200KB) + embed top rows
-// + output.weight = ~20 MB total, well within 24 MB budget.
+// ── Vision encoder pinning (mmproj) ─────────────────────────────────────
+
+// Pin vision encoder tensors in L2 for faster multimodal inference.
+// Vision encoder runs as a separate inference pass before LLM decode.
+// Keeping these hot avoids reloading from GDDR7 on every visual query.
+
+inline void den_pin_vision_l2(const char* name, void* ptr, size_t bytes) {
+    bool pri = false;
+    if (strstr(name, "mmproj"))       pri = true;
+    if (strstr(name, "v.isual"))      pri = true;  // visual encoder prefix
+    if (strstr(name, "visual"))       pri = true;
+    if (strstr(name, "patch"))        pri = true;
+    if (strstr(name, "class_embed"))  pri = true;
+    if (strstr(name, "position_embed")) pri = true;
+    if (strstr(name, "ln_pre"))       pri = true;
+    if (strstr(name, "ln_post"))      pri = true;
+    if (strstr(name, "transformer"))  pri = true;
+    if (!pri || !L2Budget::try_alloc(bytes)) return;
+
+    cudaAccessPolicyWindow w;
+    w.base_ptr = ptr; w.num_bytes = bytes;
+    w.hitRatio = 1.0f; w.hitProp = cudaAccessPropertyPersisting;
+    w.missProp = cudaAccessPropertyNormal;
+    cudaCtxSetAccessPolicyWindow(w);
+}
+
+// ── Consolidated pinning API ────────────────────────────────────────────
+
+// Call once per tensor after CUDA allocation. Automatically routes to
+// the correct priority pool based on tensor name prefix.
+inline void den_try_pin_l2(const char* name, void* ptr, size_t bytes) {
+    auto try_pin = [&](auto pin_fn) { pin_fn(name, ptr, bytes); };
+    try_pin(den_pin_tensor_l2);
+    try_pin(den_pin_vision_l2);
+}
+
+// Integration: call den_try_pin_l2() after each CUDA tensor allocation
+// in the GGUF loader. Total pinned: ~20 MB LLM weights + ~15 MB vision
+// encoder = ~35 MB, within the 36 MB usable budget.
