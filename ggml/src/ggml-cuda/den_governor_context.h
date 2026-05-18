@@ -40,8 +40,12 @@ struct GovernorContext {
 
     // [5] Feature flags + reserved for Volition + Memory bridge fields
     uint32_t reserved2;                      // 4 bytes (reserved)
-    uint32_t omma_attention_enabled : 1;     // 1 bit: OMMA-as-attention
-    uint32_t                      : 31;      // remaining reserved bits
+    uint32_t omma_attention_enabled         : 1;  // OMMA-as-attention
+    uint32_t speculative_attention_enabled  : 1;  // warp-divergence attention
+    uint32_t register_kv_cache_enabled      : 1;  // register-cached KV
+    uint32_t vcache_prefetch_enabled        : 1;  // V-Cache semantic prefetch
+    uint32_t tma_tile_load_enabled          : 1;  // TMA-based tile loading
+    uint32_t                                : 27; // remaining reserved
 };
 #pragma pack(pop)
 

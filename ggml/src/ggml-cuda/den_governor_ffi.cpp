@@ -40,6 +40,10 @@ void* den_governor_init(void) {
     ctx->route_tier_gwt = 0;
     ctx->reserved1 = ctx->reserved2 = 0;
     ctx->omma_attention_enabled = 0;
+    ctx->speculative_attention_enabled = 0;
+    ctx->register_kv_cache_enabled = 0;
+    ctx->vcache_prefetch_enabled = 0;
+    ctx->tma_tile_load_enabled = 0;
 
     fprintf(stderr, "[GOVERNOR] ctx=%p size=%zu initialized\n",
             (void*)ctx, sizeof(GovernorContext));
