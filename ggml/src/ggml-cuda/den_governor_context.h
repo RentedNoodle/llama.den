@@ -45,7 +45,8 @@ struct GovernorContext {
     uint32_t register_kv_cache_enabled      : 1;  // register-cached KV
     uint32_t vcache_prefetch_enabled        : 1;  // V-Cache semantic prefetch
     uint32_t tma_tile_load_enabled          : 1;  // TMA-based tile loading
-    uint32_t                                : 27; // remaining reserved
+    uint32_t vort_enabled                   : 1;  // VORT power-law time decay
+    uint32_t                                : 26; // remaining reserved
 };
 #pragma pack(pop)
 
