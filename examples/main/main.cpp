@@ -2,6 +2,7 @@
 #include "chat.h"
 #include "console.h"
 #include "llama.h"
+#include "den_cats.h"
 #include <cassert>
 #include <cinttypes>
 #include <cmath>
@@ -749,7 +750,34 @@ int main(int argc, char ** argv) {
                 LOG("saved session to %s\n", path_session.c_str());
             }
 
-            const llama_token id = common_sampler_sample_legacy(ctx_sampling, ctx, ctx_guidance);
+            // CATS self-speculative decoding: build candidate tree from logits
+            // and select the best candidate. Enable with CATS_ENABLED=1 env var.
+            llama_token id;
+            static int cats_depth_env = -1;
+            if (cats_depth_env == -1) {
+                const char * cats_env = getenv("CATS_ENABLED");
+                cats_depth_env = cats_env ? atoi(cats_env) : 0;
+            }
+            if (cats_depth_env > 0 && cats_depth_env <= 5) {
+                float * logits = llama_get_logits_ith(ctx, -1);
+                int n_vocab = llama_n_vocab(llama_get_model(ctx));
+                auto tree = cats_build_tree(logits, n_vocab,
+                    cats_make_config((uint32_t)cats_depth_env, 4), true);
+                if (tree) {
+                    auto result = cats_verify_greedy(*tree, nullptr, n_vocab, true);
+                    if (!result.accepted_tokens.empty()) {
+                        id = result.accepted_tokens[0];
+                        LOG("CATS: selected from %d candidates (depth=%d)\n",
+                            tree->total_candidates(), cats_depth_env);
+                    } else {
+                        id = common_sampler_sample_legacy(ctx_sampling, ctx, ctx_guidance);
+                    }
+                } else {
+                    id = common_sampler_sample_legacy(ctx_sampling, ctx, ctx_guidance);
+                }
+            } else {
+                id = common_sampler_sample_legacy(ctx_sampling, ctx, ctx_guidance);
+            }
 
             common_sampler_accept(ctx_sampling, ctx, id, /* apply_grammar= */ true);
 
