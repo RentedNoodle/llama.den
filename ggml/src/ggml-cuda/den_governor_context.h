@@ -68,7 +68,8 @@ struct GovernorContext {
     uint32_t cuda_ipc_bridge_enabled        : 1;  // CUDA IPC bridge for cognitive daemon zero-copy (default 0)
     uint32_t ptx_gen_enabled                : 1;  // PTX dynamic kernel generation via NVRTC (default 0)
     uint32_t copy_engine_overlap_enabled    : 1;  // dual DMA copy engine overlap for weight streaming (default 0)
-    uint32_t                                : 4;  // remaining reserved
+    uint32_t bar1_nvme_enabled              : 1;  // BAR1 NVMe mapping for VRAM overflow (default 0)
+    uint32_t                                : 3;  // remaining reserved
 };
 #pragma pack(pop)
 
