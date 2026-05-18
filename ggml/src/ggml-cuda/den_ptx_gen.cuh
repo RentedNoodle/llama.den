@@ -277,7 +277,7 @@ extern "C" __global__ void den_ptx_gemv_kernel(
     const int ROWS_PER_WARP = TILE_M / NWARPS;    // rows per warp (must be multiple of 16)
     const int OMMA_K      = 64;                    // native OMMA K step (m16n8k64)
     const int OMMAS_PER_TILE = TILE_K / OMMA_K;   // OMMA calls per tile (should be 1)
-    const int TILE_BYTES  = 144;                   // NVFP4 tile: 128B nibbles + 16B scales
+    const int TILE_BYTES  = 160;   // padded 144->160 for L2 line alignment                   // NVFP4 tile: 128B nibbles + 16B scales
     const int KG_PER_WARP = 4;                     // K-groups per warp lane pairing
 
     // Lane identity

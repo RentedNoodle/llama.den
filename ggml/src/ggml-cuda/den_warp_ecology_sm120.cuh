@@ -23,7 +23,7 @@
 using cuda::device::barrier;
 
 // ── Constants ────────────────────────────────────────────────────
-constexpr int TILE_BYTES    = 144;    // NVFP4 tile bytes
+constexpr int TILE_BYTES    = 160;   // padded from 144    // NVFP4 tile bytes
 constexpr int TILE_H        = 16;     // tile rows
 constexpr int TMA_PHASES    = 2;      // double-buffered: ping, pong
 

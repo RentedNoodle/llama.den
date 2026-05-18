@@ -32,7 +32,7 @@
 // ── Compile-time constants ───────────────────────────────────────────────────
 // Matches TILE_K=256, TILE_BYTES=144 in den_nvfp4_safetensors_to_gguf.py
 static constexpr int DEN_TK_TILE_K       = 256;   // elements per tile (K dimension)
-static constexpr int DEN_TK_TILE_BYTES    = 144;   // packed tile size in bytes
+static constexpr int DEN_TK_TILE_BYTES    = 160;   // padded from 144 for L2 alignment   // packed tile size in bytes
 static constexpr int DEN_TK_SCALE_BLOCKS  = 16;    // 16 blocks of K=16 per tile
 static constexpr int DEN_TK_ELEMS_PER_THR = 8;     // 256 / 32 threads
 static constexpr float DEN_TK_E2M1_MAX      = 6.0f;    // max E2M1 representable value

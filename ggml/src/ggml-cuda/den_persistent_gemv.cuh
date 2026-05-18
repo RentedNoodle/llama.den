@@ -20,7 +20,7 @@ __device__ int32_t g_persistent_work_counter = 0;
     const int SFA_OFFSET = 136;
     const int COARSE_OFFSET = 128;
 #else
-    const int TILE_BYTES = 144;
+    const int TILE_BYTES = 160;   // padded from 144 for L2 cache line alignment (128B boundary)
     const int NIB_OFFSET = 16;
     const int SFA_OFFSET = 0;
     const int COARSE_OFFSET = 144; // sentinel: not present in 144B tiles

@@ -48,7 +48,7 @@ __forceinline__ __device__ void load_tile_data(
     TileData &td,
     const uint8_t * __restrict__ w,
     int row0, int row1, size_t row_stride, int kt, int kg,
-    int tile_bytes = 144)
+    int tile_bytes = 160)   // padded from 144 for L2 line alignment
 {
     const uint8_t * tile0 = w + (size_t)row0 * row_stride + (size_t)kt * tile_bytes;
     const uint8_t * tile1 = w + (size_t)row1 * row_stride + (size_t)kt * tile_bytes;
@@ -102,9 +102,9 @@ __global__ void den_gemv_mxf4nvf4_kernel(
 #ifdef DENSCALE_V
     const int tile_bytes = 152;
 #else
-    const int tile_bytes = 144;
+    const int tile_bytes = 160;   // padded from 144 for L2 alignment
 #endif
-    const size_t row_stride = (size_t)kt_per_row * tile_bytes; // 144/152-byte tiles
+    const size_t row_stride = (size_t)kt_per_row * tile_bytes; // 160-byte tiles (padded 144)
 
     float total0 = 0.0f, total1 = 0.0f, total2 = 0.0f, total3 = 0.0f;
     float rms_sum_sq = 0.0f; // RMSNorm sum(x^2) accumulator (only if FUSE_RMSNORM)
