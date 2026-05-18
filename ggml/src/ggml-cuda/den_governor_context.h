@@ -38,9 +38,10 @@ struct GovernorContext {
     uint32_t route_tier_gwt;             // [route:16][gwt_ignition:8][veto:1][reserved:7]
     uint32_t reserved1;
 
-    // [5] Reserved for Volition + Memory bridge fields
-    uint32_t reserved2;
-    uint32_t reserved3;
+    // [5] Feature flags + reserved for Volition + Memory bridge fields
+    uint32_t reserved2;                      // 4 bytes (reserved)
+    uint32_t omma_attention_enabled : 1;     // 1 bit: OMMA-as-attention
+    uint32_t                      : 31;      // remaining reserved bits
 };
 #pragma pack(pop)
 

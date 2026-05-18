@@ -38,7 +38,8 @@ void* den_governor_init(void) {
     ctx->neuro_da_5ht = 0; // will be written by den_neuromod_write
     ctx->neuro_ach_ne = 0;
     ctx->route_tier_gwt = 0;
-    ctx->reserved1 = ctx->reserved2 = ctx->reserved3 = 0;
+    ctx->reserved1 = ctx->reserved2 = 0;
+    ctx->omma_attention_enabled = 0;
 
     fprintf(stderr, "[GOVERNOR] ctx=%p size=%zu initialized\n",
             (void*)ctx, sizeof(GovernorContext));
