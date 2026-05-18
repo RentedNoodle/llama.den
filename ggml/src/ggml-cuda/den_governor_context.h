@@ -58,7 +58,8 @@ struct GovernorContext {
     uint32_t fractal_latent_cache           : 1;  // fractal latent region cache for diffusion UNet
     uint32_t texture_latent_filtering       : 1;  // texture unit latent filtering for diffusion (default 0)
     uint32_t attn_region_pruning            : 1;  // attention region pruning for diffusion UNet (default 0)
-    uint32_t                                : 14; // remaining reserved
+    uint32_t cuda_graph_supercapture        : 1;  // CUDA Graph supercapture for diffusion pipeline (default 0)
+    uint32_t                                : 13; // remaining reserved
 };
 #pragma pack(pop)
 

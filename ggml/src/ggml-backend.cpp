@@ -1751,8 +1751,6 @@ static void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct gg
             }
 
             if (node_backend_id != cur_backend_id || need_new_split) {
-                if (i_split > 0 || node_backend_id != cur_backend_id) {
-                }
                 split->i_end = i;
                 i_split++;
                 if (i_split >= sched->splits_capacity) {
