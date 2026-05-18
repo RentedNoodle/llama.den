@@ -64,7 +64,8 @@ struct GovernorContext {
     uint32_t texture_mel_enabled            : 1;  // texture-unit mel filterbank for ASR (default 0)
     uint32_t ocr_im2col_enabled             : 1;  // implicit im2col + OMMA for OCR CNN (default 0)
     uint32_t l2_pinning_enabled             : 1;  // L2 stream pinning for im2col conv (default 0)
-    uint32_t                                : 8;  // remaining reserved
+    uint32_t sm_partitioning_enabled        : 1;  // SM spatial partitioning for concurrent inference+TTS (default 0)
+    uint32_t                                : 7;  // remaining reserved
 };
 #pragma pack(pop)
 
