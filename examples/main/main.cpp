@@ -764,7 +764,7 @@ int main(int argc, char ** argv) {
                 auto tree = cats_build_tree(logits, n_vocab,
                     cats_make_config((uint32_t)cats_depth_env, 4), true);
                 if (tree) {
-                    auto result = cats_verify_greedy(*tree, nullptr, n_vocab, true);
+                    auto result = cats_verify_fallback(*tree);
                     if (!result.accepted_tokens.empty()) {
                         id = result.accepted_tokens[0];
                         LOG("CATS: selected from %d candidates (depth=%d)\n",

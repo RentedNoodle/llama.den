@@ -102,51 +102,93 @@ static inline std::optional<CatsTree> cats_build_tree(
     return tree;
 }
 
-// ── Greedy Verification ──────────────────────────────────────────────────
+// ── Tree Batch Builder ───────────────────────────────────────────────────
+// Build a llama_batch from the tree for parallel candidate verification.
+// All root candidates share the same position (n_past), and logits are
+// requested for all candidates to enable model agreement comparison.
+static inline struct llama_batch cats_build_batch(
+    const CatsTree & tree, llama_pos n_past, llama_seq_id seq_id)
+{
+    int n = tree.total_candidates();
+    static llama_token  tokens[32];
+    static llama_pos    positions[32];
+    static int32_t      n_seq_ids[32];
+    static llama_seq_id seq_id_data[32];  // flat array, each entry = seq_id
+    static llama_seq_id *seq_id_ptrs[32]; // ptrs into seq_id_data
+    static int8_t       logits_out[32];
+
+    for (int i = 0; i < n && i < 32; i++) {
+        tokens[i]      = tree.candidates[i].token;
+        positions[i]   = n_past;
+        n_seq_ids[i]   = 1;
+        seq_id_data[i] = seq_id;
+        seq_id_ptrs[i] = &seq_id_data[i];
+        logits_out[i]  = 1;
+    }
+
+    struct llama_batch batch = {
+        /* n_tokens  */ n,
+        /* token     */ tokens,
+        /* embd      */ nullptr,
+        /* pos       */ positions,
+        /* n_seq_id  */ n_seq_ids,
+        /* seq_id    */ seq_id_ptrs,
+        /* logits    */ logits_out,
+    };
+    return batch;
+}
+
+// ── Model Agreement Verification ─────────────────────────────────────────
+// For each candidate, check if the model's argmax over p(·|context, candidate)
+// equals the candidate token itself. Accept the longest prefix of agreeing
+// candidates. This is the "greedy" acceptance criterion — the model is
+// speculating about what it WOULD generate, and we accept if it agrees.
+static inline int cats_verify_agreement(
+    const CatsTree       & tree,
+    const float * const   * batch_logits,  // [n_candidates] ptrs to per-token logits
+    int                     n_vocab,
+    std::vector<llama_token> & accepted)
+{
+    accepted.clear();
+    // For each candidate, check if model's argmax == candidate token
+    for (int i = 0; i < tree.total_candidates(); i++) {
+        if (!batch_logits[i]) break;  // no logits for this candidate
+        const float * logits = batch_logits[i];
+        // Find argmax
+        int argmax = 0;
+        float max_val = logits[0];
+        for (int j = 1; j < n_vocab; j++) {
+            if (logits[j] > max_val) {
+                max_val = logits[j];
+                argmax  = j;
+            }
+        }
+        // Accept if model agrees with candidate
+        if (argmax == tree.candidates[i].token) {
+            accepted.push_back(tree.candidates[i].token);
+        } else {
+            break;  // first rejection stops the prefix
+        }
+    }
+    return (int)accepted.size();
+}
+
+// ── Verification Result ──────────────────────────────────────────────────
 struct CatsVerifyResult {
     std::vector<llama_token> accepted_tokens;
     int n_accepted;
     bool all_accepted;
 };
 
-static inline CatsVerifyResult cats_verify_greedy(
-    const CatsTree & tree,
-    const float    * model_logits,  // [n_candidates][n_vocab] or nullptr if fallback
-    int              n_vocab,
-    bool             fallback)      // true = no batch logits, just take root
-{
+// ── Fallback Verify (no batch logits available) ──────────────────────────
+static inline CatsVerifyResult cats_verify_fallback(const CatsTree & tree) {
     CatsVerifyResult result;
-    result.n_accepted  = 0;
-    result.all_accepted = false;
-
-    if (fallback || !model_logits || tree.candidates.empty()) {
-        // Fallback: accept the highest-probability root candidate
-        int best = 0;
-        for (int i = 1; i < (int)tree.candidates.size(); i++) {
-            if (tree.candidates[i].prior_prob > tree.candidates[best].prior_prob)
-                best = i;
-        }
-        result.accepted_tokens.push_back(tree.candidates[best].token);
-        result.n_accepted = 1;
-        return result;
-    }
-
-    // Greedy: accept root candidate with highest model probability.
-    // (This is the simplest verification — a full implementation would
-    //  verify the entire tree path via batched attention.)
-    int vocab_offset = n_vocab;
     int best = 0;
-    float best_logit = model_logits[tree.candidates[0].token];
-    for (int i = 1; i < (int)tree.candidates.size(); i++) {
-        float logit = model_logits[i * vocab_offset + tree.candidates[i].token];
-        if (logit > best_logit) {
-            best_logit = logit;
+    for (int i = 1; i < tree.total_candidates(); i++) {
+        if (tree.candidates[i].prior_prob > tree.candidates[best].prior_prob)
             best = i;
-        }
     }
-
     result.accepted_tokens.push_back(tree.candidates[best].token);
     result.n_accepted = 1;
-    result.all_accepted = (tree.candidates.size() == 1);
     return result;
 }
