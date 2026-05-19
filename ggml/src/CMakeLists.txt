@@ -408,6 +408,14 @@ if (GGML_CUDA)
             add_compile_definitions(DENSCALE_V)
         endif()
 
+        # Technique #14: Constant Memory Scale Table. Pre-computes the 256-entry
+        # UE4M3 byte decode table in __constant__ (1 KB of 64 KB). When enabled,
+        # replaces float FMA sfa×sfb product with ~2-cycle constant cache lookup.
+        option(GGML_USE_CONSTANT_SCALE_TABLE "Enable constant memory scale table for ~2-cycle sfa×sfb" ON)
+        if (GGML_USE_CONSTANT_SCALE_TABLE)
+            add_compile_definitions(DEN_USE_CONSTANT_SCALE_TABLE)
+        endif()
+
         if (GGML_CUDA_NO_VMM)
             add_compile_definitions(GGML_CUDA_NO_VMM)
         endif()
