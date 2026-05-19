@@ -423,10 +423,13 @@ static void sampler_queue(
     const float         dynatemp_exponent = params.dynatemp_exponent;
     const float         top_k = params.top_k;
     // Emotion router: PAD→LLM overrides (3 FMAs, no-op if Governor not linked)
+    // Respect --temp 0 (greedy decoding): skip emotion temperature modulation
     float emotion_temp = params.temp;
     float emotion_top_p = params.top_p;
     float emotion_rep_pen = params.penalty_repeat;
-    den_governor_emotion_route_apply(&emotion_temp, &emotion_top_p, &emotion_rep_pen);
+    if (params.temp > 0.0f) {
+        den_governor_emotion_route_apply(&emotion_temp, &emotion_top_p, &emotion_rep_pen);
+    }
     const float         temp = emotion_temp;
     const float         top_p = emotion_top_p;
     const float         min_p = params.min_p;
