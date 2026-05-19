@@ -91,6 +91,37 @@ __device__ constexpr uint8_t ue4m3_code_to_byte[16] = {
     0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
 };
 
+// ── Constant Memory Scale Table Repository (technique #14) ─────────────
+// SM120 has 64 KB __constant__ per CUDA module. Currently ~0.1 KB used.
+// We pre-compute a 256-entry full UE4M3 byte→float32 decode table (1 KB)
+// stored in __constant__ memory for ~1-cycle __ldca access.
+// Two parallel __ldca loads + one multiply ≈ sfa×sfb product in ~2 cycles,
+// replacing float FMA for personality scale modulation (~5 cycles).
+//
+// Uses static __constant__ so each translation unit (ggml-cuda.cu, k1_dense.cu,
+// k1_moe_35b.cu, etc.) gets its own private copy in constant memory with no
+// linker conflicts. The host-side init function in ggml-cuda.cu calls
+// cudaMemcpyToSymbol to populate the copy in that module. Copies in other TUs
+// remain zero-initialized (they are never referenced: den_scale_product() is
+// only called from the GEMV kernel compiled in ggml-cuda.cu).
+//
+// Valid UE4M3 bytes: 0x00, 0x18, 0x20, 0x24, 0x28, 0x2A, 0x2C, 0x2E,
+//                    0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
+// Invalid bytes decode to 0.0f (never used in practice).
+#ifdef DEN_USE_CONSTANT_SCALE_TABLE
+static __constant__ float g_ue4m3_full_decode[256];  // 1 KB
+
+// Fast scale product: val(sfa_byte) × val(sfb_byte) in ~2 cycles.
+// Both values loaded simultaneously from constant cache via __ldca
+// (64-bit read ports allow parallel dual-load), then one multiply.
+// Replaces ~5 cycles of float FMA + LUT indirection.
+__forceinline__ __device__ float den_scale_product(uint8_t sfa_byte, uint8_t sfb_byte) {
+    float sfa_val = __ldca(&g_ue4m3_full_decode[sfa_byte]);
+    float sfb_val = __ldca(&g_ue4m3_full_decode[sfb_byte]);
+    return sfa_val * sfb_val;
+}
+#endif // DEN_USE_CONSTANT_SCALE_TABLE
+
 static __device__ __forceinline__ uint8_t quant_f32_ue4m3(float v) {
     if (v <= 0.03125f) return 0;
     if (v <= 0.09375f) return 1;

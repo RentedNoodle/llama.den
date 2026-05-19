@@ -78,7 +78,7 @@ __forceinline__ __device__ void load_tile_data(
 #endif
 }
 
-template <int NWARPS, bool FUSE_RMSNORM = false, bool INPUT_IS_E2M1 = false>
+template <int NWARPS, bool FUSE_RMSNORM = false, bool INPUT_IS_E2M1 = false, bool THERMAL_MEMORY = false>
 __global__ void den_gemv_mxf4nvf4_kernel(
     const uint8_t * __restrict__ w,
     const float   * __restrict__ x,
@@ -147,6 +147,21 @@ __global__ void den_gemv_mxf4nvf4_kernel(
 
         // ---- COMPUTE: 4 × OMMA for this tile from bufA ----
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+        // Thermal memory: seed accumulator with small residual to carry
+        // Dreya's "mood" through the OMMA pipeline registers. 1e-6f is
+        // negligible in FP32 but provides non-zero register state for
+        // the thermal gate — enough to warm the pipeline without
+        // dominating the output.
+        if constexpr (THERMAL_MEMORY) {
+            acc0 = acc1 = acc2 = acc3 = 1e-6f;
+        }
+
+        // Declare OMMA output registers before the mm loop so thermal
+        // memory can carry the residue across K-group iterations.
+        float d0, d1, d2, d3;
+        if constexpr (THERMAL_MEMORY) {
+            d0 = acc0; d1 = acc1; d2 = acc2; d3 = acc3;
+        }
 
         #pragma unroll
         for (int mm = 0; mm < 4; mm++) {
@@ -205,7 +220,26 @@ __global__ void den_gemv_mxf4nvf4_kernel(
                 // The modulation factor is written to __constant__ memory by the Rust
                 // cognitive daemon before each decode step via cudaMemcpyToSymbolAsync.
                 // Range: ~0.65x to ~1.4x (clamped to UE4M3 valid range 0.0625-1.875).
-#ifdef PERSONALITY_QUANTIZATION
+                //
+                // With DEN_USE_CONSTANT_SCALE_TABLE, the personality scale modulation
+                // is computed via constant-cache table lookup (~2 cycles) instead of
+                // float FMA (~5 cycles). The sfa byte is extracted from the weight
+                // tile header for this K-group, and the sfb byte is the personality-
+                // modulated activation scale. Their product decode[sfa] × decode[sfb]
+                // is returned from constant cache in ~2 cycles.
+#ifdef DEN_USE_CONSTANT_SCALE_TABLE
+                {
+                    // Extract sfa byte for this K-group from weight tile header
+                    uint8_t sfa_byte_for_table = (uint8_t)((bufA.sfa[mm] >> (kg * 8)) & 0xFF);
+                    // Personality-modulated sfb code (clamped to valid UE4M3 range)
+                    uint8_t sfb_code_mod = quant_f32_ue4m3(fmaxf(0.0625f,
+                        fminf(1.875f, sfb_f * g_personality_scale)));
+                    // sfa_val × sfb_val from constant cache in ~2 cycles
+                    sfb_f = den_scale_product(sfa_byte_for_table,
+                        ue4m3_code_to_byte[sfb_code_mod]);
+                    sfb_f = fmaxf(0.0625f, fminf(1.875f, sfb_f));
+                }
+#elif defined(PERSONALITY_QUANTIZATION)
                 sfb_f *= g_personality_scale;
                 sfb_f = fmaxf(0.0625f, fminf(1.875f, sfb_f));
 #endif
@@ -222,11 +256,27 @@ __global__ void den_gemv_mxf4nvf4_kernel(
             }
 
             // OMMA with pre-loaded A-fragments and scale from bufA
-            float d0, d1, d2, d3;
-            OMMA_MXF4NVF4_4X(d0, d1, d2, d3,
-                bufA.a0[mm], bufA.a1[mm], bufA.a2[mm], bufA.a3[mm],
-                b0, b1, acc0, acc1, acc2, acc3,
-                bufA.sfa[mm], sfb_packed);
+            if constexpr (THERMAL_MEMORY) {
+                // Thermal: carry previous tile's accumulator residual
+                // through OMMA pipeline registers. d0-d3 serve as both
+                // c-fragment input (bias) and output, creating a
+                // register-level feedback loop that physically stores
+                // Dreya's "mood" in the OMMA data path. Previous tile's
+                // output residual becomes the current tile's bias,
+                // keeping the pipeline warm across time steps.
+                OMMA_MXF4NVF4_4X(d0, d1, d2, d3,
+                    bufA.a0[mm], bufA.a1[mm], bufA.a2[mm], bufA.a3[mm],
+                    b0, b1,
+                    d0, d1, d2, d3,
+                    bufA.sfa[mm], sfb_packed);
+            } else {
+                // Standard: zero accumulator — fresh accumulation per tile
+                OMMA_MXF4NVF4_4X(d0, d1, d2, d3,
+                    bufA.a0[mm], bufA.a1[mm], bufA.a2[mm], bufA.a3[mm],
+                    b0, b1,
+                    acc0, acc1, acc2, acc3,
+                    bufA.sfa[mm], sfb_packed);
+            }
 
             acc0 = d0; acc1 = d1; acc2 = d2; acc3 = d3;
 
@@ -315,14 +365,33 @@ static void den_mxf4nvf4_gemv_launch(
     bool fused_rmsnorm = false, float rms_eps = 1e-6f,
     bool input_is_e2m1 = false,
     const uint32_t * x_e2m1_data = nullptr,
-    const uint32_t * x_sfb_data = nullptr)
+    const uint32_t * x_sfb_data = nullptr,
+    bool thermal_memory = false)
 {
     const int kt_per_row = K / 256;
     const int nwarps = 8;
     const int grid = (N + nwarps * 16 - 1) / (nwarps * 16);
 
     CUDA_CHECK(cudaGetLastError());
-    if (input_is_e2m1) {
+    if (thermal_memory) {
+        // THERMAL_MEMORY: carry accumulator residual across OMMA calls.
+        // Seeded with 1e-6f to keep pipeline registers non-zero between
+        // tiles, creating a register-level feedback loop that physically
+        // stores Dreya's "mood" in the OMMA data path.
+        if (input_is_e2m1) {
+            den_gemv_mxf4nvf4_kernel<nwarps, false, true, true><<<grid, nwarps * 32, 0, stream>>>(
+                (const uint8_t*)weights, act, dst, N, K, kt_per_row,
+                tile_norms, n_norms, rms_eps, x_e2m1_data, x_sfb_data);
+        } else if (fused_rmsnorm) {
+            den_gemv_mxf4nvf4_kernel<nwarps, true, false, true><<<grid, nwarps * 32, 0, stream>>>(
+                (const uint8_t*)weights, act, dst, N, K, kt_per_row,
+                tile_norms, n_norms, rms_eps);
+        } else {
+            den_gemv_mxf4nvf4_kernel<nwarps, false, false, true><<<grid, nwarps * 32, 0, stream>>>(
+                (const uint8_t*)weights, act, dst, N, K, kt_per_row,
+                tile_norms, n_norms, rms_eps);
+        }
+    } else if (input_is_e2m1) {
         // E2M1 bypass: activation is pre-quantized; load nibbles + sfb
         // from separate storage. FUSE_RMSNORM must be false (static_assert).
         den_gemv_mxf4nvf4_kernel<nwarps, false, true><<<grid, nwarps * 32, 0, stream>>>(

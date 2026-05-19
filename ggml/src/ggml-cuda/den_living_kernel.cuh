@@ -29,6 +29,7 @@
 #include "den_dma_prefetch.cuh"
 #include "den_texture_landscape.cuh"
 #include "den_affective_bias.cuh"
+#include "den_shadow_warp.cuh"
 
 using cuda::device::barrier;
 
@@ -66,7 +67,10 @@ struct alignas(16) LivingKernelShared {
     float sensor_quat[4];        // latest rotation (x,y,z,w)
     float sensor_pos[3];         // latest position (x,y,z)
 
-    // [8] Mbarrier tokens — one per producer-consumer pair
+    // [9] Shadow work queue (warps 28-31) — SHADOW_WARP_EXECUTION
+    ShadowQueue shadow_q;
+
+    // [10] Mbarrier tokens — one per producer-consumer pair
     barrier bar_tma;
     barrier bar_kv;
     barrier bar_prefetch;
@@ -90,6 +94,11 @@ __global__ void __launch_bounds__(1024, 1) den_living_kernel(
 
     const int warp_id = threadIdx.x / 32;
     const int lane    = threadIdx.x & 31;
+
+    // Initialize shadow queue (one-time, warp 0 lane 0 only)
+    if (warp_id == 0 && lane == 0) {
+        shadow_queue_init(s.shadow_q);
+    }
 
     // ── Warp 0-1: TMA Tile Loaders ──────────────────────────────
     // Dual-warp cooperative: warp 0 loads even tiles, warp 1 loads odd tiles.
@@ -132,6 +141,15 @@ __global__ void __launch_bounds__(1024, 1) den_living_kernel(
 
                 // Wait for TMA to finish loading this tile
                 s.bar_tma.wait();
+
+                // Shadow work push: before OMMA compute, tell shadow warps
+                // to execute auxiliary work during our OMMA pipeline bubbles.
+                // Two OMMA warps per shadow slot: even pushes ENTROPY, odd pushes KV_COMPACT.
+                if (ctx && (ctx->type_policy_byte & SHADOW_WARP_EXECUTION)) {
+                    int shadow_idx = omma_id / 2;      // 0..3 for warps 28-31
+                    uint8_t work_item = (omma_id & 1) ? SHADOW_KV_COMPACT : SHADOW_ENTROPY;
+                    shadow_queue_push(s.shadow_q, shadow_idx, work_item);
+                }
 
                 // Load A-fragment from SMEM tile
                 uint32_t a0, a1, a2, a3;
@@ -272,6 +290,21 @@ __global__ void __launch_bounds__(1024, 1) den_living_kernel(
     // triggers cognitive snapshots.
     else if (warp_id < 30) {
         while (true) {
+            // ── Shadow work poll ──────────────────────────────
+            // Check for work pushed by OMMA warps during their pipeline bubbles.
+            // Governor shadow warps (28-29) handle slots 0-1.
+            // Only active when SHADOW_WARP_EXECUTION Governor flag is set.
+            if (ctx && (ctx->type_policy_byte & SHADOW_WARP_EXECUTION)) {
+                int sid = warp_id - 28;  // 0..1
+                uint8_t work = shadow_queue_try_pop(s.shadow_q, sid);
+                if (work != SHADOW_NONE) {
+                    shadow_work_dispatch(work,
+                        s.attn_scores, 1024,
+                        (const float*)ctx, 0,
+                        lane);
+                }
+            }
+
             // Read mapped GovernorContext
             if (lane < 3 && ctx) {
                 // Decode PAD from GovernorContext
@@ -301,6 +334,21 @@ __global__ void __launch_bounds__(1024, 1) den_living_kernel(
     // Injects spatial data directly into shared memory for attention.
     else {
         while (true) {
+            // ── Shadow work poll ──────────────────────────────
+            // Check for work pushed by OMMA warps during their pipeline bubbles.
+            // Perception shadow warps (30-31) handle slots 2-3.
+            // Only active when SHADOW_WARP_EXECUTION Governor flag is set.
+            if (ctx && (ctx->type_policy_byte & SHADOW_WARP_EXECUTION)) {
+                int sid = warp_id - 28;  // 2..3
+                uint8_t work = shadow_queue_try_pop(s.shadow_q, sid);
+                if (work != SHADOW_NONE) {
+                    shadow_work_dispatch(work,
+                        s.attn_scores, 1024,
+                        (const float*)ctx, 0,
+                        lane);
+                }
+            }
+
             // Read external sensor buffer from mapped memory
             volatile const float* sensor_buf = /* mapped ptr from ctx */;
 

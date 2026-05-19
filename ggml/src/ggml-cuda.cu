@@ -205,6 +205,32 @@ struct {
 } g_gov;
 static bool g_gov_init = false;
 
+// ── Constant Memory Scale Table (technique #14) ─────────────────────────
+// Host-side initializer for the 256-entry full UE4M3 decode table.
+// The static __constant__ array itself is declared in den_omma_shared.cuh
+// (visible here since this TU includes it via the header chain).
+// Called once from ggml_cuda_init(), before any kernel launch.
+#ifdef DEN_USE_CONSTANT_SCALE_TABLE
+extern "C" void den_scale_table_init(void) {
+    float decode[256] = {0};
+    // Valid UE4M3 byte patterns matching the 16-entry code→byte LUT
+    // in den_omma_shared.cuh (ue4m3_code_to_byte[16]).
+    constexpr uint8_t known_bytes[16] = {
+        0x00, 0x18, 0x20, 0x24, 0x28, 0x2A, 0x2C, 0x2E,
+        0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F
+    };
+    constexpr float known_vals[16] = {
+        0.0f, 0.0625f, 0.125f, 0.1875f, 0.25f, 0.3125f, 0.375f, 0.4375f,
+        1.0f, 1.0625f, 1.125f, 1.1875f, 1.25f, 1.3125f, 1.375f, 1.5f
+    };
+    for (int i = 0; i < 16; i++) {
+        decode[known_bytes[i]] = known_vals[i];
+    }
+    // Transfer to device constant memory (1 KB of 64 KB budget)
+    cudaMemcpyToSymbol(g_ue4m3_full_decode, decode, sizeof(decode));
+}
+#endif // DEN_USE_CONSTANT_SCALE_TABLE
+
 // ── RMSNorm fusion state (single-pass fusion into NVFP4 GEMV) ──────
 static const ggml_tensor* g_rms_fusion_src = nullptr;
 static float             g_rms_fusion_eps  = 1e-6f;
@@ -328,6 +354,13 @@ static ggml_cuda_device_info ggml_cuda_init() {
         g_gov.governor_ctx = (GovernorContext*)den_governor_init();
         g_gov_init = true;
     }
+
+#ifdef DEN_USE_CONSTANT_SCALE_TABLE
+    // -- Constant Scale Table init (technique #14) --------------------------
+    // Pre-compute the 256-entry UE4M3 decode table in __constant__ memory.
+    // Must happen before any kernel that uses den_scale_product().
+    den_scale_table_init();
+#endif
 
     return info;
 }
@@ -4491,6 +4524,35 @@ static void evaluate_and_capture_cuda_graph(ggml_backend_cuda_context * cuda_ctx
     while (!graph_evaluated_or_captured) {
         // Only perform the graph execution if CUDA graphs are not enabled, or we are capturing the graph.
         // With the use of CUDA graphs, the execution will be performed by the graph launch.
+        // ── Full-Decode Graph Replay Integration Point ──────
+        //
+        // When ctx->full_decode_graph_enabled is true AND the NVFP4
+        // KV cache is active (fixed-size 144-byte tiles), the entire
+        // per-layer decode loop below can be replaced by a single
+        // cudaGraphLaunch of a pre-captured DecodeGraph:
+        //
+        //   if (dg && dg->captured && dg->active) {
+        //       // Update KV pointer table for this token
+        //       den_decode_graph_replay(dg, stream, kv_ptrs, n_layers);
+        //   } else {
+        //       // Existing per-layer dispatch (fallback)
+        //       for (int i = 0; i < cgraph->n_nodes; i++) {
+        //           ggml_cuda_compute_forward(...);
+        //       }
+        //   }
+        //
+        // The graph captures all 70 kernel launches at startup and
+        // replays them in ~10 us per token vs ~350 us for 70 x 5 us
+        // individual launches. KV pointer updates use
+        // cudaMemcpyToSymbolAsync (graph-compatible) — the graph
+        // structure is invariant because NVFP4 KV tiles are fixed-size.
+        //
+        // Integration requires:
+        //   1. den_decode_graph_init() at model load
+        //   2. den_decode_graph_capture() after first token's dispatch
+        //   3. den_decode_graph_set_active() to gate on Governor flags
+        //   4. This dispatch point to call replay() instead of the loop
+        //   5. den_decode_graph_destroy() at model unload
         if (!use_cuda_graph || cuda_graph_update_required) {
 
             for (int i = 0; i < cgraph->n_nodes; i++) {

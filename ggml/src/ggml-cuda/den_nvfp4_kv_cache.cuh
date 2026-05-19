@@ -1,5 +1,13 @@
 // den_nvfp4_kv_cache.cuh — NVFP4 KV cache with OMMA-accelerated attention
 //
+// Graph Capture Compatibility Note:
+// NVFP4 tiles are fixed-size (144 bytes per tile, padded to 160 with
+// NULLGLASS V4 header). This invariability means a CUDA graph of the
+// entire decode step has a fixed memory footprint — no variable-length
+// allocations needed during replay. The KV pointer table is updated via
+// cudaMemcpyToSymbolAsync (graph-compatible). This is the enabling
+// property for technique #15 (Full-Decode CUDA Graph).
+//
 // Stores K and V cache entries as NVFP4 tiles (144 bytes per 256-element block).
 // Same format as weights. Attention scores computed via OMMA.SF.16864.
 //
