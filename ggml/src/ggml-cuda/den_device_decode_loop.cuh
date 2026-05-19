@@ -310,9 +310,9 @@ __host__ int den_device_decode_sync_governor_flag(const GovernorContext* ctx) {
     //   = 56 bytes before the bitfield.
     //
     // Bit 31 = device_decode_loop_enabled (after cats_tree_depth 8,
-    // cats_fan_out 8, cats_reserved 14, pdl_launch_enabled 1).
-    static_assert(sizeof(GovernorContext) == 64,
-        "GovernorContext must be 64B. If layout changed, update flag offset below.");
+    // cats_fan_out 8, cats_reserved 13, qkv_fusion_enabled 1, pdl_launch_enabled 1).
+    static_assert(sizeof(GovernorContext) == 68,
+        "GovernorContext must be 68B (SSM fusion expanded). If layout changed, update flag offset below.");
 
     const uint8_t* base = reinterpret_cast<const uint8_t*>(ctx);
     const uint32_t* flags = reinterpret_cast<const uint32_t*>(base + 56);

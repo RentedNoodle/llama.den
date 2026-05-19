@@ -41,7 +41,9 @@ struct GovernorContext {
     // [5] Feature flags + reserved for Volition + Memory bridge fields
     uint32_t cats_tree_depth : 8;                // CATS tree depth (default 3)
     uint32_t cats_fan_out : 8;                   // CATS fan-out (default 4)
-    uint32_t cats_reserved : 14;                 // reserved for CATS flags
+    uint32_t cats_reserved : 12;                 // reserved for CATS flags
+    uint32_t vram_balloon_enabled : 1;           // VRAM balloon transient hole filler (default 0)
+    uint32_t qkv_fusion_enabled : 1;             // fused QKV OMMA: 3 projections in 1 launch (default 0)
     uint32_t pdl_launch_enabled : 1;             // PDL device-side kernel launch (default 0)
     uint32_t device_decode_loop_enabled : 1;     // device-side autonomous decode loop (default 0)
     uint32_t omma_attention_enabled         : 1;  // OMMA-as-attention
@@ -76,11 +78,19 @@ struct GovernorContext {
     uint32_t l2_cognitive_enabled           : 1;  // L2-resident cognitive buffer for emotional logit biasing (default 0)
     uint32_t conditional_graph_enabled      : 1;  // conditional CUDA graph for conversational turn (default 0)
     uint32_t subvocal_path_enabled          : 1;  // Subvocal Tensor Truncation PATH_SUBVOCAL (default 0)
+
+    // [6] Fusion gating: new uint32_t allocation unit
+    uint32_t ssm_fusion_enabled             : 1;  // SSM-to-attention kernel fusion (default 0)
+    uint32_t ssm_draft_enabled              : 1;  // SSM state-predicted speculative draft (default 0)
+    uint32_t gpu_sampler_enabled            : 1;  // GPU-resident softmax+top-k+temp sampler (default 0)
+    uint32_t swap_hysteresis_enabled        : 1;  // swap hysteresis governor — prevents model swap thrashing (default 0)
+    uint32_t slab_alloc_enabled             : 1;  // slab allocator: tile pool from pre-allocated 256 MB slabs (default 0)
+    uint32_t fusion_reserved                : 27; // reserved for future fusion kernels
 };
 #pragma pack(pop)
 
-static_assert(sizeof(GovernorContext) == 64,
-    "GovernorContext must be 64B for cache-line alignment");
+static_assert(sizeof(GovernorContext) == 68,
+    "GovernorContext must be 68B (feature flags expanded for SSM draft + fusion gating)");
 
 // ── C ABI: extern "C" functions exposed to Rust FFI ────────────────
 

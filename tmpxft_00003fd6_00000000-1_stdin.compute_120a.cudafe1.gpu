@@ -1,0 +1,1219 @@
+typedef char __nv_bool;
+# 3032 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/driver_types.h"
+struct CUstream_st;
+# 341 "/usr/include/c++/13/bits/atomic_base.h" 3
+struct _ZSt13__atomic_baseImE;
+# 891 "/usr/include/c++/13/atomic" 3
+struct _ZSt6atomicImE;
+# 16 "./ggml/src/ggml-cuda/den_governor_context.h"
+struct GovernorContext;
+# 44 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+struct GPUSamplerConfig;
+# 79 "/usr/include/c++/13/bits/atomic_base.h" 3
+enum _ZSt12memory_order {
+# 81 "/usr/include/c++/13/bits/atomic_base.h" 3
+_ZSt20memory_order_relaxed,
+# 82 "/usr/include/c++/13/bits/atomic_base.h" 3
+_ZSt20memory_order_consume,
+# 83 "/usr/include/c++/13/bits/atomic_base.h" 3
+_ZSt20memory_order_acquire,
+# 84 "/usr/include/c++/13/bits/atomic_base.h" 3
+_ZSt20memory_order_release,
+# 85 "/usr/include/c++/13/bits/atomic_base.h" 3
+_ZSt20memory_order_acq_rel,
+# 86 "/usr/include/c++/13/bits/atomic_base.h" 3
+_ZSt20memory_order_seq_cst};
+# 91 "/usr/include/c++/13/bits/atomic_base.h" 3
+enum _ZSt23__memory_order_modifier {
+# 93 "/usr/include/c++/13/bits/atomic_base.h" 3
+_ZSt19__memory_order_mask = 65535U,
+# 94 "/usr/include/c++/13/bits/atomic_base.h" 3
+_ZSt28__memory_order_modifier_mask = 4294901760U,
+# 95 "/usr/include/c++/13/bits/atomic_base.h" 3
+_ZSt26__memory_order_hle_acquire = 65536U,
+# 96 "/usr/include/c++/13/bits/atomic_base.h" 3
+_ZSt26__memory_order_hle_release = 131072U};
+# 42 "/usr/include/x86_64-linux-gnu/bits/types.h" 3
+typedef unsigned __uint32_t;
+# 45 "/usr/include/x86_64-linux-gnu/bits/types.h" 3
+typedef unsigned long __uint64_t;
+# 214 "/usr/lib/gcc/x86_64-linux-gnu/13/include/stddef.h" 3
+typedef unsigned long size_t;
+#include "crt/device_runtime.h"
+# 26 "/usr/include/x86_64-linux-gnu/bits/stdint-uintn.h" 3
+typedef __uint32_t uint32_t;
+# 27 "/usr/include/x86_64-linux-gnu/bits/stdint-uintn.h" 3
+typedef __uint64_t uint64_t;
+# 347 "/usr/include/c++/13/bits/atomic_base.h" 3
+typedef unsigned long _ZNSt13__atomic_baseImE10__int_typeE;
+# 341 "/usr/include/c++/13/bits/atomic_base.h" 3
+struct _ZSt13__atomic_baseImE {
+# 352 "/usr/include/c++/13/bits/atomic_base.h" 3
+_ZNSt13__atomic_baseImE10__int_typeE _M_i __attribute__((__aligned__(8)));};
+# 891 "/usr/include/c++/13/atomic" 3
+struct _ZSt6atomicImE { struct _ZSt13__atomic_baseImE __b_St13__atomic_baseImE;};
+#pragma pack(1)
+# 16 "./ggml/src/ggml-cuda/den_governor_context.h"
+struct GovernorContext {
+# 18 "./ggml/src/ggml-cuda/den_governor_context.h"
+struct _ZSt6atomicImE seq;
+# 21 "./ggml/src/ggml-cuda/den_governor_context.h"
+uint64_t pad_packed;
+# 25 "./ggml/src/ggml-cuda/den_governor_context.h"
+uint32_t pressure_t;
+# 26 "./ggml/src/ggml-cuda/den_governor_context.h"
+uint32_t cognitive_clock;
+# 27 "./ggml/src/ggml-cuda/den_governor_context.h"
+float phi_estimate;
+# 28 "./ggml/src/ggml-cuda/den_governor_context.h"
+float autonomy_idx;
+# 29 "./ggml/src/ggml-cuda/den_governor_context.h"
+float dawn_urgency;
+# 30 "./ggml/src/ggml-cuda/den_governor_context.h"
+float vram_free_gb;
+# 34 "./ggml/src/ggml-cuda/den_governor_context.h"
+uint32_t neuro_da_5ht;
+# 35 "./ggml/src/ggml-cuda/den_governor_context.h"
+uint32_t neuro_ach_ne;
+# 38 "./ggml/src/ggml-cuda/den_governor_context.h"
+uint32_t route_tier_gwt;
+# 39 "./ggml/src/ggml-cuda/den_governor_context.h"
+float kv_evict_ratio;
+# 42 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int cats_tree_depth: 8;
+# 43 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int cats_fan_out: 8;
+# 44 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int cats_reserved: 13;
+# 45 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int qkv_fusion_enabled: 1;
+# 46 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int pdl_launch_enabled: 1;
+# 47 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int device_decode_loop_enabled: 1;
+# 48 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int omma_attention_enabled: 1;
+# 49 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int speculative_attention_enabled: 1;
+# 50 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int register_kv_cache_enabled: 1;
+# 51 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int vcache_prefetch_enabled: 1;
+# 52 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int tma_tile_load_enabled: 1;
+# 53 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int vort_enabled: 1;
+# 54 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int cats_enabled: 1;
+# 55 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int kv_tier_enabled: 1;
+# 56 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int fractal_kv_enabled: 1;
+# 57 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int gaussian_attn_enabled: 1;
+# 58 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int reservoir_enabled: 1;
+# 59 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int phase_attn_enabled: 1;
+# 60 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int rmsnorm_fusion_enabled: 1;
+# 61 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int vae_unet_overlap: 1;
+# 62 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int cfg_fusion_enabled: 1;
+# 63 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int fractal_latent_cache: 1;
+# 64 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int texture_latent_filtering: 1;
+# 65 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int attn_region_pruning: 1;
+# 66 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int cuda_graph_supercapture: 1;
+# 67 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int latent_video_codec: 1;
+# 68 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int holographic_prosody_enabled: 1;
+# 69 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int texture_mel_enabled: 1;
+# 70 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int ocr_im2col_enabled: 1;
+# 71 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int l2_pinning_enabled: 1;
+# 72 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int sm_partitioning_enabled: 1;
+# 73 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int cuda_ipc_bridge_enabled: 1;
+# 74 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int ptx_gen_enabled: 1;
+# 75 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int copy_engine_overlap_enabled: 1;
+# 76 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int bar1_nvme_enabled: 1;
+# 77 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int l2_cognitive_enabled: 1;
+# 78 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int conditional_graph_enabled: 1;
+# 79 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int subvocal_path_enabled: 1;
+# 82 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int ssm_fusion_enabled: 1;
+# 83 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int ssm_draft_enabled: 1;
+# 84 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int gpu_sampler_enabled: 1;
+# 85 "./ggml/src/ggml-cuda/den_governor_context.h"
+unsigned int fusion_reserved: 29;};
+#pragma pack()
+# 44 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+struct GPUSamplerConfig {
+# 45 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+float temperature;
+# 46 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+int top_k;
+# 47 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+int vocab_size;
+# 48 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+unsigned long long seed;};
+# 308 "/usr/include/x86_64-linux-gnu/c++/13/bits/c++config.h" 3
+typedef unsigned long _ZSt6size_t;
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+# 4334 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/crt/math_functions.h"
+ __device_builtin__ ___device__(extern  __no_sc__) __attribute__((__nothrow__)) float expf(float);
+#endif
+#if !defined(__CUDABE__)
+# 145 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/crt/device_functions.h"
+ __device_builtin__ ___device__(extern  __no_sc__) float __int_as_float(int);
+#endif
+#if !defined(__CUDABE__)
+# 154 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/crt/device_functions.h"
+ __device_builtin__ ___device__(extern  __no_sc__) int __float_as_int(float);
+#endif
+#if !defined(__CUDABE__)
+# 173 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/crt/device_functions.h"
+ __device_builtin__ ___device__(extern  __no_sc__) void __syncthreads(void);
+#endif
+#if !defined(__CUDABE__)
+# 568 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/crt/device_functions.h"
+ __device_builtin__ ___device__(extern  __no_sc__) float __uint2float_rn(unsigned);
+#endif
+#if !defined(__CUDABE__)
+# 304 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_20_intrinsics.h"
+ __device_builtin__ ___device__(extern  __no_sc__) long long clock64(void);
+#endif
+# 405 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+___device__(static  __no_sc__) __inline__ int _ZN63_INTERNAL_c0a2440a_32_tmpxft_00003fd6_00000000_1_stdin_3e38bae715__shfl_xor_syncEjiii(unsigned, int, int, int);
+#if !defined(__CUDABE__)
+# 406 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+ __device_builtin__ ___device__(extern  __no_sc__) unsigned __nvvm_shfl_bfly_sync(unsigned, unsigned, unsigned, unsigned);
+#endif
+# 444 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+___device__(static  __no_sc__) __inline__ float _ZN63_INTERNAL_c0a2440a_32_tmpxft_00003fd6_00000000_1_stdin_3e38bae715__shfl_xor_syncEjfii(unsigned, float, int, int);
+# 2924 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/crt/device_functions.h"
+___device__(extern  __no_sc__) unsigned __cudaPushCallConfiguration(struct dim3, struct dim3, size_t, struct CUstream_st *);
+# 56 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+___device__(static  __no_sc__) __inline__ __attribute__((__always_inline__)) float _Z15den_rng_uniformRm(uint64_t *);
+# 67 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+___device__(static  __no_sc__) __inline__ __attribute__((__always_inline__)) void _Z15den_topk_insertPfPiRiifi(float *__restrict__, int *__restrict__, int *, int, float, int);
+# 89 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__launch_bounds__(256,1) __global__ __var_used__ extern void _Z21den_gpu_greedy_kernelPKfPj16GPUSamplerConfig(const float *__restrict__, uint32_t *__restrict__, struct GPUSamplerConfig);
+# 149 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__launch_bounds__(256) __global__ __var_used__ extern void _Z21den_gpu_sample_kernelPKfPj16GPUSamplerConfig(const float *__restrict__, uint32_t *__restrict__, struct GPUSamplerConfig);
+# 114 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+static  __shared__  __var_used__ float _ZZ21den_gpu_greedy_kernelPKfPj16GPUSamplerConfigE10s_warp_max[8];
+# 115 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+static  __shared__  __var_used__ int _ZZ21den_gpu_greedy_kernelPKfPj16GPUSamplerConfigE10s_warp_idx[8];
+# 160 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+static  __shared__  __var_used__ float _ZZ21den_gpu_sample_kernelPKfPj16GPUSamplerConfigE11s_pool_vals[4608];
+# 161 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+static  __shared__  __var_used__ int _ZZ21den_gpu_sample_kernelPKfPj16GPUSamplerConfigE10s_pool_ids[4608];
+#include "common_functions.h"
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+#if !defined(__CUDABE__)
+#endif
+# 405 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+___device__(static  __no_sc__) __inline__ int _ZN63_INTERNAL_c0a2440a_32_tmpxft_00003fd6_00000000_1_stdin_3e38bae715__shfl_xor_syncEjiii(
+# 405 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+unsigned mask, 
+# 405 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+int var, 
+# 405 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+int laneMask, 
+# 405 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+int width){
+# 405 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+{  unsigned __T0;
+ unsigned __T1;
+ unsigned __T2;
+ unsigned __T3;
+# 407 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+ int __cuda_local_var_33154_6_non_const_ret;
+# 408 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+ int __cuda_local_var_33155_6_non_const_c;
+# 408 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+__cuda_local_var_33155_6_non_const_c = (((32 - width) << 8) | 31);
+# 409 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+__cuda_local_var_33154_6_non_const_ret = ((int)(((((__T0 = mask) , (void)(__T1 = ((unsigned)var))) , (void)(__T2 = ((unsigned)laneMask))) , (void)(__T3 = ((unsigned)__cuda_local_var_33155_6_non_const_c))) , (__nvvm_shfl_bfly_sync(__T0, __T1, __T2, __T3))));
+# 410 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+return __cuda_local_var_33154_6_non_const_ret;
+# 411 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+}}
+#if !defined(__CUDABE__)
+#endif
+# 444 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+___device__(static  __no_sc__) __inline__ float _ZN63_INTERNAL_c0a2440a_32_tmpxft_00003fd6_00000000_1_stdin_3e38bae715__shfl_xor_syncEjfii(
+# 444 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+unsigned mask, 
+# 444 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+float var, 
+# 444 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+int laneMask, 
+# 444 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+int width){
+# 444 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+{  unsigned __T4;
+ unsigned __T5;
+ unsigned __T6;
+ unsigned __T7;
+# 446 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+ int __cuda_local_var_33193_6_non_const_ret;
+# 447 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+ int __cuda_local_var_33194_13_non_const_c;
+# 448 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+__cuda_local_var_33194_13_non_const_c = (((32 - width) << 8) | 31);
+# 449 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+__cuda_local_var_33193_6_non_const_ret = ((int)(((((__T4 = mask) , (void)(__T5 = ((unsigned)(__float_as_int(var))))) , (void)(__T6 = ((unsigned)laneMask))) , (void)(__T7 = ((unsigned)__cuda_local_var_33194_13_non_const_c))) , (__nvvm_shfl_bfly_sync(__T4, __T5, __T6, __T7))));
+# 450 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+return __int_as_float(__cuda_local_var_33193_6_non_const_ret);
+# 451 "/usr/local/cuda-12.8/bin/../targets/x86_64-linux/include/sm_30_intrinsics.hpp"
+}}
+# 56 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+___device__(static  __no_sc__) __inline__ __attribute__((__always_inline__)) float _Z15den_rng_uniformRm(
+# 56 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+uint64_t *state){
+# 56 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 57 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+(*state) = ((uint64_t)((((unsigned long long)(*state)) * 6364136223846793005ULL) + 1ULL));
+# 58 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+return (__uint2float_rn(((unsigned)((*state) >> 33)))) * (4.656613E-10F);
+# 59 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}}
+# 67 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+___device__(static  __no_sc__) __inline__ __attribute__((__always_inline__)) void _Z15den_topk_insertPfPiRiifi(
+# 68 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+float *__restrict__ vals, 
+# 68 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+int *__restrict__ ids, 
+# 69 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+int *count, 
+# 69 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+int max_k, 
+# 69 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+float val, 
+# 69 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+int id){
+# 70 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 73 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39161_9_non_const_pos;
+# 71 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if (((*count) >= max_k) && (val <= (vals[((*count) - 1)]))) {
+# 71 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+return; }
+# 73 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39161_9_non_const_pos = (((*count) < max_k) ? (*count) : ((*count) - 1));
+# 74 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+while ((__cuda_local_var_39161_9_non_const_pos > 0) && (val > (vals[(__cuda_local_var_39161_9_non_const_pos - 1)])))
+# 74 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 75 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+(vals[__cuda_local_var_39161_9_non_const_pos]) = (vals[(__cuda_local_var_39161_9_non_const_pos - 1)]);
+# 76 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+(ids[__cuda_local_var_39161_9_non_const_pos]) = (ids[(__cuda_local_var_39161_9_non_const_pos - 1)]);
+# 77 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+--__cuda_local_var_39161_9_non_const_pos;
+# 78 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}
+# 79 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+(vals[__cuda_local_var_39161_9_non_const_pos]) = val;
+# 80 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+(ids[__cuda_local_var_39161_9_non_const_pos]) = id;
+# 81 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if ((*count) < max_k) {
+# 81 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+++(*count); } 
+# 82 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}}
+# 89 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__launch_bounds__(256,1) __global__ __var_used__ void _Z21den_gpu_greedy_kernelPKfPj16GPUSamplerConfig(
+# 90 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+const float *__restrict__ logits, 
+# 91 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+uint32_t *__restrict__ token_out, 
+# 92 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+struct GPUSamplerConfig cfg){
+# 93 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 94 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39182_11_non_const_local_max;
+# 95 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39185_9_non_const_local_idx;
+# 97 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39187_11_non_const_inv_temp;
+# 116 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39206_9_non_const_wid;
+# 94 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39182_11_non_const_local_max = (-3.4028235E38F);
+# 95 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39185_9_non_const_local_idx = 0;
+# 97 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39187_11_non_const_inv_temp = (((cfg.temperature) > (0.0F)) ? ((1.0F) / (cfg.temperature)) : (1.0F));
+# 98 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 98 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int i;
+# 98 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+i = ((int)(threadIdx.x));
+# 98 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+for (; i < (cfg.vocab_size); i += (blockDim.x))
+# 98 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 99 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39189_15_non_const_v;
+# 99 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39189_15_non_const_v = ((logits[i]) * __cuda_local_var_39187_11_non_const_inv_temp);
+# 100 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if (__cuda_local_var_39189_15_non_const_v > __cuda_local_var_39182_11_non_const_local_max)
+# 100 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 100 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39182_11_non_const_local_max = __cuda_local_var_39189_15_non_const_v;
+# 100 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39185_9_non_const_local_idx = i;
+# 100 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}
+# 101 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} }
+# 104 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 104 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int off;
+# 104 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+off = 16;
+# 104 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+for (; off > 0; off >>= 1)
+# 104 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{  float __T12;
+ int __T13;
+ int __T14;
+ int __T15;
+# 105 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39195_15_non_const_other_v;
+# 106 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39196_13_non_const_other_i;
+# 105 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39195_15_non_const_other_v = (((__T12 = __cuda_local_var_39182_11_non_const_local_max) , (void)(__T13 = off)) , (_ZN63_INTERNAL_c0a2440a_32_tmpxft_00003fd6_00000000_1_stdin_3e38bae715__shfl_xor_syncEjfii(4294967295U, __T12, __T13, 32)));
+# 106 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39196_13_non_const_other_i = (((__T14 = __cuda_local_var_39185_9_non_const_local_idx) , (void)(__T15 = off)) , (_ZN63_INTERNAL_c0a2440a_32_tmpxft_00003fd6_00000000_1_stdin_3e38bae715__shfl_xor_syncEjiii(4294967295U, __T14, __T15, 32)));
+# 107 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if ((__cuda_local_var_39195_15_non_const_other_v > __cuda_local_var_39182_11_non_const_local_max) || ((__cuda_local_var_39195_15_non_const_other_v == __cuda_local_var_39182_11_non_const_local_max) && (__cuda_local_var_39196_13_non_const_other_i < __cuda_local_var_39185_9_non_const_local_idx)))
+# 107 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 108 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39182_11_non_const_local_max = __cuda_local_var_39195_15_non_const_other_v;
+# 109 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39185_9_non_const_local_idx = __cuda_local_var_39196_13_non_const_other_i;
+# 110 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}
+# 111 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} }
+# 116 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39206_9_non_const_wid = ((int)((threadIdx.x) >> 5));
+# 117 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if (((threadIdx.x) & 31U) == 0U)
+# 117 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 118 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+((_ZZ21den_gpu_greedy_kernelPKfPj16GPUSamplerConfigE10s_warp_max)[__cuda_local_var_39206_9_non_const_wid]) = __cuda_local_var_39182_11_non_const_local_max;
+# 119 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+((_ZZ21den_gpu_greedy_kernelPKfPj16GPUSamplerConfigE10s_warp_idx)[__cuda_local_var_39206_9_non_const_wid]) = __cuda_local_var_39185_9_non_const_local_idx;
+# 120 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}
+# 121 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__syncthreads();
+# 123 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if (__cuda_local_var_39206_9_non_const_wid == 0)
+# 123 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 124 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39214_15_non_const_g_max;
+# 125 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39217_13_non_const_g_idx;
+# 124 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39214_15_non_const_g_max = (((threadIdx.x) < 8U) ? ((_ZZ21den_gpu_greedy_kernelPKfPj16GPUSamplerConfigE10s_warp_max)[(threadIdx.x)]) : (-3.4028235E38F));
+# 125 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39217_13_non_const_g_idx = (((threadIdx.x) < 8U) ? ((_ZZ21den_gpu_greedy_kernelPKfPj16GPUSamplerConfigE10s_warp_idx)[(threadIdx.x)]) : 0);
+# 126 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 126 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int off;
+# 126 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+off = 16;
+# 126 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+for (; off > 0; off >>= 1)
+# 126 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{  float __T16;
+ int __T17;
+ int __T18;
+ int __T19;
+# 127 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39219_19_non_const_other_v;
+# 128 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39220_17_non_const_other_i;
+# 127 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39219_19_non_const_other_v = (((__T16 = __cuda_local_var_39214_15_non_const_g_max) , (void)(__T17 = off)) , (_ZN63_INTERNAL_c0a2440a_32_tmpxft_00003fd6_00000000_1_stdin_3e38bae715__shfl_xor_syncEjfii(4294967295U, __T16, __T17, 32)));
+# 128 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39220_17_non_const_other_i = (((__T18 = __cuda_local_var_39217_13_non_const_g_idx) , (void)(__T19 = off)) , (_ZN63_INTERNAL_c0a2440a_32_tmpxft_00003fd6_00000000_1_stdin_3e38bae715__shfl_xor_syncEjiii(4294967295U, __T18, __T19, 32)));
+# 129 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if ((__cuda_local_var_39219_19_non_const_other_v > __cuda_local_var_39214_15_non_const_g_max) || ((__cuda_local_var_39219_19_non_const_other_v == __cuda_local_var_39214_15_non_const_g_max) && (__cuda_local_var_39220_17_non_const_other_i < __cuda_local_var_39217_13_non_const_g_idx)))
+# 129 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 130 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39214_15_non_const_g_max = __cuda_local_var_39219_19_non_const_other_v;
+# 131 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39217_13_non_const_g_idx = __cuda_local_var_39220_17_non_const_other_i;
+# 132 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}
+# 133 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} }
+# 134 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if (((threadIdx.x) & 31U) == 0U) {
+# 134 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+(*token_out) = ((uint32_t)__cuda_local_var_39217_13_non_const_g_idx); }
+# 135 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} 
+# 136 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}}
+# 149 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__launch_bounds__(256) __global__ __var_used__ void _Z21den_gpu_sample_kernelPKfPj16GPUSamplerConfig(
+# 150 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+const float *__restrict__ logits, 
+# 151 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+uint32_t *__restrict__ token_out, 
+# 152 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+struct GPUSamplerConfig cfg){
+# 153 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 163 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float *__cuda_local_var_39245_12_non_const_topk_vals;
+# 164 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int *__cuda_local_var_39246_10_non_const_topk_ids;
+# 166 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39248_15_non_const_wid;
+# 167 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39249_15_non_const_lane;
+# 168 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39250_15_non_const_k;
+# 170 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39252_15_non_const_effective_k;
+# 176 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39258_11_non_const_inv_temp;
+# 178 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39260_11_non_const_l_vals[16];
+# 179 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39261_9_non_const_l_ids[16];
+# 180 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39262_9_non_const_l_cnt;
+# 163 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39245_12_non_const_topk_vals = ((_ZZ21den_gpu_sample_kernelPKfPj16GPUSamplerConfigE11s_pool_vals) + 4096);
+# 164 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39246_10_non_const_topk_ids = ((_ZZ21den_gpu_sample_kernelPKfPj16GPUSamplerConfigE10s_pool_ids) + 4096);
+# 166 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39248_15_non_const_wid = ((int)((threadIdx.x) >> 5));
+# 167 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39249_15_non_const_lane = ((int)((threadIdx.x) & 31U));
+# 168 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39250_15_non_const_k = ((((cfg.top_k) <= 0) || ((cfg.top_k) > (cfg.vocab_size))) ? (cfg.vocab_size) : (cfg.top_k));
+# 170 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39252_15_non_const_effective_k = ((__cuda_local_var_39250_15_non_const_k < 512) ? __cuda_local_var_39250_15_non_const_k : 512);
+# 176 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39258_11_non_const_inv_temp = (((cfg.temperature) > (0.0F)) ? ((1.0F) / (cfg.temperature)) : (1.0F));
+# 180 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39262_9_non_const_l_cnt = 0;
+# 182 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 182 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int j;
+# 182 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+j = 0;
+# 182 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+
+#pragma unroll 2147483647
+for (; j < 16; j++)
+# 182 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 183 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+((__cuda_local_var_39260_11_non_const_l_vals)[j]) = (-3.4028235E38F);
+# 184 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+((__cuda_local_var_39261_9_non_const_l_ids)[j]) = (-1);
+# 185 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} }
+# 187 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 187 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int i;
+# 187 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+i = ((int)(threadIdx.x));
+# 187 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+for (; i < (cfg.vocab_size); i += (blockDim.x)) {
+# 187 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{  float __T20;
+ int __T21;
+# 188 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39272_15_non_const_v;
+# 188 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39272_15_non_const_v = ((logits[i]) * __cuda_local_var_39258_11_non_const_inv_temp);
+# 190 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if ((__cuda_local_var_39262_9_non_const_l_cnt >= 16) && (__cuda_local_var_39272_15_non_const_v <= ((__cuda_local_var_39260_11_non_const_l_vals)[(__cuda_local_var_39262_9_non_const_l_cnt - 1)]))) {
+# 190 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+goto __T22; }
+# 191 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+((__T20 = __cuda_local_var_39272_15_non_const_v) , (void)(__T21 = i)) , (void)(_Z15den_topk_insertPfPiRiifi((__cuda_local_var_39260_11_non_const_l_vals), (__cuda_local_var_39261_9_non_const_l_ids), (&__cuda_local_var_39262_9_non_const_l_cnt), 16, __T20, __T21));
+# 192 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} __T22:; } }
+# 197 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 197 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int j;
+# 197 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+j = 0;
+# 197 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+
+#pragma unroll 2147483647
+for (; j < 16; j++)
+# 197 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 198 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+((_ZZ21den_gpu_sample_kernelPKfPj16GPUSamplerConfigE11s_pool_vals)[(((threadIdx.x) * 16U) + ((unsigned)j))]) = ((__cuda_local_var_39260_11_non_const_l_vals)[j]);
+# 199 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+((_ZZ21den_gpu_sample_kernelPKfPj16GPUSamplerConfigE10s_pool_ids)[(((threadIdx.x) * 16U) + ((unsigned)j))]) = ((__cuda_local_var_39261_9_non_const_l_ids)[j]);
+# 200 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} }
+# 201 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__syncthreads();
+# 210 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if (__cuda_local_var_39248_15_non_const_wid == 0)
+# 210 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 211 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 211 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int rank;
+# 211 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+rank = 0;
+# 211 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+for (; rank < __cuda_local_var_39252_15_non_const_effective_k; rank++)
+# 211 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 212 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39289_19_non_const_t_max;
+# 213 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39292_17_non_const_t_idx;
+# 212 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39289_19_non_const_t_max = (-3.4028235E38F);
+# 213 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39292_17_non_const_t_idx = (-1);
+# 214 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 214 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int j;
+# 214 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+j = __cuda_local_var_39249_15_non_const_lane;
+# 214 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+for (; j < 4096; j += 32)
+# 214 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 215 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39294_23_non_const_v;
+# 215 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39294_23_non_const_v = ((_ZZ21den_gpu_sample_kernelPKfPj16GPUSamplerConfigE11s_pool_vals)[j]);
+# 216 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if (__cuda_local_var_39294_23_non_const_v > __cuda_local_var_39289_19_non_const_t_max)
+# 216 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 216 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39289_19_non_const_t_max = __cuda_local_var_39294_23_non_const_v;
+# 216 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39292_17_non_const_t_idx = j;
+# 216 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}
+# 217 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} }
+# 220 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 220 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int off;
+# 220 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+off = 16;
+# 220 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+for (; off > 0; off >>= 1)
+# 220 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{  float __T23;
+ int __T24;
+ int __T25;
+ int __T26;
+# 221 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39300_23_non_const_o_max;
+# 222 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39301_21_non_const_o_idx;
+# 221 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39300_23_non_const_o_max = (((__T23 = __cuda_local_var_39289_19_non_const_t_max) , (void)(__T24 = off)) , (_ZN63_INTERNAL_c0a2440a_32_tmpxft_00003fd6_00000000_1_stdin_3e38bae715__shfl_xor_syncEjfii(4294967295U, __T23, __T24, 32)));
+# 222 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39301_21_non_const_o_idx = (((__T25 = __cuda_local_var_39292_17_non_const_t_idx) , (void)(__T26 = off)) , (_ZN63_INTERNAL_c0a2440a_32_tmpxft_00003fd6_00000000_1_stdin_3e38bae715__shfl_xor_syncEjiii(4294967295U, __T25, __T26, 32)));
+# 223 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if ((__cuda_local_var_39300_23_non_const_o_max > __cuda_local_var_39289_19_non_const_t_max) || ((__cuda_local_var_39300_23_non_const_o_max == __cuda_local_var_39289_19_non_const_t_max) && (__cuda_local_var_39301_21_non_const_o_idx < __cuda_local_var_39292_17_non_const_t_idx)))
+# 223 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 224 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39289_19_non_const_t_max = __cuda_local_var_39300_23_non_const_o_max;
+# 225 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39292_17_non_const_t_idx = __cuda_local_var_39301_21_non_const_o_idx;
+# 226 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}
+# 227 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} }
+# 230 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if ((__cuda_local_var_39249_15_non_const_lane == 0) && (__cuda_local_var_39292_17_non_const_t_idx >= 0))
+# 230 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 231 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+(__cuda_local_var_39245_12_non_const_topk_vals[rank]) = __cuda_local_var_39289_19_non_const_t_max;
+# 232 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+(__cuda_local_var_39246_10_non_const_topk_ids[rank]) = ((_ZZ21den_gpu_sample_kernelPKfPj16GPUSamplerConfigE10s_pool_ids)[__cuda_local_var_39292_17_non_const_t_idx]);
+# 233 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+((_ZZ21den_gpu_sample_kernelPKfPj16GPUSamplerConfigE11s_pool_vals)[__cuda_local_var_39292_17_non_const_t_idx]) = (-3.4028235E38F);
+# 234 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}
+# 235 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} }
+# 236 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}
+# 237 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__syncthreads();
+# 242 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if ((__cuda_local_var_39248_15_non_const_wid == 0) && (__cuda_local_var_39249_15_non_const_lane == 0))
+# 242 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 245 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39326_15_non_const_max_val;
+# 251 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39334_15_non_const_sum;
+# 264 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39349_15_non_const_inv_sum;
+# 269 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ uint64_t __cuda_local_var_39354_18_non_const_rng_state;
+# 274 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39359_15_non_const_u;
+# 275 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39360_15_non_const_cum;
+# 276 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int __cuda_local_var_39361_13_non_const_selected;
+# 245 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39326_15_non_const_max_val = (-3.4028235E38F);
+# 246 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 246 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int i;
+# 246 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+i = 0;
+# 246 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+for (; i < __cuda_local_var_39252_15_non_const_effective_k; i++)
+# 246 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 247 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if ((__cuda_local_var_39245_12_non_const_topk_vals[i]) > __cuda_local_var_39326_15_non_const_max_val) {
+# 247 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39326_15_non_const_max_val = (__cuda_local_var_39245_12_non_const_topk_vals[i]); }
+# 248 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} }
+# 251 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39334_15_non_const_sum = (0.0F);
+# 252 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if (__cuda_local_var_39326_15_non_const_max_val > (-3.4028235E38F))
+# 252 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 253 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 253 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int i;
+# 253 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+i = 0;
+# 253 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+for (; i < __cuda_local_var_39252_15_non_const_effective_k; i++)
+# 253 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 254 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ float __cuda_local_var_39339_23_non_const_p;
+# 254 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39339_23_non_const_p = (expf(((__cuda_local_var_39245_12_non_const_topk_vals[i]) - __cuda_local_var_39326_15_non_const_max_val)));
+# 255 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+(__cuda_local_var_39245_12_non_const_topk_vals[i]) = __cuda_local_var_39339_23_non_const_p;
+# 256 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39334_15_non_const_sum += __cuda_local_var_39339_23_non_const_p;
+# 257 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} }
+# 258 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}
+# 258 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+else 
+# 258 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 260 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39334_15_non_const_sum = ((float)__cuda_local_var_39252_15_non_const_effective_k);
+# 261 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 261 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int i;
+# 261 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+i = 0;
+# 261 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+for (; i < __cuda_local_var_39252_15_non_const_effective_k; i++) {
+# 261 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+(__cuda_local_var_39245_12_non_const_topk_vals[i]) = (1.0F); } }
+# 262 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}
+# 264 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39349_15_non_const_inv_sum = ((1.0F) / __cuda_local_var_39334_15_non_const_sum);
+# 265 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 265 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int i;
+# 265 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+i = 0;
+# 265 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+for (; i < __cuda_local_var_39252_15_non_const_effective_k; i++) {
+# 265 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+(__cuda_local_var_39245_12_non_const_topk_vals[i]) *= __cuda_local_var_39349_15_non_const_inv_sum; } }
+# 269 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39354_18_non_const_rng_state = ((uint64_t)(((cfg.seed) != 0ULL) ? (cfg.seed) : ((unsigned long long)(((uint64_t)(clock64())) ^ ((uint64_t)(blockIdx.x))))));
+# 272 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if (__cuda_local_var_39354_18_non_const_rng_state == 0UL) {
+# 272 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39354_18_non_const_rng_state = 1UL; }
+# 274 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39359_15_non_const_u = (_Z15den_rng_uniformRm((&__cuda_local_var_39354_18_non_const_rng_state)));
+# 275 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39360_15_non_const_cum = (0.0F);
+# 276 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39361_13_non_const_selected = (__cuda_local_var_39252_15_non_const_effective_k - 1);
+# 277 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 277 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+ int i;
+# 277 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+i = 0;
+# 277 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+for (; i < __cuda_local_var_39252_15_non_const_effective_k; i++)
+# 277 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 278 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39360_15_non_const_cum += (__cuda_local_var_39245_12_non_const_topk_vals[i]);
+# 279 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+if (__cuda_local_var_39359_15_non_const_u <= __cuda_local_var_39360_15_non_const_cum)
+# 279 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+{
+# 279 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+__cuda_local_var_39361_13_non_const_selected = i;
+# 279 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+goto __T27;
+# 279 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}
+# 280 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} } __T27:;
+# 283 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+(*token_out) = ((uint32_t)(__cuda_local_var_39246_10_non_const_topk_ids[__cuda_local_var_39361_13_non_const_selected]));
+# 284 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+} 
+# 285 "./ggml/src/ggml-cuda/den_gpu_sampler.cuh"
+}}
