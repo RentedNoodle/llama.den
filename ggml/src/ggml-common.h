@@ -195,14 +195,16 @@ static_assert(sizeof(block_mxfp4) == sizeof(uint8_t) + QK_MXFP4/2, "wrong mxfp4 
 typedef struct {
     uint32_t d4[4];     // 16 x UE4M3 scales, packed 4 per uint32 (little-endian)
     int8_t   qs[128];   // 256 x FP4 E2M1 values, nibble-packed (2 per byte)
+    uint8_t  padding[16]; // NULLGLASS V4: 16B cognitive header (Hadamard, ESAB, Phase, AXIOM)
 } block_nvfp4;
-static_assert(sizeof(block_nvfp4) == 144, "block_nvfp4 must be 144 bytes");
+static_assert(sizeof(block_nvfp4) == 160, "block_nvfp4 must be 160 bytes for NULLGLASS V4");
 
 // Same physical layout as block_nvfp4 — used for activation tiles in native
 // FP4 MMA dispatch (quantize_mmq_fp4_cuda writes this format for the B matrix).
 typedef struct {
     uint32_t d4[4];
     int8_t   qs[4 * 32];  // 128 bytes = 256 FP4 nibble-packed values
+    uint8_t  padding[16]; // NULLGLASS V4 header — same physical layout as block_nvfp4
 } block_fp4_mmq;
 
 #define QK5_0 32

@@ -2,7 +2,7 @@
 /**
  * den_tma_prefetch.cuh — TMA async prefetch for OMMA tiles.
  *
- * Pads 144B NVFP4 tiles to 132 x 128 = 16896 bytes per TMA batch (0.19% waste).
+ * Pads 160B NVFP4 tiles to 105 x 160 = 16800, rounded to 132 x 128 = 16896 bytes per TMA batch (0.57% waste).
  * Double-buffered SMEM: TMA streams tile batch N+1 while OMMA processes batch N.
  * Zero SM cost for data movement once TMA descriptor is initialized.
  *
@@ -16,7 +16,7 @@
  * Usage:
  *
  *   // Host init (once at model load):
- *   den_tma_prefetch_init(weight_tensor_device_ptr, tile_count, 144);
+ *   den_tma_prefetch_init(weight_tensor_device_ptr, tile_count, 160);
  *
  *   // Device kernel:
  *   __shared__ uint8_t smem_pool[2 * TMA_TILE_PADDED];
@@ -158,7 +158,7 @@ void den_tma_prefetch_ctx_init(
     // mbar is at the end of buffer 1 (last 8 bytes)
     ctx->mbar_ptr      = (uint64_t*)(ctx->buffers[1] + TMA_TILE_PADDED - 8);
     ctx->tile_count    = tile_count;
-    ctx->tiles_per_batch = TMA_TILE_PADDED / 144;  // 117 tiles per batch
+    ctx->tiles_per_batch = TMA_TILE_PADDED / 160;  // 105 tiles per batch
 }
 
 // ── Device: Get pointer to current (just-loaded) buffer ────────────────
@@ -191,8 +191,8 @@ void den_tma_prefetch_start(
     int tiles_this_batch = (tiles_remaining < ctx->tiles_per_batch)
                            ? tiles_remaining
                            : ctx->tiles_per_batch;
-    // Convert to bytes (144 per tile)
-    int bytes = tiles_this_batch * 144;
+    // Convert to bytes (160 per tile, NULLGLASS V4)
+    int bytes = tiles_this_batch * 160;
     if (bytes <= 0) return;
 
     // Pad to 128-byte boundary for TMA (TMA requires 16-byte aligned sizes)

@@ -15,7 +15,7 @@
 namespace den { namespace k1_dense {
 
 static constexpr int TILE_K = 256;
-static constexpr int BYTES_PER_TILE = 144;
+static constexpr int BYTES_PER_TILE = 160;
 
 // ───────────────────────────────────────────────────────────────────
 // Variant 1: stream_k_decode — M = 1 single-token decode

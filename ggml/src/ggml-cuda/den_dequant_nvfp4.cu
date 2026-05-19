@@ -1,6 +1,6 @@
 #include "common.cuh"
 
-// Dequantize NVFP4 (block_fp4_mmq, 144B/tile) → BF16 (2B/element)
+// Dequantize NVFP4 (block_fp4_mmq, 160B/tile) → BF16 (2B/element)
 // block_fp4_mmq layout: d4[0..3] at offset 0 (16 UE4M3 packed as 4×uint32_t),
 // qs[0..127] at offset 16 (256 FP4 E2M1 values, nibble-packed)
 __global__ void dequantize_nvfp4_to_bf16_kernel(
@@ -14,7 +14,7 @@ __global__ void dequantize_nvfp4_to_bf16_kernel(
     const int64_t tile_idx   = idx / 256;
     const int     pos_in_tile = (int)(idx % 256);
 
-    const uint8_t * tile_base = (const uint8_t *)src + tile_idx * 144;
+    const uint8_t * tile_base = (const uint8_t *)src + tile_idx * 160;
 
     // Read d4 scale word for this element's scale group
     const int scale_group = pos_in_tile / 16;

@@ -129,7 +129,7 @@ __device__ __forceinline__ int ocr_im2col_output_idx(
 template <int NUM_COMPUTE = OCR_IM2COL_NUM_COMPUTE>
 __global__ void ocr_conv_im2col_kernel(
     const float*   __restrict__ input,    // [N][C_in][H_in][W_in] float32
-    const uint8_t* __restrict__ weight,   // NVFP4 tiles [C_out][ceil(K_total/256)][144B]
+    const uint8_t* __restrict__ weight,   // NVFP4 tiles [C_out][ceil(K_total/256)][160B]
     float*         __restrict__ output,   // [N][C_out][H_out][W_out] float32
     OcrConvParams  p)
 {
@@ -147,8 +147,8 @@ __global__ void ocr_conv_im2col_kernel(
     const int total_positions = p.batch * p.H_out * p.W_out;
     const int kchunks         = p.kchunks_per_patch;
     const int kt_per_group    = p.kt_per_group;
-    // Each weight tile is 144 bytes, grouped by row (output channel)
-    const size_t weight_row_stride = (size_t)kt_per_group * 144;
+    // Each weight tile is 160 bytes, grouped by row (output channel)
+    const size_t weight_row_stride = (size_t)kt_per_group * 160;
 
     // ==================================================================
     // MAIN LOOP: iterate over all output positions (batch x H_out x W_out)
@@ -211,9 +211,10 @@ __global__ void ocr_conv_im2col_kernel(
 
                 // ── 2a. Load A-fragments (weights) from global NVFP4 tiles ──
                 //
-                // Weight tile format (144 bytes per K=256 block):
+                // Weight tile format (160 bytes per K=256 block):
                 //   bytes 0-15:  4 x uint32_t sfa (one per K=64 sub-block)
                 //   bytes 16-143: nibble data (32 bytes per K=64 sub-block)
+                //   bytes 144-159: cognitive header (NULLGLASS V4)
                 //     Each sub-block: 16 rows, K=64, packed as 4+4 uint32s
                 //     per row-half (a0..a3). Selected by kg (0..3).
                 //
@@ -226,10 +227,10 @@ __global__ void ocr_conv_im2col_kernel(
 
                 const uint8_t* tile0 = weight
                     + (size_t)row0 * weight_row_stride
-                    + (size_t)tile_idx * 144;
+                    + (size_t)tile_idx * 160;
                 const uint8_t* tile1 = weight
                     + (size_t)row1 * weight_row_stride
-                    + (size_t)tile_idx * 144;
+                    + (size_t)tile_idx * 160;
 
                 // sfa — 4 per K=256 tile, select by mm
                 uint32_t sfa = ((const uint32_t*)tile0)[mm];
@@ -345,7 +346,7 @@ __host__ int den_ocr_im2col_dispatch(
     const GovernorContext* ctx,
     cudaStream_t           stream,
     const float*           input,     // [N][C_in][H_in][W_in]
-    const uint8_t*         weights,   // NVFP4 tiles [C_out][ceil(K_total/256)][144B]
+    const uint8_t*         weights,   // NVFP4 tiles [C_out][ceil(K_total/256)][160B]
     float*                 output,    // [N][C_out][H_out][W_out]
     int                    C_in, int C_out,
     int                    H_in, int W_in,

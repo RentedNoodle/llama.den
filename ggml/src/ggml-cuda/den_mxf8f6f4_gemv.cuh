@@ -12,7 +12,7 @@
 #include "mma_mxf8f6f4.cuh"
 
 struct gemv_warp_smem {
-    uint8_t raw[144];
+    uint8_t raw[160];
     uint8_t expanded[256];
     uint8_t ue8m0[8];
 };
@@ -39,11 +39,11 @@ den_gemv_mxf8f6f4_kernel(
 
     float acc[2] = {0, 0};
     const uint8_t * wptr = (const uint8_t *)weights;
-    const size_t row_stride = (size_t)kt_per_row * 144;
+    const size_t row_stride = (size_t)kt_per_row * 160;
 
     // Prime: prefetch tile 0
     const uint8_t * tile0 = wptr + (size_t)row * row_stride;
-    for (int i = lane; i < 144; i += 32) s0.raw[i] = tile0[i];
+    for (int i = lane; i < 160; i += 32) s0.raw[i] = tile0[i];
     __syncwarp();
 
     for (int kt = 0; kt < kt_per_row; kt++) {
@@ -52,8 +52,8 @@ den_gemv_mxf8f6f4_kernel(
 
         // Prefetch next tile (async — overlaps with current MMA compute)
         if (kt + 1 < kt_per_row) {
-            const uint8_t * nxt_tile = wptr + (size_t)row * row_stride + (kt + 1) * 144;
-            for (int i = lane; i < 144; i += 32) nxt.raw[i] = nxt_tile[i];
+            const uint8_t * nxt_tile = wptr + (size_t)row * row_stride + (kt + 1) * 160;
+            for (int i = lane; i < 160; i += 32) nxt.raw[i] = nxt_tile[i];
             // Note: __syncwarp() deferred until after current tile's MMA.
             // The async load proceeds while we compute.
         }

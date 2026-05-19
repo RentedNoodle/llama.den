@@ -46,7 +46,7 @@ __device__ __forceinline__ void ldgsts_wait(int group) {
 
 template<int K>
 __global__ void den_mxf4nvf4_gemv_ldgsts(
-    const uint8_t * __restrict__ weights,   // [K/256][144] block_fp4_mmq tiles
+    const uint8_t * __restrict__ weights,   // [K/256][160] block_fp4_mmq tiles
     const half     * __restrict__ act,       // [K] BF16 activations
     half           * __restrict__ out,       // [1] output
     int kt_per_row)                          // K/256 for each row
@@ -56,7 +56,7 @@ __global__ void den_mxf4nvf4_gemv_ldgsts(
     int lane = tid % 32;
     int row = 0; // Single-token GEMV — one row at a time
 
-    // Each block_fp4_mmq tile = 144 bytes (128B nibble-packed E2M1 + 16B UE4M3)
+    // Each block_fp4_mmq tile = 160 bytes (128B nibble-packed E2M1 + 16B UE4M3 + 16B header)
     const uint8_t * wptr = (const uint8_t *)weights;
 
     // ── Prefetch first K-range tile into buffer 0 ─────────────────────────
@@ -72,7 +72,7 @@ __global__ void den_mxf4nvf4_gemv_ldgsts(
         // ── Prefetch next tile (if not last iteration) ───────────────────
         if (lane == 0 && kt + 1 < kt_per_row) {
             ldgsts_prefetch(smem.tile_buf[1 - buf],
-                           wptr + (kt + 1) * 144, 128);
+                           wptr + (kt + 1) * 160, 128);
             ldgsts_commit();
         }
 
@@ -85,7 +85,7 @@ __global__ void den_mxf4nvf4_gemv_ldgsts(
         // ── Scale distribution (unchanged — scales are in bytes 128-143) ──
         // For LDGSTS, we only staged 128 bytes of weights. The 16-byte scale
         // region is loaded separately via __shfl_sync from the global tile.
-        const uint8_t * gmem_tile = wptr + kt * 144;
+        const uint8_t * gmem_tile = wptr + kt * 160;
         uint32_t s0 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)(gmem_tile + 128))[0] : 0, 0);
         uint32_t s1 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)(gmem_tile + 128))[1] : 0, 1);
         uint32_t s2 = __shfl_sync(0xffffffff, (lane < 4) ? ((const uint32_t *)(gmem_tile + 128))[2] : 0, 2);

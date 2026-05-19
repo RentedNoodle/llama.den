@@ -14,12 +14,12 @@
 using cuda::barrier;
 
 // TMA descriptor for NVFP4 weight tensor (set up once at model load).
-// Describes a 2D tile: [tile_height × 144 bytes] with global stride.
+// Describes a 2D tile: [tile_height × 160 bytes] with global stride.
 __constant__ __grid_constant__ cudaTensorMap g_tma_tile_desc;
 
 // Initialize TMA descriptor at model load.
 // weights: device pointer to weight tensor base.
-// row_stride: bytes between consecutive rows (row_stride = K/256 * 144).
+// row_stride: bytes between consecutive rows (row_stride = K/256 * 160).
 // tile_height: number of rows per TMA load (default 16, matches OMMA tile).
 __host__ void init_tma_tile_descriptor(
     const uint8_t* weights, size_t row_stride, int tile_height = 16)
@@ -27,33 +27,33 @@ __host__ void init_tma_tile_descriptor(
     cudaTensorMap desc;
     cudaTMA2DCreate(&desc,
         weights,                    // global memory base
-        /* width  */ 144,           // bytes per tile (scales + nibbles)
+        /* width  */ 160,           // bytes per tile (scales + nibbles + header)
         /* height */ tile_height,   // 16 rows per tile group
         /* stride */ row_stride);   // bytes between rows
     cudaMemcpyToSymbol(g_tma_tile_desc, &desc, sizeof(cudaTensorMap));
 }
 
 // Cooperative TMA load: all threads participate.
-// After return, smem_buf contains [tile_height × 144] bytes of tile data.
+// After return, smem_buf contains [tile_height × 160] bytes of tile data.
 // Caller must __syncthreads() before accessing smem_buf.
 template<int TILE_H>
 __device__ void tma_load_tile(
-    uint8_t* smem_buf,          // shared memory destination [TILE_H][144]
+    uint8_t* smem_buf,          // shared memory destination [TILE_H][160]
     int tile_row,               // row index in weight tensor
     int tile_kt,                // K-tile index
     barrier& bar)               // mbarrier for synchronization
 {
-    // TMA 2D load: copies [TILE_H × 144] from global → smem
-    // Coordinate (x, y) = (tile_kt * 144, tile_row)
+    // TMA 2D load: copies [TILE_H × 160] from global → smem
+    // Coordinate (x, y) = (tile_kt * 160, tile_row)
     cuda::device::tma::load_2d(g_tma_tile_desc, smem_buf,
-        /* x */ tile_kt * 144,
+        /* x */ tile_kt * 160,
         /* y */ tile_row);
     bar.wait(/* phase token */);
 }
 
 // Usage pattern (double-buffered with TMA):
 //
-//   __shared__ uint8_t smem_tiles[2][TILE_H * 144];
+//   __shared__ uint8_t smem_tiles[2][TILE_H * 160];
 //   barrier bar;
 //   int ping = 0;
 //

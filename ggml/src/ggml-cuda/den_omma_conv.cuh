@@ -227,7 +227,7 @@ __global__ void omma_conv_3x3_kernel(
     //   4. Write F16 output
 
     const int total_positions = OMMA_CONV_TILE * OMMA_CONV_TILE;  // 16
-    const size_t weight_row_stride = (size_t)p.kt_per_group * 144;
+    const size_t weight_row_stride = (size_t)p.kt_per_group * 160;
 
     // Warp-level channels + K-group mapping (identical to GEMV kernel)
     const int r   = lane / 4;        // 0..7, row-in-group
@@ -254,18 +254,19 @@ __global__ void omma_conv_3x3_kernel(
 
             // ── 2a. Load weight A-fragments from global NVFP4 tiles ──
             //
-            // Weight tile format (144 bytes per K=256 block):
+            // Weight tile format (160 bytes per K=256 block, NULLGLASS V4):
             //   bytes 0-15:   4 × uint32_t sfa (one per K=64 sub-block)
             //   bytes 16-143: nibble data (32 bytes per K=64 sub-block)
+            //   bytes 144-159: NULLGLASS V4 cognitive header
             //     Each sub-block: 16 rows × 64 K, packed as 4+4 uint32s
             //     per row-half (a0..a3). Selected by kg (0..3).
 
             const uint8_t* tile0 = weight
                 + (size_t)row0 * weight_row_stride
-                + (size_t)tile_idx * 144;
+                + (size_t)tile_idx * 160;
             const uint8_t* tile1 = weight
                 + (size_t)row1 * weight_row_stride
-                + (size_t)tile_idx * 144;
+                + (size_t)tile_idx * 160;
 
             // sfa — 4 per tile, select by mm
             uint32_t sfa = ((const uint32_t*)tile0)[mm];

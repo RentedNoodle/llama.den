@@ -13,7 +13,7 @@
 namespace den { namespace consciousness {
 
 static constexpr int CANVAS_SIZE = 1024;
-static constexpr int BYTES_PER_TILE = 144;
+static constexpr int BYTES_PER_TILE = 160;
 static constexpr int TILES_PER_ROW = 4;
 static constexpr int TICKS_PER_WINDOW = 50;
 

@@ -6,7 +6,7 @@
 // tools/den_nvfp4_safetensors_to_gguf.py with a single CUDA launch.
 //
 // One block (32 threads) per tile.  Grid = sum of all tensor tile counts.
-// Each tile covers K=256 elements of one row, producing a 144-byte NVFP4 tile.
+// Each tile covers K=256 elements of one row, producing a 160-byte NVFP4 tile.
 //
 // Quantization flow per tile:
 //   1. Load 256 BF16 floats, split into 16 blocks of K=16
@@ -14,7 +14,7 @@
 //   3. Per tile:   tile_norm = max(block_scale) / 1.4375
 //   4. Per block:  normed_scale = block_scale / tile_norm → UE4M3 code → OMMA byte
 //   5. Per weight: E2M1(val × 6.0/block_max)  (normalized to E2M1 range)
-//   6. Assemble 144B tile: 16B scales + 128B nibbles
+//   6. Assemble 160B tile: 16B scales + 128B nibbles + 16B cognitive header
 //
 // Uses quant_f32_e2m1(), quant_f32_ue4m3(), ue4m3_code_to_byte[] from
 // den_omma_shared.cuh — bit-identical to the proven Paris Gate kernel.
@@ -30,9 +30,9 @@
 #include <cstdint>
 
 // ── Compile-time constants ───────────────────────────────────────────────────
-// Matches TILE_K=256, TILE_BYTES=144 in den_nvfp4_safetensors_to_gguf.py
+// Matches TILE_K=256, TILE_BYTES=160 NULLGLASS V4 format
 static constexpr int DEN_TK_TILE_K       = 256;   // elements per tile (K dimension)
-static constexpr int DEN_TK_TILE_BYTES    = 160;   // padded from 144 for L2 alignment   // packed tile size in bytes
+static constexpr int DEN_TK_TILE_BYTES    = 160;   // 144B NVFP4 data + 16B cognitive header
 static constexpr int DEN_TK_SCALE_BLOCKS  = 16;    // 16 blocks of K=16 per tile
 static constexpr int DEN_TK_ELEMS_PER_THR = 8;     // 256 / 32 threads
 static constexpr float DEN_TK_E2M1_MAX      = 6.0f;    // max E2M1 representable value
@@ -43,7 +43,7 @@ static constexpr float DEN_TK_OMMA_TARGET   = 1.4375f; // center of dense UE4M3 
 // The caller pre-allocates the tile and norm output buffers.
 struct DenPackTensor {
     const float* data;       // BF16-as-float tensor on device (N x K row-major)
-    uint8_t*     tiles;      // output: NVFP4 tiles on device (N * tpr * 144 bytes)
+    uint8_t*     tiles;      // output: NVFP4 tiles on device (N * tpr * 160 bytes)
     float*       norms;      // output: per-tile norm factors on device (N * tpr floats, may be NULL)
     int64_t      N;          // rows
     int64_t      K;          // columns (full width — NOT halved like modelopt uint8)

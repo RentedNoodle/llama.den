@@ -22,7 +22,7 @@ static constexpr int MOE_NUM_WARPS = 8;
 static constexpr int MOE_NUM_EXPERTS = 256;
 static constexpr int MOE_TOP_K = 8;
 static constexpr int MOE_SHARED_EXPERTS = 1;
-static constexpr int MOE_BYTES_PER_TILE = 144;
+static constexpr int MOE_BYTES_PER_TILE = 160;
 
 struct PersistentWorkItem {
     int expert_id;

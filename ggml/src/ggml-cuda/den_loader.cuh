@@ -224,14 +224,14 @@ static inline float den_e2m1_to_f32_cpu(unsigned nibble, bool razer) {
                        : (1.0f + (m ? 0.5f : 0.0f)) * (e == 1 ? 1.0f : e == 2 ? 2.0f : 4.0f);
     return sign ? -v : v;
 }
-// Dequant block_nvfp4 tiles (144B each) to BF16 (uint16_t, 2B per element)
+// Dequant block_nvfp4 tiles (160B each) to BF16 (uint16_t, 2B per element)
 static inline void den_dequant_nvfp4_to_bf16_cpu(
     const void * src, uint16_t * dst, int64_t nelements)
 {
     for (int64_t i = 0; i < nelements; i++) {
         int64_t tile_idx = i / 256;
         int pos = (int)(i % 256);
-        const uint8_t * tile = (const uint8_t *)src + tile_idx * 144;
+        const uint8_t * tile = (const uint8_t *)src + tile_idx * 160;
         int sg = pos / 16, sw = sg / 4, sb = sg % 4;
         uint32_t dw = ((const uint32_t *)tile)[sw];
         uint8_t sv = (dw >> (sb * 8)) & 0xFF;

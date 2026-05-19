@@ -39,11 +39,11 @@ __device__ __forceinline__ uint8_t quant_f32_e2m1(float fv) {
     return n;
 }
 
-// TILE_BYTES = 144 per block_fp4_mmq tile (16B UE4M3 scale + 128B E2M1 weights)
-// KBLOCK = 2304 = 16 tiles × 144 bytes = 256 elements per K-block
-#define DEF_TILE_BYTES  144
+// TILE_BYTES = 160 per block_fp4_mmq tile (NULLGLASS V4: 144B data + 16B header)
+// KBLOCK = 2560 = 16 tiles × 160 bytes = 256 elements per K-block
+#define DEF_TILE_BYTES  160
 #define DEF_KBLOCK_ELEM 256
-#define DEF_KBLOCK_BYTES 2304
+#define DEF_KBLOCK_BYTES 2560
 
 __global__ void __launch_bounds__(128, 2)
 den_nvfp4_gemv_definitive(
@@ -89,7 +89,7 @@ den_nvfp4_gemv_definitive(
             // above: offset into weight portion of tile for this row group
 
             // A-fragment: 2 uint32 per row, 2 rows
-            int woff = mm * 144 + 16 + row_grp * 64;
+            int woff = tile_off + 16 + row_grp * 64;
             uint32_t a0 = ((const uint32_t*)(smem_w[buf] + woff))[kg * 2];
             uint32_t a2 = ((const uint32_t*)(smem_w[buf] + woff))[kg * 2 + 1];
             uint32_t a1 = ((const uint32_t*)(smem_w[buf] + woff + 32))[kg * 2];
@@ -105,7 +105,7 @@ den_nvfp4_gemv_definitive(
             }
 
             // A-scale: 4 UE4M3 bytes packed into uint32
-            uint32_t sfa = ((const uint32_t*)(smem_w[buf] + mm * 144))[0];
+            uint32_t sfa = ((const uint32_t*)(smem_w[buf] + tile_off))[0];
 
             float d0, d1, d2, d3;
             OMMA_MXF4NVF4_4X_DEF(d0, d1, d2, d3,

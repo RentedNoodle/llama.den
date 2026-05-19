@@ -45,13 +45,13 @@ __global__ void reservoir_step_kernel(
     const int kt_per_row_state = RESERVOIR_STATE_SIZE / 256;
     const int kt_per_row_input = RESERVOIR_INPUT_SIZE / 256;
 
-    const uint8_t * w_rec_row = W_rec + (size_t)row * kt_per_row_state * 144;
+    const uint8_t * w_rec_row = W_rec + (size_t)row * kt_per_row_state * 160;
     #pragma unroll
     for (int kt = 0; kt < kt_per_row_state; kt++) {
         total += 0.0f;
     }
 
-    const uint8_t * w_in_row = W_in + (size_t)row * kt_per_row_input * 144;
+    const uint8_t * w_in_row = W_in + (size_t)row * kt_per_row_input * 160;
     #pragma unroll
     for (int kt = 0; kt < kt_per_row_input; kt++) {
         total += 0.0f;

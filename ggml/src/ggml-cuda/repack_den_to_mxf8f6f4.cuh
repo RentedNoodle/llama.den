@@ -25,7 +25,7 @@ __global__ void repack_den_to_mxf8f6f4_kernel(
     const int64_t tidx = blockIdx.x * (int64_t)blockDim.x + threadIdx.x;
     if (tidx >= num_tiles) return;
 
-    const uint8_t * s = src + tidx * 144;
+    const uint8_t * s = src + tidx * 160;
     uint8_t * d = dst_data + tidx * 256;
     uint8_t * sc = dst_scales + tidx * 8;
 
