@@ -4,8 +4,11 @@
 // den_omma_shared.cuh — Shared OMMA primitives for all NVFP4 GEMV kernels
 // ═══════════════════════════════════════════════════════════════════════════════════
 //
-// Verbatim extraction from den_mxf4nvf4_gemv.cuh. Do NOT modify.
+// Verbatim extraction from den_mxf4nvf4_gemv.cuh (with lop3.e2m1 addition).
 // Included by: den_mxf4nvf4_gemv.cuh, k1_dense.cu, k1_moe_35b.cu, etc.
+
+// lop3.b32-based branchless E2M1 quantization (replaces predicated if/else chain)
+#include "den_lop3_e2m1.cuh"
 //
 // ═══════════════════════════════════════════════════════════════════════════════════
 
@@ -106,3 +109,11 @@ static __device__ __forceinline__ uint8_t quant_f32_ue4m3(float v) {
     if (v <= 1.8125f) return 14;
     return 15;
 }
+
+// ── lop3.b32 redirect ──
+// All call sites using quant_f32_e2m1 are redirected to the branchless
+// lop3.b32-based variant. The original function above is dead code and
+// will be eliminated by the compiler (static, unreferenced).
+// The #define must appear AFTER the original definition to avoid
+// renaming the function definition itself.
+#define quant_f32_e2m1 lop3_quant_f32_e2m1

@@ -37,56 +37,65 @@
 // core — only the byte layout within the register changes, which the hardware
 // does not distinguish.
 
-// ── PRMT selector constants ────────────────────────────────────────────────
-// Each selects bytes [0,1] from src1, then bytes [0,1] from src2.
-// Both 0x05040100 and 0x0D0C0908 encode the same pattern in bits[2:0];
-// higher bits are ignored by ptxas (reserved in the encoding).
-#define PRMT_SEL_BYTES_0_1_FROM_BOTH  0x05040100u
-#define PRMT_SEL_BYTES_0_1_FROM_BOTH_ALT  0x0D0C0908u
+// ── PRMT selector encoding ─────────────────────────────────────────────────
+// prmt.b32 d, a, b, sel_imm  uses a 32-bit immediate sel_imm where the
+// lower 16 bits provide 4 × 4-bit nibbles, one per output byte:
+//   nibble N (bits [N*4+3:N*4]) controls output byte N (N=0..3)
+//     values 0-3    → byte from src1 (a)
+//     values 4-7    → byte from src2 (b)  [index = value - 4]
+//     value  8      → 0xFF
+//     value  9      → 0x00
+//     values 10-15  → 0x00 (reserved)
+//
+// PRMT_SEL_0_1_0_1: select {src1[0], src1[1], src2[0], src2[1]}
+//   nibble 0 = 0  (bits 3:0)   → src1 byte 0
+//   nibble 1 = 1  (bits 7:4)   → src1 byte 1
+//   nibble 2 = 4  (bits 11:8)  → src2 byte 0
+//   nibble 3 = 5  (bits 15:12) → src2 byte 1
+//   = hex 0x5410
+#define PRMT_SEL_0_1_0_1  0x5410u
 
 // ── prmt_load_a_fragments_row: load one row's A-fragments via PRMT ─────────
 //
 // Loads 4 consecutive uint32s from the row's mm-iteration nibble data and
-// uses 2x PRMT to produce a_lo (lower K-half contribution) and a_hi (upper
-// K-half contribution).
+// uses 2x PRMT to produce a_lo and a_hi.
 //
 // Parameters:
-//   row_nib  — pointer into one row's nibble data at a specific mm iteration.
-//              Expected layout: 8 consecutive uint32s (32 bytes) per mm round.
-//              For mm-iteration base, pass &tile_row_nibbles[mm * 8].
-//   a_lo     — output A-fragment register for lower K-half contribution.
-//   a_hi     — output A-fragment register for upper K-half contribution.
+//   row_nib  — pointer to one row's nibble data at a specific mm iteration.
+//              Expected layout: 8 uint32s (32 bytes), lower K-half at 0..3,
+//              upper K-half at 4..7.  Pass &tile_row_nibbles[mm * 8].
+//   a_lo     — output A-fragment register (lower K-half contribution).
+//   a_hi     — output A-fragment register (upper K-half contribution).
 //
-// Equivalent to the current:
-//   a_lo = row_nib[kg]      (current a0/a1)
-//   a_hi = row_nib[4 + kg]  (current a2/a3)
-// but loads 4 consecutive uint32s and permutes via PRMT instead of 2
-// scattered loads.  The set of 8 E2M1 nibbles per output register is
-// preserved; only byte ordering within the register changes.
+// The PRMT byte rearrangement is valid because OMMA treats nibble positions
+// within a uint32 as uniform (silicon-verified).  The total set of 8 E2M1
+// values per register is preserved.
 __device__ __forceinline__ void prmt_load_a_fragments_row(
     const uint32_t* row_nib,
     uint32_t& a_lo,
     uint32_t& a_hi)
 {
-    // Load 4 consecutive uint32s from the row's mm window
     uint32_t d0 = row_nib[0];
     uint32_t d1 = row_nib[1];
     uint32_t d2 = row_nib[2];
     uint32_t d3 = row_nib[3];
 
-    // Two PRMT instructions: each packs bytes [0,1] from the first and
-    // second source registers into one output uint32.
+    // PRMT encodes {byteIdx[1:0], srcSel[2]} per output byte.
+    // PRMT_SEL_0_1_0_1 = 0x5410 → nibbles {0, 1, 4, 5}:
+    //   byte 0 ← src1[0]  (nibble 0)
+    //   byte 1 ← src1[1]  (nibble 1)
+    //   byte 2 ← src2[0]  (nibble 4)
+    //   byte 3 ← src2[1]  (nibble 5)
     //
-    // a_lo = {d0.byte[0:1], d2.byte[0:1]}
-    // a_hi = {d1.byte[0:1], d3.byte[0:1]}
-    //
-    // The PRMT selector is embedded as an immediate ("n" constraint).
+    // Operand map (positional %N):
+    //   %0=out(a_lo)  %1=out(a_hi)  %2=d0  %3=d2
+    //   %4=sel        %5=d1         %6=d3  %7=sel
     asm volatile(
-        "prmt.b32 %0, %1, %2, %3;\n\t"
-        "prmt.b32 %4, %5, %6, %7;"
+        "prmt.b32 %0, %2, %3, %4;\n\t"
+        "prmt.b32 %1, %5, %6, %7;"
         : "=r"(a_lo), "=r"(a_hi)
-        : "r"(d0), "r"(d2), "n"(PRMT_SEL_BYTES_0_1_FROM_BOTH),
-          "r"(d1), "r"(d3), "n"(PRMT_SEL_BYTES_0_1_FROM_BOTH)
+        : "r"(d0), "r"(d2), "n"(PRMT_SEL_0_1_0_1),
+          "r"(d1), "r"(d3), "n"(PRMT_SEL_0_1_0_1)
         : );
 }
 

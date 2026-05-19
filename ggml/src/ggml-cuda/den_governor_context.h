@@ -85,7 +85,10 @@ struct GovernorContext {
     uint32_t gpu_sampler_enabled            : 1;  // GPU-resident softmax+top-k+temp sampler (default 0)
     uint32_t swap_hysteresis_enabled        : 1;  // swap hysteresis governor — prevents model swap thrashing (default 0)
     uint32_t slab_alloc_enabled             : 1;  // slab allocator: tile pool from pre-allocated 256 MB slabs (default 0)
-    uint32_t fusion_reserved                : 27; // reserved for future fusion kernels
+    uint32_t rt_omma_attention_enabled      : 1;  // RT Core + OMMA sub-linear attention: BVH filters to k=32, OMMA scores (default 0)
+    uint32_t path_integral_enabled          : 1;  // Feynman-style path integral token sampling (default 0)
+    uint32_t vic_texture_cog_enabled        : 1;  // VIC + Texture + L2 cognitive inference (default 0)
+    uint32_t fusion_reserved                : 24; // reserved for future fusion kernels
 };
 #pragma pack(pop)
 
