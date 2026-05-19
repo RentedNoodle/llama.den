@@ -57,7 +57,8 @@ __global__ void persistent_gemv_omma(
         for (int kt = 0; kt < kt_per_row; kt++) {
             // Cooperative load of one tile into SMEM
             const uint8_t * tile = wptr + (size_t)row * row_stride + kt * TILE_BYTES;
-            for (int i = lane; i < TILE_BYTES; i += 256) s_tile[i] = tile[i];
+            // ld.global.nc (non-coherent) — bypasses L1 for streaming weight data
+            for (int i = lane; i < TILE_BYTES; i += 256) s_tile[i] = __ldg(&tile[i]);
             __syncthreads();
 
             // Broadcast d4 scales (4 lanes → all) — loaded from SFA_OFFSET
@@ -75,6 +76,7 @@ __global__ void persistent_gemv_omma(
             }
 
             // Pre-quantize activation (8 values → 4 nibble-packed bytes)
+            // Using PTX bfi.b32 (bit field insert) for single-instruction packing
             uint32_t act_packed = 0;
             for (int i = 0; i < 8; i++) {
                 int k_idx = kt * 256 + (lane % 32) * 8 + i;
@@ -89,9 +91,9 @@ __global__ void persistent_gemv_omma(
                 else if (av >= 0.75f) nib = 2;
                 else if (av >= 0.25f) nib = 1;
                 if (sign) nib |= 8;
-                int byte_idx = i / 2;
-                int shift = (i % 2 == 0) ? 0 : 4;
-                act_packed |= ((uint32_t)nib << (byte_idx * 8 + shift));
+                int bpos = (i / 2) * 8 + (i % 2 == 0 ? 0 : 4);
+                asm volatile("bfi.b32 %0, %1, %0, %2, 4;"
+                    : "+r"(act_packed) : "r"((uint32_t)nib), "r"(bpos));
             }
             const uint32_t b0 = act_packed, b1 = act_packed;
 
