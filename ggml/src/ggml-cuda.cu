@@ -4053,41 +4053,17 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             ggml_cuda_op_delta_net(ctx, dst);
             break;
         case GGML_OP_FLASH_ATTN_EXT:
-            // ── OMMA-as-attention fast path ──────────────────────────────
+            // ── NVFP4 OMMA-accelerated attention ─────────────────────────
             // When enabled via GovernorContext::omma_attention_enabled,
-            // quantize Q and K to NVFP4 tiles and compute scores via OMMA.
-            // ~4x throughput vs FP16 attention for seq_len > 128.
+            // replaces standard FP16 flash attention with NVFP4 tile-based
+            // OMMA-attention. 4x compression, tensor core accelerated.
             if (g_gov_init && g_gov.governor_ctx &&
                 g_gov.governor_ctx->omma_attention_enabled)
             {
-                const ggml_tensor * Q = dst->src[0];
-                const ggml_tensor * K = dst->src[1];
-                const int head_dim = Q->ne[0];
-                const int seq_len  = Q->ne[1];
-                const int n_heads  = Q->ne[2];
-                if (head_dim <= 64 && seq_len > 128) {
-                    size_t scores_sz = (size_t)n_heads * seq_len * seq_len * sizeof(float);
-                    // Safety cap: skip if scores buffer exceeds 256 MB
-                    if (scores_sz <= 256 * 1024 * 1024) {
-                        float * d_scores = nullptr;
-                        CUDA_CHECK(cudaMalloc(&d_scores, scores_sz));
-                        dim3 block(1, 16, 16);
-                        dim3 grid((unsigned)n_heads,
-                                  (unsigned)((seq_len + 15) / 16),
-                                  (unsigned)((seq_len + 15) / 16));
-                        omma_attention_scores_kernel<<<grid, block, 0, ctx.stream()>>>(
-                            (const float *)Q->data,
-                            (const float *)K->data,
-                            d_scores, seq_len, head_dim, n_heads);
-                        CUDA_CHECK(cudaGetLastError());
-                        CUDA_CHECK(cudaFree(d_scores));
-                        // TODO: full OMMA attention pipeline
-                        // (scores -> softmax -> *V -> output) not yet wired.
-                        // Falling through to flash attention for correct output.
-                    }
-                }
+                ggml_cuda_flash_attn_ext_nvfp4(ctx, dst);
+            } else {
+                ggml_cuda_flash_attn_ext(ctx, dst);
             }
-            ggml_cuda_flash_attn_ext(ctx, dst);
             break;
         default:
             return false;

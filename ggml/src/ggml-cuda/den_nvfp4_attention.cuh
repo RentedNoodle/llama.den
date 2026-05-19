@@ -28,6 +28,29 @@ using namespace den::nvfp4_kv;
 constexpr int WARPS_PER_BLOCK = 8;
 constexpr int T8=8, T16=16, T32=32, T64=64;
 
+// ── Dequantization helpers ──────────────────────────────────────
+// Convert NVFP4 quantized values back to float for V weighting.
+// Inverse of quant_f32_e2m1 and quant_f32_ue4m3 in den_omma_shared.cuh.
+
+__device__ __forceinline__ float e2m1_to_f32(uint8_t code) {
+    // E2M1: 1 sign + 2 exponent + 1 mantissa = 4-bit
+    // Range: -6 to +6 (same as E4M3 but truncated to E2M1)
+    int sign = (code >> 3) & 1;
+    int exp = (code >> 1) & 3;
+    int mant = code & 1;
+    float v = (float)((1 << (exp + 1)) | (mant << exp)) / 8.0f;
+    return sign ? -v : v;
+}
+
+__device__ __forceinline__ float ue4m3_to_f32(uint8_t code) {
+    // UE4M3: unsigned 4 exponent + 3 mantissa
+    // Values from den_omma_shared.cuh ue4m3_code_to_byte LUT
+    int exp = (code >> 3) & 0xF;
+    int mant = code & 0x7;
+    if (exp == 0) return mant / 32.0f;  // subnormal: mant * 2^-5
+    return (float)((1 << exp) | (mant << (exp - 3))) / 32.0f;
+}
+
 // ── NVFP4 Attention Kernel ──────────────────────────────────────
 // One block processes one query token against all KV positions.
 //

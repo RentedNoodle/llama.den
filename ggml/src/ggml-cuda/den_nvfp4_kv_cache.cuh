@@ -12,6 +12,7 @@
 
 #pragma once
 #include <cuda_runtime.h>
+#include "common.cuh"
 #include "den_omma_shared.cuh"
 
 namespace den { namespace nvfp4_kv {
