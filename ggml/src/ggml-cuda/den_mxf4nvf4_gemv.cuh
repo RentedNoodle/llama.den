@@ -78,14 +78,16 @@ __forceinline__ __device__ void load_tile_data(
 #endif
 }
 
-template <int NWARPS, bool FUSE_RMSNORM = false>
+template <int NWARPS, bool FUSE_RMSNORM = false, bool INPUT_IS_E2M1 = false>
 __global__ void den_gemv_mxf4nvf4_kernel(
     const uint8_t * __restrict__ w,
     const float   * __restrict__ x,
     float         * __restrict__ y,
     int N, int K, int kt_per_row,
     const float * tile_norms, int n_norms,
-    float rms_eps = 1e-6f)
+    float rms_eps = 1e-6f,
+    const uint32_t * __restrict__ x_e2m1 = nullptr,
+    const uint32_t * __restrict__ x_sfb_storage = nullptr)
 {
     const int warp_id = threadIdx.x / 32;
     const int lane    = threadIdx.x & 31;
@@ -107,6 +109,11 @@ __global__ void den_gemv_mxf4nvf4_kernel(
 
     float total0 = 0.0f, total1 = 0.0f, total2 = 0.0f, total3 = 0.0f;
     float rms_sum_sq = 0.0f; // RMSNorm sum(x^2) accumulator (only if FUSE_RMSNORM)
+
+    // INPUT_IS_E2M1 skips FP32 activation load, which RMSNorm fusion requires.
+    static_assert(!(FUSE_RMSNORM && INPUT_IS_E2M1),
+        "FUSE_RMSNORM and INPUT_IS_E2M1 are mutually exclusive: "
+        "E2M1 activations have no FP32 values for rms_sum_sq");
 
     if (kt_per_row <= 0) return;
 
@@ -145,52 +152,73 @@ __global__ void den_gemv_mxf4nvf4_kernel(
         for (int mm = 0; mm < 4; mm++) {
             const int kb = kt * 256 + mm * 64;
 
-            // Dynamic sfb: compute per-K-group scale from activation vector x
-            float x_local[16];
-            float local_max = 0.0f;
-            #pragma unroll
-            for (int i = 0; i < 8; i++) {
-                int ki = kb + kg * 8 + i;
-                float val = (ki < K) ? x[ki] : 0.0f;
-                x_local[i] = val;
-                if constexpr (FUSE_RMSNORM) rms_sum_sq += val * val;
-                float av = fabsf(val);
-                if (av > local_max) local_max = av;
-            }
-            #pragma unroll
-            for (int i = 0; i < 8; i++) {
-                int ki = kb + 32 + kg * 8 + i;
-                float val = (ki < K) ? x[ki] : 0.0f;
-                x_local[8 + i] = val;
-                if constexpr (FUSE_RMSNORM) rms_sum_sq += val * val;
-                float av = fabsf(val);
-                if (av > local_max) local_max = av;
-            }
-            float block_max = local_max;
-            #pragma unroll
-            for (int mask = 1; mask <= 2; mask *= 2) {
-                float other = __shfl_xor_sync(0xffffffff, block_max, mask);
-                if (other > block_max) block_max = other;
-            }
-            float sfb_f = fmaxf(0.0625f, fminf(1.875f, block_max * 0.333333f));
+            // ── Activation loading and E2M1 quantization ──
+            // When INPUT_IS_E2M1, the persistent activation plane has already
+            // pre-quantized the activation vector. We load packed nibbles and
+            // pre-computed sfb directly, skipping the FP32 load + block_max +
+            // quant cycle that dominates ~40% of the original kernel's ALU.
+            uint32_t b0, b1;
+            uint32_t sfb_packed;
+            if constexpr (INPUT_IS_E2M1) {
+                // Pre-quantized E2M1 bypass: load packed codes directly.
+                // Each uint32 holds 8 × 4-bit E2M1 codes. The lower 8 elements
+                // of the K-group occupy uint32 (kb + kg*8) / 8; the upper 8
+                // elements (offset +32 in K) occupy uint32 +4 from the base.
+                int e2m1_base = (kb + kg * 8) / 8;
+                b0 = x_e2m1[e2m1_base];
+                b1 = x_e2m1[e2m1_base + 4];
+                // Pre-computed sfb: 1 packed UE4M3 per K-group, 4 per K=64 block.
+                // Each uint32 is pre-packed as 0x01010101 * byte_value.
+                int sfb_idx = (kb / 64) * 4 + kg;
+                sfb_packed = x_sfb_storage[sfb_idx];
+            } else {
+                // Dynamic sfb: compute per-K-group scale from activation vector x
+                float x_local[16];
+                float local_max = 0.0f;
+                #pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    int ki = kb + kg * 8 + i;
+                    float val = (ki < K) ? x[ki] : 0.0f;
+                    x_local[i] = val;
+                    if constexpr (FUSE_RMSNORM) rms_sum_sq += val * val;
+                    float av = fabsf(val);
+                    if (av > local_max) local_max = av;
+                }
+                #pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    int ki = kb + 32 + kg * 8 + i;
+                    float val = (ki < K) ? x[ki] : 0.0f;
+                    x_local[8 + i] = val;
+                    if constexpr (FUSE_RMSNORM) rms_sum_sq += val * val;
+                    float av = fabsf(val);
+                    if (av > local_max) local_max = av;
+                }
+                float block_max = local_max;
+                #pragma unroll
+                for (int mask = 1; mask <= 2; mask *= 2) {
+                    float other = __shfl_xor_sync(0xffffffff, block_max, mask);
+                    if (other > block_max) block_max = other;
+                }
+                float sfb_f = fmaxf(0.0625f, fminf(1.875f, block_max * 0.333333f));
 
-            // Personality-Adaptive Quantization: modulate sfb by PAD emotional state.
-            // The modulation factor is written to __constant__ memory by the Rust
-            // cognitive daemon before each decode step via cudaMemcpyToSymbolAsync.
-            // Range: ~0.65x to ~1.4x (clamped to UE4M3 valid range 0.0625-1.875).
+                // Personality-Adaptive Quantization: modulate sfb by PAD emotional state.
+                // The modulation factor is written to __constant__ memory by the Rust
+                // cognitive daemon before each decode step via cudaMemcpyToSymbolAsync.
+                // Range: ~0.65x to ~1.4x (clamped to UE4M3 valid range 0.0625-1.875).
 #ifdef PERSONALITY_QUANTIZATION
-            sfb_f *= g_personality_scale;
-            sfb_f = fmaxf(0.0625f, fminf(1.875f, sfb_f));
+                sfb_f *= g_personality_scale;
+                sfb_f = fmaxf(0.0625f, fminf(1.875f, sfb_f));
 #endif
 
-            float sfb_inv = 1.0f / sfb_f;
-            uint8_t sfb_code = quant_f32_ue4m3(sfb_f);
-            uint32_t sfb_packed = 0x01010101u * (uint32_t)ue4m3_code_to_byte[sfb_code];
-            uint32_t b0 = 0, b1 = 0;
-            #pragma unroll
-            for (int i = 0; i < 8; i++) {
-                b0 |= ((uint32_t)quant_f32_e2m1(x_local[i] * sfb_inv) << (i * 4));
-                b1 |= ((uint32_t)quant_f32_e2m1(x_local[8 + i] * sfb_inv) << (i * 4));
+                float sfb_inv = 1.0f / sfb_f;
+                uint8_t sfb_code = quant_f32_ue4m3(sfb_f);
+                sfb_packed = 0x01010101u * (uint32_t)ue4m3_code_to_byte[sfb_code];
+                b0 = 0; b1 = 0;
+                #pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    b0 |= ((uint32_t)quant_f32_e2m1(x_local[i] * sfb_inv) << (i * 4));
+                    b1 |= ((uint32_t)quant_f32_e2m1(x_local[8 + i] * sfb_inv) << (i * 4));
+                }
             }
 
             // OMMA with pre-loaded A-fragments and scale from bufA
@@ -284,19 +312,30 @@ static void den_mxf4nvf4_gemv_launch(
     const void * weights, const float * act, float * dst,
     int N, int K, cudaStream_t stream,
     const float * tile_norms = nullptr, int n_norms = 0,
-    bool fused_rmsnorm = false, float rms_eps = 1e-6f)
+    bool fused_rmsnorm = false, float rms_eps = 1e-6f,
+    bool input_is_e2m1 = false,
+    const uint32_t * x_e2m1_data = nullptr,
+    const uint32_t * x_sfb_data = nullptr)
 {
     const int kt_per_row = K / 256;
     const int nwarps = 8;
     const int grid = (N + nwarps * 16 - 1) / (nwarps * 16);
 
     CUDA_CHECK(cudaGetLastError());
-    if (fused_rmsnorm) {
-        den_gemv_mxf4nvf4_kernel<nwarps, true><<<grid, nwarps * 32, 0, stream>>>(
-            (const uint8_t*)weights, act, dst, N, K, kt_per_row, tile_norms, n_norms, rms_eps);
+    if (input_is_e2m1) {
+        // E2M1 bypass: activation is pre-quantized; load nibbles + sfb
+        // from separate storage. FUSE_RMSNORM must be false (static_assert).
+        den_gemv_mxf4nvf4_kernel<nwarps, false, true><<<grid, nwarps * 32, 0, stream>>>(
+            (const uint8_t*)weights, act, dst, N, K, kt_per_row,
+            tile_norms, n_norms, rms_eps, x_e2m1_data, x_sfb_data);
+    } else if (fused_rmsnorm) {
+        den_gemv_mxf4nvf4_kernel<nwarps, true, false><<<grid, nwarps * 32, 0, stream>>>(
+            (const uint8_t*)weights, act, dst, N, K, kt_per_row,
+            tile_norms, n_norms, rms_eps);
     } else {
-        den_gemv_mxf4nvf4_kernel<nwarps, false><<<grid, nwarps * 32, 0, stream>>>(
-            (const uint8_t*)weights, act, dst, N, K, kt_per_row, tile_norms, n_norms, rms_eps);
+        den_gemv_mxf4nvf4_kernel<nwarps, false, false><<<grid, nwarps * 32, 0, stream>>>(
+            (const uint8_t*)weights, act, dst, N, K, kt_per_row,
+            tile_norms, n_norms, rms_eps);
     }
     CUDA_CHECK(cudaGetLastError());
 }

@@ -42,6 +42,8 @@
 // #include "ggml-cuda/specialized/k1_dense.cuh"
 // #include "ggml-cuda/specialized/k1_moe_35b.cuh"
 // Governor include deferred — den_governor_fsm.cuh has transitive dependency issues
+#include "ggml-cuda/den_type_contract.h"        // Type contract tags + OpSignature
+#include "ggml-cuda/den_e2m1_rmsnorm.cuh"       // E2M1-native RMSNorm
 #include "ggml-cuda/den_governor_context.h"     // GovernorContext struct + C ABI (emotion router)
 #include "ggml-cuda/den_mxf8f6f4_gemv.cuh"
 #include "ggml-cuda/den_omma_attention.cuh"   // OMMA-as-attention (gated)

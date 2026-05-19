@@ -11,6 +11,7 @@
 #pragma once
 #include <cstdint>
 #include <atomic>
+#include "den_type_contract.h"
 
 #pragma pack(push, 1)
 struct GovernorContext {
@@ -89,11 +90,18 @@ struct GovernorContext {
     uint32_t path_integral_enabled          : 1;  // Feynman-style path integral token sampling (default 0)
     uint32_t vic_texture_cog_enabled        : 1;  // VIC + Texture + L2 cognitive inference (default 0)
     uint32_t fusion_reserved                : 24; // reserved for future fusion kernels
+
+    // [7] Type Contract fields
+    uint8_t  type_policy_byte;              // Feature flags (TYPE_CONTRACT_ENABLED etc.)
+    uint8_t  tensor_types[16];              // Current type per active tensor [0..15]
+    uint8_t  next_tensor_types[16];         // Predicted next types for promotion
+    uint16_t conversion_budget;             // Cycles spent on conversions this step
+    uint16_t conversion_budget_max;         // Max allowed per step (default: 100)
 };
 #pragma pack(pop)
 
-static_assert(sizeof(GovernorContext) == 68,
-    "GovernorContext must be 68B (feature flags expanded for SSM draft + fusion gating)");
+static_assert(sizeof(GovernorContext) == 105,
+    "GovernorContext must be 105B (Type Contract fields added)");
 
 // ── C ABI: extern "C" functions exposed to Rust FFI ────────────────
 

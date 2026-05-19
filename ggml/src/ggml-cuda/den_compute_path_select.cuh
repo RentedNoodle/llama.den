@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include "ggml.h"
+#include "den_type_contract.h"
 
 #ifndef DEN_COMPUTE_PATH_ENUM_DEFINED
 #define DEN_COMPUTE_PATH_ENUM_DEFINED
@@ -85,6 +86,38 @@ __host__ __device__ inline bool blackwell_mma_available() {
 #else
     return false;
 #endif
+}
+
+// ── Type-aware path selection — type contract gate ───────────────────────────
+// Called before the main path selection to check whether the activation tensor
+// already matches the operation's preferred input type. When it does, the
+// dispatcher skips the FP32->E2M1 on-the-fly quant and routes directly to the
+// INPUT_IS_E2M1 kernel variant.
+//
+// Returns:
+//   0 = PATH_ZERO_CONVERSION  — types natively match, best case
+//   1 = PATH_ACCEPTABLE       — types acceptable but not ideal
+//   2 = PATH_NEEDS_CONVERSION — must insert a type conversion kernel
+//
+// When type_path == 0, the caller dispatches with INPUT_ALREADY_E2M1 flag,
+// bypassing the on-the-fly quant step entirely.
+__host__ __device__ inline int select_type_path(
+    DenType actual_type,
+    const OpSignature* sig,
+    uint8_t type_policy_byte)
+{
+    if (!(type_policy_byte & TYPE_CONTRACT_ENABLED)) {
+        return 2;  // Type contract off — legacy conversion path
+    }
+    if (actual_type == sig->preferred_input) {
+        return 0;  // Zero conversion — types already match
+    }
+    for (int i = 0; i < 4; i++) {
+        if (actual_type == sig->acceptable[i]) {
+            return 1;  // Acceptable — fallback path
+        }
+    }
+    return 2;  // Must convert
 }
 
 } // namespace den
