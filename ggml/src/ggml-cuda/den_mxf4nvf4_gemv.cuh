@@ -326,21 +326,19 @@ __global__ void den_gemv_mxf4nvf4_kernel(
         // ---- TILE EXECUTION POLICY ---
         // Skip accumulation for null-skip tiles (converter-set bit 7 of byte 144)
         if (!bufA.policy.null_skip) {
-
-        // ---- ACCUMULATE: per-tile norm + total ----
-        if (kg == 0) {
-            float n0 = 1.0f, n1 = 1.0f;
-            if (tile_norms) {
-                if (n_norms == 1) {
-                    n0 = tile_norms[0]; n1 = tile_norms[0];
-                } else {
-                    n0 = tile_norms[row0 * kt_per_row + kt];
-                    n1 = tile_norms[row1 * kt_per_row + kt];
+            if (kg == 0) {
+                float n0 = 1.0f, n1 = 1.0f;
+                if (tile_norms) {
+                    if (n_norms == 1) {
+                        n0 = tile_norms[0]; n1 = tile_norms[0];
+                    } else {
+                        n0 = tile_norms[row0 * kt_per_row + kt];
+                        n1 = tile_norms[row1 * kt_per_row + kt];
+                    }
                 }
-        }
+                total0 += acc0 * n0; total1 += acc1 * n0;
+                total2 += acc2 * n1; total3 += acc3 * n1;
             }
-            total0 += acc0 * n0; total1 += acc1 * n0;
-            total2 += acc2 * n1; total3 += acc3 * n1;
         }
 
         // ---- SWAP: bufB becomes current for next iteration ----
