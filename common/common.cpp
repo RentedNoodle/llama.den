@@ -1727,6 +1727,11 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
         }
         return true;
     }
+    if (arg == "--mtp-requantize-output-tensor" || arg == "-mtprot") {
+        CHECK_ARG
+        params.extra_output_type = argv[i];
+        return true;
+    }
     if (arg == "-ctkd" || arg == "--cache-type-k-draft") {
         params.speculative.cache_type_k = argv[++i];
         return true;
@@ -2067,6 +2072,11 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
     if (arg == "-grt" || arg == "--graph-reduce-type") {
         CHECK_ARG
         params.reduce_type = argv[i];
+        return true;
+    }
+    if (arg == "-gap" || arg == "--graph-attn-precision") {
+        CHECK_ARG
+        params.graph_attn_precision = argv[i];
         return true;
     }
     if (arg == "--numa") {
@@ -2880,6 +2890,7 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
     options.push_back({ "*",         "-smf16, --split-mode-f16,",       "Use f16 for data exchange between GPUs (default: %d)", true});
     options.push_back({ "*",         "-smf32, --split-mode-f32,",       "Use f32 for data exchange between GPUs (default: %d)", false});
     options.push_back({ "*",         "-grt, --graph-reduce-type",       "Type for data exchange between GPUs (default: %s)", "f32"});
+    options.push_back({ "*",         "-gap, --graph-attn-precision",    "Flash-attn precision under -sm graph (default: %s)", "f16"});
     options.push_back({ "*",         "-smgs, --split-mode-graph-scheduling,", "Force Split Mode Graph Scheduling (default: %d)", params.split_mode_graph_scheduling});
     options.push_back({ "*",         "-sas,  --scheduler_async,",       "Async evaluation of compute graphs: %d)", params.scheduler_async});
     options.push_back({ "*",         "-vq, --validate-quants",          "validate quantized data while loading the model (default: %d)", params.validate_quants});
@@ -3028,6 +3039,7 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
     options.push_back({ "*",           "-ctv-last,  --cache-type-k-last  TYPE,N", "KV cache data type for the last N layers of K  (default: %s,-1)", params.type_k_last.c_str() });
     options.push_back({ "*",           "-ctv-first, --cache-type-v-first TYPE,N", "KV cache data type for the first N layers of V (default: %s,-1)", params.type_v_first.c_str() });
     options.push_back({ "*",           "-ctk-last,  --cache-type-v-last  TYPE,N", "KV cache data type for the last N layers of V  (default: %s,-1)", params.type_v_last.c_str() });
+    options.push_back({ "*",           "-mtprot, --mtp-requantize-output-tensor type", "Use output requantized to type for MTP (default: %s)", params.extra_output_type.c_str() });
     options.push_back({ "*",           "-ctkd, --cache-type-k-draft TYPE", "KV cache data type for K for the draft model" });
     options.push_back({ "*",           "-ctvd, --cache-type-v-draft TYPE", "KV cache data type for V for the draft model" });
 
@@ -3926,6 +3938,17 @@ static std::pair<int, int> get_batch_ubatch(const gpt_params & params) {
     return {n_batch, n_ubatch};
 }
 
+static ggml_type parse_ggml_type(const char * arg) {
+    for (int j = 0; j < GGML_TYPE_COUNT; ++j) {
+        auto type = ggml_type(j);
+        const auto * name = ggml_type_name(type);
+        if (name && strcmp(arg, name) == 0) {
+            return type;
+        }
+    }
+    return GGML_TYPE_COUNT;
+}
+
 struct llama_model_params common_model_params_to_llama(const gpt_params & params) {
     auto mparams = llama_model_default_params();
     mparams.devices = params.devices.c_str();
@@ -3948,6 +3971,9 @@ struct llama_model_params common_model_params_to_llama(const gpt_params & params
     mparams.type_k_last     = kv_cache_type_from_str(params.type_k_last );
     mparams.type_v_first    = kv_cache_type_from_str(params.type_v_first);
     mparams.type_v_last     = kv_cache_type_from_str(params.type_v_last );
+    if (!params.extra_output_type.empty()) {
+        mparams.extra_output_type = parse_ggml_type(params.extra_output_type.c_str());
+    }
     mparams.n_k_first       = params.n_k_first;
     mparams.n_k_last        = params.n_k_last;
     mparams.n_v_first       = params.n_v_first;
@@ -4057,6 +4083,7 @@ struct llama_context_params common_context_params_to_llama(const gpt_params & pa
     cparams.type_k = kv_cache_type_from_str(params.cache_type_k);
     cparams.type_v = kv_cache_type_from_str(params.cache_type_v);
     cparams.type_reduce = ggml_type_from_str(params.reduce_type);
+    cparams.type_graph_attn = ggml_type_from_str(params.graph_attn_precision);
     if (!cparams.flash_attn && ggml_is_quantized(cparams.type_v)) {
         throw std::runtime_error("Quantized V cache cannot be used without flash attention");
     }

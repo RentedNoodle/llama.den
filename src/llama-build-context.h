@@ -258,6 +258,25 @@ struct llm_build_context {
 
     ggml_cgraph * build_deepseek2();
 
+    ggml_tensor * build_deepseek2_tp_attention(
+            ggml_cgraph * gf, int il,
+            ggml_tensor * inpL,
+            ggml_tensor * KQ_mask, ggml_tensor * inp_pos,
+            ggml_tensor * rope_cache,
+            float kq_scale, float attn_factor_scaled,
+            bool use_f32_attn_precision,
+            bool is_lite);
+
+    ggml_tensor * build_deepseek2_layer_attention(
+            ggml_cgraph * gf, int il,
+            ggml_tensor * inpL,
+            ggml_tensor * KQ_mask, ggml_tensor * inp_pos,
+            ggml_tensor * rope_cache,
+            float kq_scale, float attn_factor_scaled,
+            bool use_f32_attn_precision,
+            bool is_lite,
+            bool pp_opt);
+
     ggml_cgraph * build_glm4_moe();
 
     ggml_cgraph * build_bitnet();
@@ -448,7 +467,7 @@ llm_expert_gating_func_type   gating_op,
     static ggml_tensor * build_output(llama_context & lctx, ggml_context * ctx, ggml_tensor * cur, ggml_tensor * output, const llm_build_cb & cb);
 
     static ggml_tensor * build_output(llama_context & lctx, ggml_context * ctx, ggml_tensor * cur,
-            ggml_tensor * output, ggml_tensor * output_norm, const llm_build_cb & cb);
+            ggml_tensor * output, ggml_tensor * output_norm, const llm_build_cb & cb, bool add_normed_name = true);
 
     static ggml_tensor * do_split_norm(ggml_context * ctx, ggml_tensor * cur, ggml_tensor * the_norm, const llama_hparams & hparams,
         const llm_build_cb & cb, int id, int il_cb, bool is_norm);

@@ -1,4 +1,5 @@
 #include "server-context.h"
+#include "server-chat.h"
 #include "server-common.h"
 #include "server-task.h"
 #include "server-queue.h"
@@ -481,6 +482,8 @@ bool server_context::load_model(const gpt_params& params_) {
         params_dft.cache_type_k = params_base.speculative.cache_type_k.empty() ? params_base.cache_type_k : params_base.speculative.cache_type_k;
         params_dft.cache_type_v = params_base.speculative.cache_type_v.empty() ? params_base.cache_type_v : params_base.speculative.cache_type_v;
         params_dft.flash_attn   = params_base.flash_attn;
+        params_dft.k_cache_hadamard = params_base.k_cache_hadamard;
+        params_dft.v_cache_hadamard = params_base.v_cache_hadamard;
         if (!params_base.speculative.params.empty()) {
             auto [argc, argv] = parse_command_line("llama-server " + params_base.speculative.params);
             if (!gpt_params_parse(argc, argv, params_dft)) {
@@ -1624,6 +1627,9 @@ bool server_context::launch_slot_with_task(server_slot& slot, server_task& task)
         slot.params.chat_parser_params.parse_tool_calls = json_value(data, "parse_tool_calls", false);
         if (data.contains("chat_parser")) {
             slot.params.chat_parser_params.parser.load(data.at("chat_parser").get<std::string>());
+        } else {
+            // Reset to default; otherwise a reused slot would apply the previous chat's PEG parser to non-chat outputs (e.g., /v1/completions).
+            slot.params.chat_parser_params.parser = defaults.chat_parser_params.parser;
         }
     }
     {
@@ -5028,7 +5034,7 @@ void server_context::update_slots() {
     // start populating the batch for this iteration
     common_batch_clear(batch);
 
-    // frist, add sampled tokens from any ongoing sequences
+    // first, add sampled tokens from any ongoing sequences
     add_sampled_tokens(); // Prepare batch for inference
 
     // process in chunks of params.n_batch
