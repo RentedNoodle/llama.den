@@ -22,6 +22,16 @@ __constant__ float g_personality_scale = 1.0f;
 // 20 uint32s per buffer (22 uint32s with DenScale-V coarse scales).
 // Compiler promotes array members to individual registers.
 // Buffer A holds current tile's data; buffer B holds next tile's prefetched data.
+// Tile execution policy — read from tile header bytes 144-145.
+// These are embedded by the converter during tile packing (gpu_tile_packer.py).
+// Byte 144 bit 7: null_skip — all zeros, skip OMMA entirely.
+// Byte 145 bits 0-1: execution budget — 0=full OMMA, 1=half-budget, 2=null-skip.
+struct alignas(4) TilePolicy {
+    bool  null_skip : 1;   // bit 7 of byte 144
+    uint8_t budget  : 2;   // bits 0-1 of byte 145 (0=full, 1=half, 2=null)
+    uint8_t _pad    : 5;
+};
+
 struct alignas(16) TileData {
     uint32_t a0[4];  // row0 lower K-half (q0[kg] for each mm)
     uint32_t a1[4];  // row1 lower K-half (q1[kg] for each mm)
@@ -31,6 +41,7 @@ struct alignas(16) TileData {
 #ifdef DENSCALE_V
     uint8_t  coarse[8]; // DenScale-V: 8 UE8M0 coarse scales (tile bytes 128-135)
 #endif
+    TilePolicy policy;  // Execution policy from tile header bytes 144-145
 };
 
 // Load one tile's A-fragments and scales into a register struct.
@@ -76,6 +87,9 @@ __forceinline__ __device__ void load_tile_data(
         }
     }
 #endif
+    // Load execution policy from tile header bytes 144-145
+    td.policy.null_skip = (tile0[144] & 0x80) != 0;
+    td.policy.budget    = tile0[145] & 0x03;
 }
 
 template <int NWARPS, bool FUSE_RMSNORM = false, bool INPUT_IS_E2M1 = false, bool THERMAL_MEMORY = false>
@@ -309,6 +323,10 @@ __global__ void den_gemv_mxf4nvf4_kernel(
         // NOTE: OMMA returns full K=64 sum per lane with the corrected
         // A-fragment K-half interleave. No shuffle-reduce needed (E012 fixed).
 
+        // ---- TILE EXECUTION POLICY ---
+        // Skip accumulation for null-skip tiles (converter-set bit 7 of byte 144)
+        if (!bufA.policy.null_skip) {
+
         // ---- ACCUMULATE: per-tile norm + total ----
         if (kg == 0) {
             float n0 = 1.0f, n1 = 1.0f;
@@ -319,6 +337,7 @@ __global__ void den_gemv_mxf4nvf4_kernel(
                     n0 = tile_norms[row0 * kt_per_row + kt];
                     n1 = tile_norms[row1 * kt_per_row + kt];
                 }
+        }
             }
             total0 += acc0 * n0; total1 += acc1 * n0;
             total2 += acc2 * n1; total3 += acc3 * n1;
