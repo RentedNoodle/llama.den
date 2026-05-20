@@ -16,21 +16,25 @@
 #define GAUSSIAN_MAX_SPLATS 256
 
 struct GaussianSplat {
-    float mu_q, mu_k;          // center
-    float log_sigma_sq_inv;    // -1/(2·σ²) — precomputed
-    float log_amplitude;       // log(amplitude)
+    float mu_q, mu_k;          // center (position in sequence space)
+    float log_sigma_sq_inv;    // -1/(2·σ²) — precomputed for speed (exp(x) = exp(ls * d²))
+    float log_amplitude;       // log(amplitude) — exp() in score computation
 };
 
+// 5 KB in constant memory (~1 cycle access per splat via __ldc())
 __constant__ GaussianSplat g_splats[GAUSSIAN_MAX_SPLATS];
 __constant__ int g_n_splats = 0;
 __constant__ int g_splat_attn_enabled = 0;
 
+// Host-side: upload splat parameters to constant memory
 __host__ void gaussian_splats_upload(const GaussianSplat * h_splats, int n_splats) {
     int n = min(n_splats, GAUSSIAN_MAX_SPLATS);
     cudaMemcpyToSymbol(g_splats, h_splats, n * sizeof(GaussianSplat));
     cudaMemcpyToSymbol(g_n_splats, &n, sizeof(int));
 }
 
+// Compute Gaussian splatting attention score for position (q_pos, k_pos).
+// O(1) per position pair — not O(N).
 __device__ __forceinline__ float gaussian_attn_score(
     int q_pos, int k_pos, int max_seq_len)
 {
@@ -38,9 +42,10 @@ __device__ __forceinline__ float gaussian_attn_score(
 
     float score = 0.0f;
     for (int i = 0; i < g_n_splats; i++) {
-        GaussianSplat s = g_splats[i];
+        GaussianSplat s = g_splats[i];  // __ldc() — ~1 cycle from constant cache
         float dq = (float)(q_pos) - s.mu_q;
         float dk = (float)(k_pos) - s.mu_k;
+        // exp(ls * (dq² + dk²)) where ls = -1/(2*σ²)
         float dist_sq = dq * dq + dk * dk;
         float g = __expf(s.log_sigma_sq_inv * dist_sq);
         score += __expf(s.log_amplitude) * g;
@@ -48,6 +53,7 @@ __device__ __forceinline__ float gaussian_attn_score(
     return score;
 }
 
+// Enable Gaussian splatting attention (call once at model load)
 __host__ void gaussian_splats_enable(bool enabled) {
     int val = enabled ? 1 : 0;
     cudaMemcpyToSymbol(g_splat_attn_enabled, &val, sizeof(int));
