@@ -97,9 +97,9 @@ static inline std::optional<CatsTree> cats_build_tree(
         tree.candidates.push_back({tok, -1, prob, 0});
     }
 
-    LOG("CATS tree: %d candidates at depth 0 (fan_out=%d, max_depth=%d)\n",
+    fprintf(stderr, "CATS tree: %d candidates at depth 0 (fan_out=%d, max_depth=%d)\n",
         (int)top_k.size(), fan_out, max_depth);
-    return tree;
+    return std::optional<CatsTree>(std::move(tree));
 }
 
 // ── Tree Batch Builder ───────────────────────────────────────────────────
@@ -191,4 +191,58 @@ static inline CatsVerifyResult cats_verify_fallback(const CatsTree & tree) {
     result.accepted_tokens.push_back(tree.candidates[best].token);
     result.n_accepted = 1;
     return result;
+}
+
+// ── Chain Speculation Verification ──────────────────────────────────────
+// Self-speculative verification: batch-decode a chain of K draft tokens
+// [t0, t1, ..., t_{K-1}] from logits, then verify each successive draft
+// token against the model's conditional posterior.
+//
+// Acceptance criterion:
+//   t0 accepted unconditionally (greedy choice from original logits)
+//   t_{i+1} accepted iff model's argmax P(·|context + [t0..ti]) == t_{i+1}
+//
+// This is the standard speculative decoding acceptance rule applied to
+// self-drafted tokens. The chain comes from the model's own top-K at the
+// current position, which serves as a heuristic approximation of the
+// conditional distribution after each successive token.
+//
+// Returns: number of accepted tokens (always >= 1).
+static inline int cats_verify_chain(
+    const float * const *  batch_logits,  // [n_draft] ptrs to per-position logits from decode
+    const std::vector<llama_token> & draft_tokens,
+    int                    n_vocab,
+    std::vector<llama_token> & accepted)
+{
+    accepted.clear();
+    if (draft_tokens.empty()) return 0;
+
+    // First token always accepted (greedy choice from original logits)
+    accepted.push_back(draft_tokens[0]);
+    if (draft_tokens.size() < 2) return 1;
+
+    // Verify each subsequent token against model's conditional prediction
+    for (int i = 0; i < (int)draft_tokens.size() - 1; i++) {
+        if (!batch_logits[i]) break;
+        const float * logits = batch_logits[i];
+
+        // Argmax
+        int argmax = 0;
+        float max_val = logits[0];
+        for (int j = 1; j < n_vocab; j++) {
+            if (logits[j] > max_val) {
+                max_val = logits[j];
+                argmax = j;
+            }
+        }
+
+        // Model predicts draft_tokens[i+1] after prefix [t0..ti]?
+        if (argmax == draft_tokens[i + 1]) {
+            accepted.push_back(draft_tokens[i + 1]);
+        } else {
+            break;  // first mismatch stops the prefix
+        }
+    }
+
+    return (int)accepted.size();
 }
