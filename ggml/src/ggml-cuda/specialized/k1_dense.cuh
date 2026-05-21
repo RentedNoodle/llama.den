@@ -11,11 +11,13 @@
 #pragma once
 #include "../common.cuh"
 #include "../den_omma_shared.cuh"  // OMMA macro, LUT, quant helpers only (not full GEMV)
+#include "../cp-async.cuh"         // cp.async tile prefetch for double-buffer
 
 namespace den { namespace k1_dense {
 
 static constexpr int TILE_K = 256;
 static constexpr int BYTES_PER_TILE = 160;
+static constexpr int S_MAX_WARPS = 8; // Max warps per CTA (256 threads / 32)
 
 // ───────────────────────────────────────────────────────────────────
 // Variant 1: stream_k_decode — M = 1 single-token decode
@@ -56,11 +58,54 @@ static __global__ void stream_k_decode_nvfp4(
     float total2 = 0.0f, total3 = 0.0f;
     float rms_sum_sq = 0.0f;
 
+    // ── Shared memory tile buffer: double-buffered cp.async prefetch ──
+    // Per-warp double-buffer: S_MAX_WARPS x 2 ping-pong slots x 2 rows x BYTES_PER_TILE
+    __shared__ __align__(16) uint8_t s_tile[S_MAX_WARPS][2][2][BYTES_PER_TILE];
+
+    int ping = 0;
+    const int sw = warp_id;  // shared-memory warp slot
+
+    // ── Prime: prefetch K-tile 0 into ping buffer ─────────────────────
+    // 10 cp.async chunks per tile (16 B each = 160 B total)
+    {
+        const uint8_t* t0 = w + (size_t)row0 * row_stride;
+        const uint8_t* t1 = w + (size_t)row1 * row_stride;
+        if (lane < 10) {
+            cp_async_cg_16<0>(
+                (unsigned)__cvta_generic_to_shared(&s_tile[sw][0][0][lane * 16]),
+                t0 + lane * 16);
+        }
+        if (lane >= 10 && lane < 20) {
+            cp_async_cg_16<0>(
+                (unsigned)__cvta_generic_to_shared(&s_tile[sw][0][1][(lane - 10) * 16]),
+                t1 + (lane - 10) * 16);
+        }
+        cp_async_wait_all();
+        __syncwarp();
+    }
+
     for (int kt = 0; kt < kt_per_row; kt++) {
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
 
-        const uint8_t* tile0 = w + (size_t)row0 * row_stride + kt * BYTES_PER_TILE;
-        const uint8_t* tile1 = w + (size_t)row1 * row_stride + kt * BYTES_PER_TILE;
+        // ── Prefetch next K-tile into !ping buffer (overlaps with OMMA) ──
+        if (kt + 1 < kt_per_row) {
+            const uint8_t* t0n = w + (size_t)row0 * row_stride + (kt + 1) * BYTES_PER_TILE;
+            const uint8_t* t1n = w + (size_t)row1 * row_stride + (kt + 1) * BYTES_PER_TILE;
+            if (lane < 10) {
+                cp_async_cg_16<0>(
+                    (unsigned)__cvta_generic_to_shared(&s_tile[sw][!ping][0][lane * 16]),
+                    t0n + lane * 16);
+            }
+            if (lane >= 10 && lane < 20) {
+                cp_async_cg_16<0>(
+                    (unsigned)__cvta_generic_to_shared(&s_tile[sw][!ping][1][(lane - 10) * 16]),
+                    t1n + (lane - 10) * 16);
+            }
+        }
+
+        // ── OMMA on current tile (already in SMEM via ping buffer) ────
+        const uint8_t* tile0 = &s_tile[sw][ping][0][0];
+        const uint8_t* tile1 = &s_tile[sw][ping][1][0];
 
         for (int mm = 0; mm < 4; mm++) {
             const uint32_t* q0 = (const uint32_t*)(tile0 + 16 + mm * 32);
@@ -114,6 +159,13 @@ static __global__ void stream_k_decode_nvfp4(
                 sfa, sfb_packed);
             acc0 = d0; acc1 = d1; acc2 = d2; acc3 = d3;
         }
+
+        // ── Wait for prefetch completion & flip buffer ────────────────
+        if (kt + 1 < kt_per_row) {
+            cp_async_wait_all();
+            __syncwarp();
+        }
+        ping = !ping;
 
         // Apply per-tile norm
         if (kg == 0) {
@@ -571,7 +623,7 @@ inline void launch_dense_adaptive(
             (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms, fused_rmsnorm, rms_eps);
     } else {
         dim3 grid(grid_n_blocks, (M + 7) / 8);
-        stream_k_decode_nvfp4<<<grid, nwarps * 32, 99 * 1024, stream>>>(
+        stream_k_decode_nvfp4<<<grid, nwarps * 32, 99 * 1024 - S_MAX_WARPS * 2 * 2 * BYTES_PER_TILE, stream>>>(
             (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms, fused_rmsnorm, rms_eps);
     }
     CUDA_CHECK(cudaGetLastError());
