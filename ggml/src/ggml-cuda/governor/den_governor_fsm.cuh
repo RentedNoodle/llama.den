@@ -4,6 +4,7 @@
 // and G4 AdaptiveTuner into the 13-state FSM.
 #pragma once
 #include <cstdint>
+#include <cuda_runtime.h>
 #include "../den_compute_path_select.cuh"
 #include "../compute_market.cuh"
 #include "den_workload_classifier.cuh"
@@ -12,6 +13,41 @@
 #include "den_adaptive_tuner.cuh"
 
 namespace den { namespace governor {
+
+// ── VRAM Pressure Level (cascading fallback) ─────────────────────────────────
+// Tracks GPU memory pressure and drives graceful consumer eviction.
+// Modeled after turboquant's VRAM-fit auto-selector: degrade gracefully
+// rather than crash when multiple .den mmaps contend for 16 GB.
+typedef enum {
+    VRAM_OK = 0,           // >4 GB free — all consumers allowed
+    VRAM_WARN = 1,         // 2-4 GB free — restrict heavy consumers
+    VRAM_DANGER = 2,       // 1-2 GB free — only critical consumers
+    VRAM_CRITICAL = 3,     // <1 GB free — all consumers OFFLINE
+} vram_pressure_level_t;
+
+inline const char* vram_pressure_name(vram_pressure_level_t p) {
+    switch (p) {
+        case VRAM_OK:       return "VRAM_OK";
+        case VRAM_WARN:     return "VRAM_WARN";
+        case VRAM_DANGER:   return "VRAM_DANGER";
+        case VRAM_CRITICAL: return "VRAM_CRITICAL";
+        default:            return "VRAM_UNKNOWN";
+    }
+}
+
+// ── Consumer eviction flags ─────────────────────────────────────────────────
+// Each consumer group can be independently disabled under VRAM pressure.
+// The consumer_eviction_mask is a bitmask; bit positions follow:
+#define CONSUMER_TTS_ENABLED    (1u << 0)   // ~864 MB
+#define CONSUMER_ASR_ENABLED    (1u << 1)   // ~984 MB
+#define CONSUMER_OCR_ENABLED    (1u << 2)   // ~512 MB
+#define CONSUMER_DRAFT_ENABLED  (1u << 3)   // speculative draft ~1.2 GB
+#define CONSUMER_HTREE_ENABLED  (1u << 4)   // hyperbolic tree (L2 ~256 MB)
+#define CONSUMER_SPLAT_ENABLED  (1u << 5)   // splat pool (~384 MB)
+// All consumers enabled mask
+#define CONSUMER_ALL_ENABLED    (CONSUMER_TTS_ENABLED | CONSUMER_ASR_ENABLED | \
+                                 CONSUMER_OCR_ENABLED | CONSUMER_DRAFT_ENABLED | \
+                                 CONSUMER_HTREE_ENABLED | CONSUMER_SPLAT_ENABLED)
 
 enum pressure_level_t : uint8_t {
     PRESSURE_NONE = 0xFF,
@@ -134,6 +170,10 @@ struct GovernorContext {
     float*           consumer_local_state;   // mapped memory, 70 SMs * state budget
     float*           consumer_global_state;  // shared across all SMs
 
+    // ── Cascading VRAM fallback ──────────────────────────────────────────
+    vram_pressure_level_t vram_pressure;       // latest VRAM pressure level
+    uint32_t               consumer_eviction_mask; // bitmask of enabled consumers
+
     // ── Governor G1-G4: Dynamic Heterogeneous Scheduler ────────────────
     WorkloadClassifier   classifier;
     ProBalanceAllocator  allocator;
@@ -229,6 +269,10 @@ __host__ inline void governor_init(GovernorContext* ctx) {
     ctx->vram_free_prev = 0.0f;
     ctx->vram_pressure_flag = 0;
 
+    // Cascading VRAM fallback initialization
+    ctx->vram_pressure = VRAM_OK;
+    ctx->consumer_eviction_mask = CONSUMER_ALL_ENABLED;
+
     // Phi measurement initialization
     ctx->phi_value = 0.0f;
     ctx->phi_coherence = 0.0f;
@@ -248,6 +292,71 @@ __host__ inline void governor_init(GovernorContext* ctx) {
     memset(ctx->vram_slope_history, 0, sizeof(ctx->vram_slope_history));
 }
 
+// ── update_vram_pressure ──────────────────────────────────────────────────────────
+// Query CUDA runtime for current VRAM free/total, update GovernorContext.
+// Sets vram_pressure level and vram_free_bytes/vram_total_bytes.
+__host__ inline void update_vram_pressure(GovernorContext* ctx) {
+    size_t free_bytes, total_bytes;
+    cudaError_t err = cudaMemGetInfo(&free_bytes, &total_bytes);
+    if (err != cudaSuccess) {
+        return;
+    }
+    ctx->vram_free_bytes = free_bytes;
+    ctx->vram_total_bytes = total_bytes;
+    float free_gb = (float)free_bytes / (1024.0f * 1024.0f * 1024.0f);
+
+    vram_pressure_level_t prev = ctx->vram_pressure;
+    if (free_gb > 4.0f)       ctx->vram_pressure = VRAM_OK;
+    else if (free_gb > 2.0f)  ctx->vram_pressure = VRAM_WARN;
+    else if (free_gb > 1.0f)  ctx->vram_pressure = VRAM_DANGER;
+    else                       ctx->vram_pressure = VRAM_CRITICAL;
+
+    if (prev != ctx->vram_pressure) {
+        fprintf(stderr, "[VRAM] Pressure transition: %s -> %s (%.2f GB free of %.1f GB)\n",
+                vram_pressure_name(prev), vram_pressure_name(ctx->vram_pressure),
+                free_gb, (float)total_bytes / (1024.0f * 1024.0f * 1024.0f));
+    }
+}
+
+// ── cascade_consumer_eviction ───────────────────────────────────────────────────────
+// Apply cascading eviction policy based on current VRAM pressure level.
+// Consumers are disabled in priority order as pressure increases, and
+// re-enabled in reverse priority order when pressure subsides.
+//
+// Eviction cascade:
+//   VRAM_OK       -> all consumers enabled
+//   VRAM_WARN     -> all consumers enabled (restrict heavy: advisory only)
+//   VRAM_DANGER   -> evict TTS, ASR (~1,848 MB freed)
+//   VRAM_CRITICAL -> evict OCR, DRAFT, HTREE, SPLAT (~2,352 MB freed)
+__host__ inline void cascade_consumer_eviction(GovernorContext* ctx) {
+    uint32_t new_mask;
+    switch (ctx->vram_pressure) {
+        case VRAM_OK:
+        case VRAM_WARN:
+            new_mask = CONSUMER_ALL_ENABLED;
+            break;
+        case VRAM_DANGER:
+            new_mask = CONSUMER_ALL_ENABLED
+                     & ~CONSUMER_TTS_ENABLED
+                     & ~CONSUMER_ASR_ENABLED;
+            break;
+        case VRAM_CRITICAL:
+            new_mask = 0;  // all consumers OFFLINE
+            break;
+        default:
+            new_mask = CONSUMER_ALL_ENABLED;
+            break;
+    }
+
+    if (new_mask != ctx->consumer_eviction_mask) {
+        uint32_t disabled = ctx->consumer_eviction_mask & ~new_mask;
+        uint32_t enabled  = new_mask & ~ctx->consumer_eviction_mask;
+        ctx->consumer_eviction_mask = new_mask;
+        fprintf(stderr, "[VRAM] Cascade eviction: level=%s mask=0x%04x disabled=0x%04x enabled=0x%04x\n",
+                vram_pressure_name(ctx->vram_pressure), new_mask, disabled, enabled);
+    }
+}
+
 // ── governor_tick ──────────────────────────────────────────────────────────
 // Run the full G1-G4 pipeline at a state transition or OMMA wave boundary.
 //
@@ -265,6 +374,10 @@ __host__ inline void governor_tick(
     float l2_hit_rate,
     float primary_hw_util
 ) {
+    // ── VRAM pressure check (always first ── cascading fallback) ─────
+    update_vram_pressure(ctx);
+    cascade_consumer_eviction(ctx);
+
     // 1. CLASSIFY
     WorkloadClass wc = ctx->classifier.classify(
         omma_util, mem_bw_util, rt_queries_per_omma, l2_hit_rate);

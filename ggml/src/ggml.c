@@ -22901,6 +22901,8 @@ static void ggml_compute_forward_delta_net_f32(
 
     float * v_new_buf = (float *) malloc(head_dim * sizeof(float));
     GGML_ASSERT(v_new_buf);
+    float * out_val_buf = (float *) malloc(head_dim * sizeof(float));
+    GGML_ASSERT(out_val_buf);
 
     for (int64_t h_idx = h_start; h_idx < h_end; ++h_idx) {
         const int64_t batch_idx = h_idx / n_heads;
@@ -22949,6 +22951,7 @@ static void ggml_compute_forward_delta_net_f32(
 
             float * out_t = out_data + out_head_offset + t * out_token_stride;
 
+            // READ + DELTA: compute v_prime, out_val, v_new
             for (int64_t row = 0; row < head_dim; ++row) {
                 float v_prime = 0.0f;
                 float out_val = 0.0f;
@@ -22964,9 +22967,10 @@ static void ggml_compute_forward_delta_net_f32(
 
                 const float v_new = v_t[row] * beta_val - v_prime * beta_val * decay * k_norm_inv;
                 v_new_buf[row] = v_new;
-                out_t[row] = out_val * decay * q_norm_inv * scale + v_new * attn_score;
+                out_val_buf[row] = out_val;
             }
 
+            // UPDATE state BEFORE output (correct 5-step: DECAY->READ->DELTA->UPDATE->OUTPUT)
             for (int64_t col = 0; col < head_dim; ++col) {
                 const float k_col = k_t[col] * k_norm_inv;
                 for (int64_t row = 0; row < head_dim; ++row) {
@@ -22974,6 +22978,11 @@ static void ggml_compute_forward_delta_net_f32(
                     s = decay * s + v_new_buf[row] * k_col;
                     state[row + col * head_dim] = fminf(fmaxf(s, -1e6f), 1e6f);
                 }
+            }
+
+            // OUTPUT using OLD state values (out_val_buf) and delta (v_new_buf)
+            for (int64_t row = 0; row < head_dim; ++row) {
+                out_t[row] = out_val_buf[row] * decay * q_norm_inv * scale + v_new_buf[row] * attn_score;
             }
 
             if (saved_steps && t + 1 < n_tokens) {
@@ -22984,6 +22993,7 @@ static void ggml_compute_forward_delta_net_f32(
     }
 
     free(v_new_buf);
+    free(out_val_buf);
 }
 
 static void ggml_compute_forward_delta_net(

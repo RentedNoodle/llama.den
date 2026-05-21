@@ -2455,7 +2455,8 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
         if "linear_attn.norm" in name:
             name = name.replace("linear_attn.norm", "ssm_norm")
             name = name.replace("layers.", "blk.")
-            yield (name, data_torch)
+            # Gemma-style RMSNorm: effective_weight = 1.0 + stored_weight
+            yield (name, data_torch + 1.0)
             return
 
         for hf_suffix, gguf_suffix in self._ssm_tensor_map:
@@ -2464,6 +2465,9 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
                 break
 
         name = name.replace("layers.", "blk.")
+        # Gemma-style RMSNorm: effective_weight = 1.0 + stored_weight
+        if name.endswith("_norm.weight"):
+            data_torch = data_torch + 1.0
         yield (name, data_torch)
 
 
@@ -2605,7 +2609,8 @@ class Qwen3_5Model(Qwen2Model):
             name = name.replace("model.language_model.", "")
             name = name.replace("linear_attn.norm", "ssm_norm")
             name = name.replace("layers.", "blk.")
-            return [(name, data_torch)]
+            # Gemma-style RMSNorm: effective_weight = 1.0 + stored_weight
+            return [(name, data_torch + 1.0)]
         # Format: model.language_model.layers.{id}.{component}.{weight_name}.weight
         name = name.replace("model.language_model.", "")
         name = name.replace("self_attn.", "")
@@ -2618,6 +2623,9 @@ class Qwen3_5Model(Qwen2Model):
                 break
         # Convert layers.{id} to blk.{id}
         name = name.replace("layers.", "blk.")
+        # Gemma-style RMSNorm: effective_weight = 1.0 + stored_weight
+        if name.endswith("_norm.weight"):
+            data_torch = data_torch + 1.0
         return [(name, data_torch)]
 
 
