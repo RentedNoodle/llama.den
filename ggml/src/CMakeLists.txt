@@ -408,6 +408,10 @@ if (GGML_CUDA)
             add_compile_definitions(DENSCALE_V)
         endif()
 
+        # Wavefront tile scheduler + register-level tile broadcast (Project Den optimizations)
+        add_compile_definitions(DEN_USE_WAVEFRONT_SCHEDULER)
+        add_compile_definitions(DEN_USE_REG_BROADCAST)
+
         # Technique #14: Constant Memory Scale Table. Pre-computes the 256-entry
         # UE4M3 byte decode table in __constant__ (1 KB of 64 KB). When enabled,
         # replaces float FMA sfa×sfb product with ~2-cycle constant cache lookup.

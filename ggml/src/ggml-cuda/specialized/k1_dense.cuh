@@ -1,10 +1,15 @@
-// k1_dense.cuh — K1-Dense Adaptive Kernel Family
+// k1_dense.cuh — K1-Dense Adaptive Kernel Family (Governor-routed)
 // GB203-300-A1 SM120 · CUDA 12.8 · NVFP4 OMMA.SF.16864 PRIMARY
 //
-// Three kernel variants selected by M dimension:
+// Four kernel variants selected by M dimension + Governor workload class:
 //   stream_k_decode   — M = 1 (single token decode, 1 CTA, 8 KB SMEM)
-//   warp_gemv_small   — 2 ≤ M ≤ 32 (batched decode, zero SMEM)
+//   warp_gemv_small   — 2 ≤ M ≤ 32 (batched decode, zero SMEM, mem-bound override)
+//   mid_batch_gemm    — 17 ≤ M ≤ 63 (mid-size, 64 thr/CTA, zero SMEM)
 //   prefill_tile_gemm — M ≥ 64 (prefill, 99 KB SMEM, 4-stage pipeline)
+//
+// The G1 WorkloadClassifier from den_governor_fsm.cuh biases selection:
+//   WL_MEMORY_BOUND → stream_k_decode (less SM pressure)
+//   Others         → mid_batch_gemm or prefill_tile_gemm as M dictates
 //
 // All reuse the OMMA_MXF4NVF4_4X macro from den_mxf4nvf4_gemv.cuh verbatim
 // and the ue4m3_code_to_byte[] LUT.
@@ -12,6 +17,8 @@
 #include "../common.cuh"
 #include "../den_omma_shared.cuh"  // OMMA macro, LUT, quant helpers only (not full GEMV)
 #include "../cp-async.cuh"         // cp.async tile prefetch for double-buffer
+#include "../compute_market.cuh"   // SM slot table, consumer dispatch
+#include "../specialized/reg_broadcast.cuh"  // Register-level tile broadcast (#30)
 
 namespace den { namespace k1_dense {
 
@@ -43,6 +50,17 @@ static __global__ void stream_k_decode_nvfp4(
     const int out_base = out_tile * 16;
     if (out_base >= N) return;
 
+#ifdef DEN_USE_REG_BROADCAST
+    // Lead-warp determination: only the lead warp in each broadcast group
+    // performs GDDR7 tile loads.  Other warps in the group receive tile data
+    // via register broadcast (__shfl_sync) from the lead.
+    // NOTE: With default REG_BROADCAST_GROUP_SIZE=4,  warps 0,4 are leads.
+    //       When group_size=1 (fallback), every warp is its own leader.
+    const bool _wr_lead = is_lead_warp(warp_id, get_broadcast_group_size(warp_id, out_tile));
+#else
+    constexpr bool _wr_lead = true;
+#endif
+
     const int r  = lane / 4;
     const int kg = lane & 3;
     const int row0 = out_base + r;
@@ -61,13 +79,14 @@ static __global__ void stream_k_decode_nvfp4(
     // ── Shared memory tile buffer: double-buffered cp.async prefetch ──
     // Per-warp double-buffer: S_MAX_WARPS x 2 ping-pong slots x 2 rows x BYTES_PER_TILE
     __shared__ __align__(16) uint8_t s_tile[S_MAX_WARPS][2][2][BYTES_PER_TILE];
+    static_assert(S_MAX_WARPS * 2 * 2 * BYTES_PER_TILE <= 99 * 1024, "Tile buffer exceeds 99 KB SMEM limit");
 
     int ping = 0;
     const int sw = warp_id;  // shared-memory warp slot
 
     // ── Prime: prefetch K-tile 0 into ping buffer ─────────────────────
     // 10 cp.async chunks per tile (16 B each = 160 B total)
-    {
+    if (_wr_lead) {
         const uint8_t* t0 = w + (size_t)row0 * row_stride;
         const uint8_t* t1 = w + (size_t)row1 * row_stride;
         if (lane < 10) {
@@ -81,25 +100,27 @@ static __global__ void stream_k_decode_nvfp4(
                 t1 + (lane - 10) * 16);
         }
         cp_async_wait_all();
-        __syncwarp();
     }
+    __syncwarp();
 
     for (int kt = 0; kt < kt_per_row; kt++) {
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
 
         // ── Prefetch next K-tile into !ping buffer (overlaps with OMMA) ──
         if (kt + 1 < kt_per_row) {
-            const uint8_t* t0n = w + (size_t)row0 * row_stride + (kt + 1) * BYTES_PER_TILE;
-            const uint8_t* t1n = w + (size_t)row1 * row_stride + (kt + 1) * BYTES_PER_TILE;
-            if (lane < 10) {
-                cp_async_cg_16<0>(
-                    (unsigned)__cvta_generic_to_shared(&s_tile[sw][!ping][0][lane * 16]),
-                    t0n + lane * 16);
-            }
-            if (lane >= 10 && lane < 20) {
-                cp_async_cg_16<0>(
-                    (unsigned)__cvta_generic_to_shared(&s_tile[sw][!ping][1][(lane - 10) * 16]),
-                    t1n + (lane - 10) * 16);
+            if (_wr_lead) {
+                const uint8_t* t0n = w + (size_t)row0 * row_stride + (kt + 1) * BYTES_PER_TILE;
+                const uint8_t* t1n = w + (size_t)row1 * row_stride + (kt + 1) * BYTES_PER_TILE;
+                if (lane < 10) {
+                    cp_async_cg_16<0>(
+                        (unsigned)__cvta_generic_to_shared(&s_tile[sw][!ping][0][lane * 16]),
+                        t0n + lane * 16);
+                }
+                if (lane >= 10 && lane < 20) {
+                    cp_async_cg_16<0>(
+                        (unsigned)__cvta_generic_to_shared(&s_tile[sw][!ping][1][(lane - 10) * 16]),
+                        t1n + (lane - 10) * 16);
+                }
             }
         }
 
@@ -180,6 +201,9 @@ static __global__ void stream_k_decode_nvfp4(
             total0 += acc0 * n0; total1 += acc1 * n0;
             total2 += acc2 * n1; total3 += acc3 * n1;
         }
+
+        // ── Consumer dispatch on harvested cycles ─────────────────────
+        consumer_tick_boundary();
     }
 
     // ── RMSNorm output scaling (fused) ───────────────────────────────
@@ -202,6 +226,8 @@ static __global__ void stream_k_decode_nvfp4(
 // Variant 2: warp_gemv_small — 2 ≤ M ≤ 32 batched decode
 //   Each warp owns one row. Zero SMEM. Warp-shuffle reduction.
 //   Launch: dim3(32, ceil(M/8)) threads, grid = ceil(N/128) blocks
+//   NOTE: Active for memory-bound workloads (governor override) via
+//         launch_dense_adaptive. NOT the default for non-memory-bound M.
 // ───────────────────────────────────────────────────────────────────
 static __global__ void warp_gemv_small_m_nvfp4(
     const uint8_t* __restrict__ w,
@@ -219,8 +245,6 @@ static __global__ void warp_gemv_small_m_nvfp4(
     const int lane    = threadIdx.x & 31;
     if (row >= M) return;
 
-    // NOTE: This kernel is dead code (dispatch uses stream_k_decode for all M).
-    // Fixed out_tile for correctness if reactivated.
     const int nwarps  = blockDim.x / 32;
     const int out_tile = blockIdx.x * nwarps + warp_id;
     const int out_base = out_tile * 16;
@@ -307,6 +331,9 @@ static __global__ void warp_gemv_small_m_nvfp4(
             total0 += acc0 * n0; total1 += acc1 * n0;
             total2 += acc2 * n1; total3 += acc3 * n1;
         }
+
+        // ── Consumer dispatch on harvested cycles ─────────────────────
+        consumer_tick_boundary();
     }
 
     float rms_scale_f = 1.0f;
@@ -440,6 +467,9 @@ static __global__ void mid_batch_gemm_nvfp4(
                 total0 += acc0 * n0; total1 += acc1 * n0;
                 total2 += acc2 * n1; total3 += acc3 * n1;
             }
+
+            // ── Consumer dispatch on harvested cycles ─────────────────
+            consumer_tick_boundary();
         }
     }
 
@@ -575,6 +605,9 @@ static __global__ void prefill_tile_gemm_nvfp4(
                 total0 += acc0 * n0; total1 += acc1 * n0;
                 total2 += acc2 * n1; total3 += acc3 * n1;
             }
+
+            // ── Consumer dispatch on harvested cycles ─────────────────
+            consumer_tick_boundary();
         }
 
         // ── RMSNorm output scaling (fused) ───────────────────────────
@@ -595,8 +628,16 @@ static __global__ void prefill_tile_gemm_nvfp4(
 }
 
 // ───────────────────────────────────────────────────────────────────
-// Host launch — M-adaptive dispatch
+// Host launch — M-adaptive dispatch with Governor workload hints
 // ───────────────────────────────────────────────────────────────────
+// Four kernel variants selected by M (with workload_class override):
+//   stream_k_decode    — M = 1 (single token, 1 CTA, 8 KB SMEM)
+//   mid_batch_gemm     — 2 ≤ M ≤ 63 (one CTA/row, 64 threads, zero SMEM)
+//   prefill_tile_gemm  — M ≥ 64 (cooperative tile, 99 KB SMEM, 4-stage)
+//
+// workload_class is provided by the Governor FSM (G1 classifier) and
+// can override the M-based threshold when memory pressure is extreme
+// (forces stream_k_decode even for larger M to reduce SM contention).
 inline void launch_dense_adaptive(
     const void*  weights,
     const float* act,
@@ -606,25 +647,43 @@ inline void launch_dense_adaptive(
     const float* tile_norms = nullptr,
     int n_norms = 0,
     bool fused_rmsnorm = false,
-    float rms_eps = 1e-6f
+    float rms_eps = 1e-6f,
+    int workload_class = -1  // -1 = use M alone, 0=WL_COMPUTE_BOUND, 1=WL_MEMORY_BOUND, etc.
 ) {
     const int kt_per_row = K / 256;
     const int nwarps = 8;
-
-    // All M: stream_k_decode_nvfp4 (proven warp-cooperative design).
-    // blockIdx.y selects the activation/output row for batched operation.
     const int grid_n_blocks = (N + nwarps * 16 - 1) / (nwarps * 16);
+
+    // WL_MEMORY_BOUND (1) forces stream_k_decode for M < 64 to reduce SM contention
+    const bool memory_bound = (workload_class == 1);
+
     if (M == 1) {
+        // Single-token decode: stream_k_decode (proven, 8 KB SMEM)
         stream_k_decode_nvfp4<<<grid_n_blocks, nwarps * 32, 8 * 1024, stream>>>(
-            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms, fused_rmsnorm, rms_eps);
-    } else if (M <= 63) {
+            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row,
+            tile_norms, n_norms, fused_rmsnorm, rms_eps);
+    } else if (memory_bound && M < 64) {
+        // Under memory pressure: use stream_k_decode with concurrent M
+        // (fewer SMs occupied → more room for copy engine / texture)
         dim3 grid(grid_n_blocks, M);
         stream_k_decode_nvfp4<<<grid, nwarps * 32, 0, stream>>>(
-            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms, fused_rmsnorm, rms_eps);
+            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row,
+            tile_norms, n_norms, fused_rmsnorm, rms_eps);
+    } else if (M <= 63 || K < 256) {
+        // Mid-batch: one CTA per M row, 64 threads, zero SMEM
+        // (also used when K < 256 since prefill_tile_gemm requires K >= 256)
+        mid_batch_gemm_nvfp4<<<M, 64, 0, stream>>>(
+            (const uint8_t*)weights, act, dst, M, N, K, kt_per_row,
+            tile_norms, n_norms, fused_rmsnorm, rms_eps);
     } else {
-        dim3 grid(grid_n_blocks, (M + 7) / 8);
-        stream_k_decode_nvfp4<<<grid, nwarps * 32, 99 * 1024 - S_MAX_WARPS * 2 * 2 * BYTES_PER_TILE, stream>>>(
-            (const uint8_t*)weights, act, dst, N, K, M, kt_per_row, tile_norms, n_norms, fused_rmsnorm, rms_eps);
+        // Prefill: cooperative tile GEMM, 99 KB SMEM, 4-stage pipeline
+        const int grid_x = (N + 127) / 128;
+        const int grid_y = (M + 127) / 128;
+        dim3 tile_grid(grid_x, grid_y);
+        const int smem = 99 * 1024 - S_MAX_WARPS * 2 * 2 * BYTES_PER_TILE;
+        prefill_tile_gemm_nvfp4<<<tile_grid, nwarps * 32, smem, stream>>>(
+            (const uint8_t*)weights, act, dst, M, N, K, kt_per_row,
+            tile_norms, n_norms, fused_rmsnorm, rms_eps);
     }
     CUDA_CHECK(cudaGetLastError());
 }

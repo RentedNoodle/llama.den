@@ -13,6 +13,20 @@
 #include "specialized/reg_broadcast.cuh"        // __shfl_sync tile broadcast (#30)
 
 // ---------------------------------------------------------------------------
+// L2 tile affinity table for wavefront scheduler (persistent global memory)
+// ---------------------------------------------------------------------------
+// Tracks which GPC's L2 slice holds each tile across kernel launches.
+// The table is zero-initialized by the CUDA runtime and requires no explicit
+// init.  Encoding: 0 = no affinity, 1-6 = GPC 0-5.
+//
+// The table is updated by load_tiles_nvfp4_nvfp4 on first touch and consumed
+// by the wavefront two-pass dispatch in mul_mat_q_process_tile (mmq.cuh).
+#ifdef DEN_USE_WAVEFRONT_SCHEDULER
+#define DEN_L2_AFFINITY_TABLE_SIZE 65536
+__device__ int8_t _den_l2_affinity[DEN_L2_AFFINITY_TABLE_SIZE]; // zero-initialized = no affinity
+#endif // DEN_USE_WAVEFRONT_SCHEDULER
+
+// ---------------------------------------------------------------------------
 // Missing symbols our common.cuh doesn't define (upstream mma.cuh depends on them)
 // ---------------------------------------------------------------------------
 
@@ -309,20 +323,19 @@ static __device__ __forceinline__ void load_tiles_nvfp4_nvfp4(
         }
 
 #ifdef DEN_USE_WAVEFRONT_SCHEDULER
-        // Wavefront scheduler L2-locality recording hook.
-        // Records tile-to-GPC affinity for the TileLocalityMap in
-        // wavefront_scheduler.cuh.  The calling kernel should declare:
-        //
-        //   #define DEN_USE_WAVEFRONT_SCHEDULER 1
-        //   __shared__ TileLocalityMap _den_locality_map;
-        //   _den_locality_map.record_access(tile_id, (uintptr_t)x, blockIdx.x % 6);
-        //
-        // where tile_id = (i / mmq_y) * (iter_k / QK_NVFP4) + kbx.
+        // Record L2 slice affinity for this tile in the persistent global
+        // affinity table.  Only the first-touch GPC is recorded (subsequent
+        // accesses are no-ops).  Encoding: 0 = no affinity, 1-6 = GPC 0-5.
+        // The table is zero-initialized by the CUDA runtime so no explicit
+        // initialization is needed.
         {
             int gpc_id = blockIdx.x % 6;
             int tile_id = (i / mmq_y) * (iter_k / QK_NVFP4) + kbx;
-            (void)gpc_id;
-            (void)tile_id;
+            unsigned int perturb = static_cast<unsigned int>(reinterpret_cast<uintptr_t>(x) >> 12);
+            int idx = (tile_id ^ static_cast<int>(perturb)) & (DEN_L2_AFFINITY_TABLE_SIZE - 1);
+            if (_den_l2_affinity[idx] == 0) {
+                _den_l2_affinity[idx] = static_cast<int8_t>(gpc_id + 1);
+            }
         }
 #endif
     }
