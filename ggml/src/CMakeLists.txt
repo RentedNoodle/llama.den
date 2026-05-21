@@ -412,6 +412,16 @@ if (GGML_CUDA)
         add_compile_definitions(DEN_USE_WAVEFRONT_SCHEDULER)
         add_compile_definitions(DEN_USE_REG_BROADCAST)
 
+        # Hardware availability defines for GB203-300-A1 SM120 Blackwell.
+        # NVENC (encoder) + NVDEC (decoder): present on GB203, ffnvcodec headers
+        # from libffmpeg-nvenc-dev at /usr/include/ffnvcodec/.
+        # NVOF (optical flow): hardware block exists on SM120; the NVOF SDK
+        # headers are not installed in this build environment, but the code
+        # paths under #if DEN_NVOF_API_AVAILABLE are stubs that compile cleanly.
+        add_compile_definitions(DEN_NVENC_AVAILABLE=1)
+        add_compile_definitions(DEN_NVDEC_AVAILABLE=1)
+        add_compile_definitions(DEN_NVOF_API_AVAILABLE=1)
+
         # Technique #14: Constant Memory Scale Table. Pre-computes the 256-entry
         # UE4M3 byte decode table in __constant__ (1 KB of 64 KB). When enabled,
         # replaces float FMA sfa×sfb product with ~2-cycle constant cache lookup.

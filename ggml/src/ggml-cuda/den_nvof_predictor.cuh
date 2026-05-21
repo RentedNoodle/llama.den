@@ -41,12 +41,17 @@
 // ── NVOF API header (production path) ──────────────────────────────────────
 // Requires NVIDIA Optical Flow SDK headers installed at /usr/include/nvof/.
 // When absent, the hardware NVOF path compiles to a no-op stub.
-#if __has_include(<nvof/NvOFSDK.h>)
-    #include <nvof/NvOFSDK.h>
-    #define DEN_NVOF_API_AVAILABLE 1
-#else
-    #define DEN_NVOF_API_AVAILABLE 0
-    #pragma message("den_nvof_predictor.cuh: <nvof/NvOFSDK.h> not found — using software motion field only")
+// The CMakeLists.txt define (DEN_NVOF_API_AVAILABLE=1) takes precedence
+// when the SDK headers are missing but the NVOF hardware block exists
+// on GB203-300-A1 SM120 Blackwell.
+#ifndef DEN_NVOF_API_AVAILABLE
+    #if __has_include(<nvof/NvOFSDK.h>)
+        #include <nvof/NvOFSDK.h>
+        #define DEN_NVOF_API_AVAILABLE 1
+    #else
+        #define DEN_NVOF_API_AVAILABLE 0
+        #pragma message("den_nvof_predictor.cuh: <nvof/NvOFSDK.h> not found — using software motion field only")
+    #endif
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────

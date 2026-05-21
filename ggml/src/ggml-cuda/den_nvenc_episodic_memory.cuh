@@ -67,21 +67,27 @@
 // On the Den build system, ffnvcodec headers are at /usr/include/ffnvcodec/.
 
 // ── NVENC availability ──
-#if __has_include(<ffnvcodec/nvEncodeAPI.h>)
-    #include <ffnvcodec/nvEncodeAPI.h>
-    #define DEN_NVENC_AVAILABLE 1
-#else
-    #define DEN_NVENC_AVAILABLE 0
-    #pragma message("den_nvenc_episodic_memory.cuh: <ffnvcodec/nvEncodeAPI.h> not found — NVENC disabled, using uncompressed fallback")
+// Override via CMake -DDEN_NVENC_AVAILABLE=1 to force-enable even when
+// the SDK headers are absent (NVENC exists on GB203-300-A1 SM120 Blackwell).
+#ifndef DEN_NVENC_AVAILABLE
+    #if __has_include(<ffnvcodec/nvEncodeAPI.h>)
+        #include <ffnvcodec/nvEncodeAPI.h>
+        #define DEN_NVENC_AVAILABLE 1
+    #else
+        #define DEN_NVENC_AVAILABLE 0
+        #pragma message("den_nvenc_episodic_memory.cuh: <ffnvcodec/nvEncodeAPI.h> not found — NVENC disabled, using uncompressed fallback")
+    #endif
 #endif
 
 // ── NVDEC availability (dynlink loader includes nvcuvid + cuviddec) ──
-#if __has_include(<ffnvcodec/dynlink_loader.h>)
-    #include <ffnvcodec/dynlink_loader.h>
-    #define DEN_NVDEC_AVAILABLE 1
-#else
-    #define DEN_NVDEC_AVAILABLE 0
-    #pragma message("den_nvenc_episodic_memory.cuh: <ffnvcodec/dynlink_loader.h> not found — NVDEC disabled, using uncompressed fallback")
+#ifndef DEN_NVDEC_AVAILABLE
+    #if __has_include(<ffnvcodec/dynlink_loader.h>)
+        #include <ffnvcodec/dynlink_loader.h>
+        #define DEN_NVDEC_AVAILABLE 1
+    #else
+        #define DEN_NVDEC_AVAILABLE 0
+        #pragma message("den_nvenc_episodic_memory.cuh: <ffnvcodec/dynlink_loader.h> not found — NVDEC disabled, using uncompressed fallback")
+    #endif
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
