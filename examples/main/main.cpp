@@ -773,7 +773,9 @@ int main(int argc, char ** argv) {
 
                     // Batch: K tokens at [n_past, n_past+1, ..., n_past+K-1]
                     auto batch = llama_batch_get_one(draft.data(), n_draft, n_past, 0);
-                    for (int i = 0; i < n_draft; i++) batch.logits[i] = 1;
+                    // llama_batch_get_one initialises logits to NULL -- allocate the array
+                    std::vector<int8_t> batch_logits_flag(n_draft, 1);
+                    batch.logits = batch_logits_flag.data();
 
                     if (llama_decode(ctx, batch) == 0) {
                         // Collect per-position logits
