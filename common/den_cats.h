@@ -11,7 +11,6 @@
 // Gated by GovernorContext.cats_enabled (default: disabled).
 
 #include "llama.h"
-#include "log.h"
 #include <vector>
 #include <algorithm>
 #include <cmath>

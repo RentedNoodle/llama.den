@@ -11,7 +11,6 @@
 #pragma once
 #include <cstdint>
 #include <atomic>
-#include "den_type_contract.h"
 
 #pragma pack(push, 1)
 struct GovernorContext {
