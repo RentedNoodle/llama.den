@@ -66,9 +66,11 @@ extern __device__ float*           den_consumer_global_state;
 // Called at every tile boundary in inference kernels.
 // Zero cost when all slots are zero (branch predictor never misses).
 __device__ inline void consumer_tick_boundary() {
+    bool any_active = false;
     #pragma unroll
     for (int i = 0; i < MAX_CONSUMER_SLOTS; i++) {
         if (den_consumer_slots[i].consumer_id != 0) {
+            any_active = true;
             // Only lane 0 dispatches; consumer function manages its own parallelism
             if ((threadIdx.x & 31) == 0) {
                 den_consumer_fn_table[den_consumer_slots[i].consumer_id](
@@ -80,7 +82,10 @@ __device__ inline void consumer_tick_boundary() {
             }
         }
     }
-    __syncthreads(); // rejoin inference block
+    // Only barrier when consumers ran — zero-cost fast path with no consumers
+    if (any_active) {
+        __syncthreads();
+    }
 }
 
 // ── Host API ──────────────────────────────────────────────────────────
