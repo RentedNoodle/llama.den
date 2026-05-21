@@ -6,6 +6,13 @@
 #include "common.cuh"
 
 // ---------------------------------------------------------------------------
+// Optimization headers (specialized/ -- multi-kernel architecture, Phase 2+)
+// ---------------------------------------------------------------------------
+#include "specialized/wavefront_scheduler.cuh"  // L2-aware tile dispatch (#21)
+#include "specialized/async_double_buffer.cuh"  // Ping-pong tile double-buffer (#22)
+#include "specialized/reg_broadcast.cuh"        // __shfl_sync tile broadcast (#30)
+
+// ---------------------------------------------------------------------------
 // Missing symbols our common.cuh doesn't define (upstream mma.cuh depends on them)
 // ---------------------------------------------------------------------------
 
@@ -300,6 +307,24 @@ static __device__ __forceinline__ void load_tiles_nvfp4_nvfp4(
         for (int sg = 0; sg < 4; ++sg) {
             x_u32[64 + kbx * 4 + sg + row_base] = bxi->d4[sg];
         }
+
+#ifdef DEN_USE_WAVEFRONT_SCHEDULER
+        // Wavefront scheduler L2-locality recording hook.
+        // Records tile-to-GPC affinity for the TileLocalityMap in
+        // wavefront_scheduler.cuh.  The calling kernel should declare:
+        //
+        //   #define DEN_USE_WAVEFRONT_SCHEDULER 1
+        //   __shared__ TileLocalityMap _den_locality_map;
+        //   _den_locality_map.record_access(tile_id, (uintptr_t)x, blockIdx.x % 6);
+        //
+        // where tile_id = (i / mmq_y) * (iter_k / QK_NVFP4) + kbx.
+        {
+            int gpc_id = blockIdx.x % 6;
+            int tile_id = (i / mmq_y) * (iter_k / QK_NVFP4) + kbx;
+            (void)gpc_id;
+            (void)tile_id;
+        }
+#endif
     }
 
     if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0) {
@@ -320,6 +345,36 @@ static __device__ __forceinline__ void vec_dot_fp4_fp4_mma(
 
     static_assert(type == GGML_TYPE_MXFP4 || type == GGML_TYPE_NVFP4,
                   "vec_dot_fp4_fp4_mma: type must be MXFP4 or NVFP4");
+
+    // -----------------------------------------------------------------------
+    // TileDoubleBuffer prime-loop-drain pattern (next-pass adoption)
+    // -----------------------------------------------------------------------
+    // The TileDoubleBuffer in specialized/async_double_buffer.cuh provides a
+    // ping-pong register buffer that overlaps tile loads with OMMA execution,
+    // eliminating the shared-memory round-trip and __syncthreads() barrier:
+    //
+    //   // Prime:  load tile 0 directly into get_loading() (buf_b after init())
+    //   // Loop:   for tile 1..N-1: swap() -> OMMA on get_active()
+    //   //                             -> cp.async into get_loading()
+    //   // Drain:  swap() -> OMMA on get_active() (no cp.async after last)
+    //
+    // Currently, tiles are loaded into shared memory by load_tiles_nvfp4_nvfp4()
+    // and consumed here via load_ldmatrix / load_generic.  A future pass should
+    // migrate to TileDoubleBuffer, replacing the shared-memory round-trip with
+    // direct register-to-register OMMA:
+    //
+    //   TileDoubleBuffer db;
+    //   float buf_a[160/sizeof(float)];
+    //   float buf_b[160/sizeof(float)];
+    //   db.init(buf_a, buf_b);
+    //   // Prime: cp_async tile k=0 into db.get_loading()
+    //   // for kt = 1..N-1:
+    //   //   db.swap();
+    //   //   omma_double_buffered<40>(db, src_kt, sum, kt, N);
+    //   // Drain: db.swap(); OMMA on active buffer
+    //
+    // See async_double_buffer.cuh for the full api.
+    // -----------------------------------------------------------------------
 
     using namespace ggml_cuda_mma;
 
@@ -352,15 +407,39 @@ static __device__ __forceinline__ void vec_dot_fp4_fp4_mma(
     tile_A   A[ntx][nfrags];
     uint32_t scaleA[ntx][nfrags];
 
+#ifdef DEN_USE_REG_BROADCAST
+    // Determine if this warp is the designated GDDR7 loader for its group.
+    int warp_id = threadIdx.y;
+    bool lead = is_lead_warp(warp_id, get_broadcast_group_size(warp_id, k00));
+#else
+    constexpr bool lead = true;
+#endif
+
 #pragma unroll
     for (int n = 0; n < ntx; ++n) {
 #pragma unroll
         for (int frag = 0; frag < nfrags; ++frag) {
             const int k0 = k00 + frag * tile_A::J;
+#ifdef DEN_USE_REG_BROADCAST
+            if (lead) {
+#endif
             load_ldmatrix(A[n][frag],
                 x_qs + (i0 + n * tile_A::I) * stride + k0, stride);
             scaleA[n][frag] =
                 x_sc[(i0 + n * tile_A::I + tidx_A) * stride + k0 / tile_A::J];
+#ifdef DEN_USE_REG_BROADCAST
+            }
+            // Broadcast loaded tile registers from lane 0 to all lanes in warp.
+            broadcast_tile_register(
+                reinterpret_cast<float*>(A[n][frag].x),
+                reinterpret_cast<const float*>(A[n][frag].x),
+                tile_A::ne,         /* 4 registers per tile_A */
+                get_lead_lane());
+            // scaleA is a single uint32 per (n, frag) -- broadcast via shfl.
+            reinterpret_cast<float&>(scaleA[n][frag]) = shfl_tile_reg(
+                reinterpret_cast<const float&>(scaleA[n][frag]),
+                get_lead_lane());
+#endif
         }
     }
 
@@ -372,9 +451,23 @@ static __device__ __forceinline__ void vec_dot_fp4_fp4_mma(
 #pragma unroll
         for (int frag = 0; frag < nfrags; ++frag) {
             const int k0 = frag * tile_B::J;
+#ifdef DEN_USE_REG_BROADCAST
+            if (lead) {
+#endif
             load_generic(B[frag],
                 y_qs + j0 * MMQ_TILE_Y_K + k0, MMQ_TILE_Y_K);
             scaleB[frag] = y_sc[(j0 + tidx_B) * MMQ_TILE_Y_K + frag];
+#ifdef DEN_USE_REG_BROADCAST
+            }
+            broadcast_tile_register(
+                reinterpret_cast<float*>(B[frag].x),
+                reinterpret_cast<const float*>(B[frag].x),
+                tile_B::ne,         /* 2 registers per tile_B */
+                get_lead_lane());
+            reinterpret_cast<float&>(scaleB[frag]) = shfl_tile_reg(
+                reinterpret_cast<const float&>(scaleB[frag]),
+                get_lead_lane());
+#endif
         }
 
 #pragma unroll
