@@ -15,7 +15,6 @@
 // E010 fix: runtime zero register (not literal "r"(0))
 #define OMMA_MXF4NVF4_4X(d0,d1,d2,d3, a0,a1,a2,a3, b0,b1, c0,c1,c2,c3, sfa,sfb) \
     do { \
-        uint32_t zero_reg = 0; \
         asm volatile( \
             "mma.sync.aligned.kind::mxf4nvf4.block_scale.scale_vec::4X " \
             ".m16n8k64.row.col.f32.e2m1.e2m1.f32.ue4m3 " \

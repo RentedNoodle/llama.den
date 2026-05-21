@@ -71,7 +71,7 @@ struct RTBVH {
     //   - aabbs and bvh_nodes are allocated on the current CUDA device
     //   - The caller should free with cudaFree() when the BVH is no longer needed
     // -----------------------------------------------------------------------
-    void build(const float* tile_weights, int n_tiles_, int weights_per_tile) {
+    __host__ void build(const float* tile_weights, int n_tiles_, int weights_per_tile) {
         n_tiles = n_tiles_;
 
         // --- Step 1: compute per-tile AABBs on host ------------------------
@@ -205,11 +205,11 @@ private:
     // Returns:
     //   The index of the created node (for parent linking).
     // -----------------------------------------------------------------------
-    int build_bvh_hierarchical(std::vector<TileAABB>& aabbs,
-                               std::vector<int>& nodes_out,
-                               std::vector<int>& indices,
-                               int start, int end,
-                               int& node_count) const
+    __host__ int build_bvh_hierarchical(std::vector<TileAABB>& aabbs,
+                                        std::vector<int>& nodes_out,
+                                        std::vector<int>& indices,
+                                        int start, int end,
+                                        int& node_count) const
     {
         int n = end - start;
         int node_idx = node_count++;
@@ -274,7 +274,7 @@ private:
 //   nodes_out — pre-allocated output array for tree structure (size >= 2 * n_tiles)
 //   n_tiles   — number of tiles
 // ---------------------------------------------------------------------------
-inline void build_bvh_hierarchical(std::vector<TileAABB>& aabbs,
+inline __host__ void build_bvh_hierarchical(std::vector<TileAABB>& aabbs,
                                    int* nodes_out,
                                    int n_tiles)
 {
@@ -293,7 +293,7 @@ inline void build_bvh_hierarchical(std::vector<TileAABB>& aabbs,
         std::vector<TileAABB>& aabbs;
         int* nodes_out;
 
-        int build(std::vector<int>& indices, int start, int end, int& node_count) {
+        __host__ int build(std::vector<int>& indices, int start, int end, int& node_count) {
             int n = end - start;
             int node_idx = node_count++;
 

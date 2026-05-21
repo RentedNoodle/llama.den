@@ -1,6 +1,8 @@
 #ifndef DEN_RT_NULL_TEST_H
 #define DEN_RT_NULL_TEST_H
 
+#include <cstdint>
+
 // ============================================================================
 // den_rt_null_test.cuh — Occlusion Null-Test Accelerator (N1)
 //
@@ -64,7 +66,39 @@
 //   }
 // ============================================================================
 
-#include "den_rt_bvh.cuh"
+// NOTE: Device-compatible minimal subset of TileAABB/RTBVH defined inline.
+// Do NOT #include den_rt_bvh.cuh here — it pulls <vector> and <algorithm>
+// which are host-only headers that nvcc cannot parse in device compilation
+// passes. The full host-side definitions (with build()/cudaMalloc) live in
+// den_rt_bvh.cuh and must only be included from host-side translation units.
+
+// ── Device-compatible TileAABB (ABI-compatible with den_rt_bvh.cuh) ──────
+struct TileAABB {
+    float min_val[3];
+    float max_val[3];
+};
+
+// ── Device-compatible RTBVH (ABI-compatible with den_rt_bvh.cuh) ────────
+struct RTBVH {
+    TileAABB* aabbs;
+    int*      bvh_nodes;
+    int       n_tiles;
+
+    __device__ bool occlusion_query(int tile_idx) const {
+        if (tile_idx < 0 || tile_idx >= n_tiles) return false;
+        TileAABB box = aabbs[tile_idx];
+        return (box.min_val[0] < box.max_val[0]) ||
+               (box.min_val[1] < box.max_val[1]) ||
+               (box.min_val[2] < box.max_val[2]);
+    }
+
+    __device__ int prefetch_query(int current_tile_idx) const {
+        int next = current_tile_idx + 1;
+        if (next >= n_tiles) next = n_tiles - 1;
+        if (next < 0)        next = 0;
+        return next;
+    }
+};
 
 // ---------------------------------------------------------------------------
 // rt_null_test — Fire an occlusion ray through a single tile's AABB.
@@ -114,7 +148,7 @@ __device__ bool rt_null_test(const TileAABB& aabb)
     // NOTE: This implementation uses inline PTX for the occlusion query.
     // Consumers on platforms with OptiX may replace this with the
     // optixTrace wrapper; the semantics are identical.
-    bool occluded = false;
+    uint32_t occluded_flag = 0;
 
     asm volatile(
         "{\n"
@@ -141,11 +175,11 @@ __device__ bool rt_null_test(const TileAABB& aabb)
         "    // Store result\n"
         "    selp.u32       %0, 1, 0, __p;\n"
         "}\n"
-        : "=r"(occluded)
+        : "=r"(occluded_flag)
         : "l"(&aabb.min_val), "l"(&aabb.max_val)
         : "memory");
 
-    return occluded;
+    return occluded_flag != 0;
 }
 
 // ---------------------------------------------------------------------------

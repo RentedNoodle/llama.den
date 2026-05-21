@@ -20,11 +20,119 @@
 #include "../compute_market.cuh"   // SM slot table, consumer dispatch
 #include "../specialized/reg_broadcast.cuh"  // Register-level tile broadcast (#30)
 
+// ── Inline RT BVH types (device-compatible subset) ──────────────────
+// Full definitions in den_rt_bvh.cuh (host-side build functions with std::vector).
+// These minimal definitions are used here because including den_rt_bvh.cuh
+// would pull <vector> and <algorithm> into the device compilation pass,
+// causing CUDA nvcc to emit parse errors on host-only template code.
+// Only the device-visible fields and __device__ methods are included.
+// ABI-compatible with the full den_rt_bvh.cuh definition.
+struct TileAABB {
+    float min_val[3];
+    float max_val[3];
+};
+
+struct RTBVH {
+    TileAABB* aabbs;
+    int*      bvh_nodes;
+    int       n_tiles;
+
+    __device__ bool occlusion_query(int tile_idx) const {
+        if (tile_idx < 0 || tile_idx >= n_tiles) return false;
+        TileAABB box = aabbs[tile_idx];
+        return (box.min_val[0] < box.max_val[0]) ||
+               (box.min_val[1] < box.max_val[1]) ||
+               (box.min_val[2] < box.max_val[2]);
+    }
+
+    __device__ int prefetch_query(int current_tile_idx) const {
+        int next = current_tile_idx + 1;
+        if (next >= n_tiles) next = n_tiles - 1;
+        if (next < 0)        next = 0;
+        return next;
+    }
+};
+
+#if defined(DEN_USE_OPTIX)
+// Inline RT null-test for the OptiX occlusion path (brx.occlusion.sync).
+// When OptiX is not available, the software occlusion_query() fallback is used.
+static __device__ bool rt_null_test(const TileAABB& aabb) {
+    if (aabb.min_val[0] == aabb.max_val[0] &&
+        aabb.min_val[1] == aabb.max_val[1] &&
+        aabb.min_val[2] == aabb.max_val[2]) {
+        return false;
+    }
+    bool occluded = false;
+    asm volatile(
+        "{\n"
+        "    .reg .f32  ox,  oy,  oz;\n"
+        "    .reg .f32  dx,  dy,  dz;\n"
+        "    .reg .pred __p;\n"
+        "    ld.global.f32  ox, [%1 + 0x00];\n"
+        "    ld.global.f32  oy, [%1 + 0x04];\n"
+        "    ld.global.f32  oz, [%1 + 0x08];\n"
+        "    ld.global.f32  dx, [%2 + 0x00];\n"
+        "    sub.f32        dx, dx, ox;\n"
+        "    ld.global.f32  dy, [%2 + 0x04];\n"
+        "    sub.f32        dy, dy, oy;\n"
+        "    ld.global.f32  dz, [%2 + 0x08];\n"
+        "    sub.f32        dz, dz, oz;\n"
+        "    brx.occlusion.sync  __p, ox, oy, oz, dx, dy, dz;\n"
+        "    selp.u32       %0, 1, 0, __p;\n"
+        "}\n"
+        : "=r"(occluded)
+        : "l"(&aabb.min_val), "l"(&aabb.max_val)
+        : "memory");
+    return occluded;
+}
+#endif // DEN_USE_OPTIX
+
 namespace den { namespace k1_dense {
 
 static constexpr int TILE_K = 256;
 static constexpr int BYTES_PER_TILE = 160;
 static constexpr int S_MAX_WARPS = 8; // Max warps per CTA (256 threads / 32)
+
+// ── Null-tile detection via RT BVH / SFA header check ────────────────
+// Returns true if the tile contributes nothing and OMMA can be safely skipped.
+//
+// Three-tier priority:
+//   1. DEN_USE_OPTIX path — RT core occlusion ray via brx.occlusion.sync
+//   2. BVH software path  — occlusion_query() from den_rt_bvh.cuh
+//   3. SFA fallback       — tile header sfa[0..3] all zero → null tile
+//
+// Parameters:
+//   bvh       — RTBVH pointer (nullable; nullptr disables BVH paths)
+//   tile_idx  — linear tile index = row * kt_per_row + kt
+//   tile_data — pointer to the tile's first 16 bytes (sfa header in SMEM or global)
+//
+// Returns:
+//   true  — tile is null, skip OMMA
+//   false — tile has content, process normally
+// ───────────────────────────────────────────────────────────────────────
+static __device__ __forceinline__ bool den_tile_is_null(
+    const RTBVH* __restrict__ bvh,
+    int tile_idx,
+    const uint32_t* __restrict__ tile_header
+) {
+    // Priority 1 + 2: BVH-based occlusion query
+    if (bvh && tile_idx >= 0 && tile_idx < bvh->n_tiles) {
+#if defined(DEN_USE_OPTIX)
+        // RT core hardware path — fire occlusion ray through the AABB
+        TileAABB aabb = bvh->aabbs[tile_idx];
+        return !rt_null_test(aabb);
+#else
+        // Software fallback — check if AABB has volume (min < max)
+        return !bvh->occlusion_query(tile_idx);
+#endif
+    }
+    // Priority 3: SFA zero-check fallback (no BVH available)
+    // If all four UE4M3 scale factors are zero, the entire tile scales to zero
+    return (tile_header[0] == 0 &&
+            tile_header[1] == 0 &&
+            tile_header[2] == 0 &&
+            tile_header[3] == 0);
+}
 
 // ───────────────────────────────────────────────────────────────────
 // Variant 1: stream_k_decode — M = 1 single-token decode
@@ -32,7 +140,7 @@ static constexpr int S_MAX_WARPS = 8; // Max warps per CTA (256 threads / 32)
 //   Walks K dimension sequentially, accumulators in registers
 //   Sub-10μs per token on SM120
 // ───────────────────────────────────────────────────────────────────
-static __global__ void stream_k_decode_nvfp4(
+__global__ void stream_k_decode_nvfp4(
     const uint8_t* __restrict__ w,
     const float*   __restrict__ x,
     float*         __restrict__ y,
@@ -41,7 +149,9 @@ static __global__ void stream_k_decode_nvfp4(
     const float*   __restrict__ tile_norms,
     int n_norms,
     bool fused_rmsnorm = false,
-    float rms_eps = 1e-6f
+    float rms_eps = 1e-6f,
+    const RTBVH* __restrict__ bvh = nullptr,
+    unsigned long long*     __restrict__ rt_skipped = nullptr
 ) {
     const int warp_id = threadIdx.x / 32;
     const int lane    = threadIdx.x & 31;
@@ -128,58 +238,71 @@ static __global__ void stream_k_decode_nvfp4(
         const uint8_t* tile0 = &s_tile[sw][ping][0][0];
         const uint8_t* tile1 = &s_tile[sw][ping][1][0];
 
-        for (int mm = 0; mm < 4; mm++) {
-            const uint32_t* q0 = (const uint32_t*)(tile0 + 16 + mm * 32);
-            const uint32_t* q1 = (const uint32_t*)(tile1 + 16 + mm * 32);
-
-            uint32_t a0 = q0[kg];
-            uint32_t a2 = q0[4 + kg];
-            uint32_t a1 = q1[kg];
-            uint32_t a3 = q1[4 + kg];
-
-            // B-fragment: dynamic sfb quantization
-            int kb_lo = kt * 256 + mm * 64 + kg * 8;
-            int kb_hi = kt * 256 + mm * 64 + 32 + kg * 8;
-            float x_local[16];
-            float local_max = 0.0f;
-#pragma unroll
-            for (int i = 0; i < 8; i++) {
-                float v_lo = ((kb_lo + i) < K) ? x_row[kb_lo + i] : 0.0f;
-                float v_hi = ((kb_hi + i) < K) ? x_row[kb_hi + i] : 0.0f;
-                x_local[i]     = v_lo;
-                x_local[8 + i] = v_hi;
-                if (fused_rmsnorm) { rms_sum_sq += v_lo * v_lo; rms_sum_sq += v_hi * v_hi; }
-                float av_lo = fabsf(v_lo);
-                float av_hi = fabsf(v_hi);
-                if (av_lo > local_max) local_max = av_lo;
-                if (av_hi > local_max) local_max = av_hi;
-            }
-            float block_max = local_max;
-#pragma unroll
-            for (int mask = 1; mask <= 2; mask *= 2) {
-                float other = __shfl_xor_sync(0xffffffff, block_max, mask);
-                if (other > block_max) block_max = other;
-            }
-            float sfb_f = fmaxf(0.0625f, fminf(1.875f, block_max * 0.333333f));
-            float sfb_inv = 1.0f / sfb_f;
-            uint8_t sfb_code = quant_f32_ue4m3(sfb_f);
-            uint32_t sfb_packed = 0x01010101u * (uint32_t)ue4m3_code_to_byte[sfb_code];
-            uint32_t b0 = 0, b1 = 0;
-#pragma unroll
-            for (int i = 0; i < 8; i++) {
-                b0 |= ((uint32_t)quant_f32_e2m1(x_local[i] * sfb_inv) << (i * 4));
-                b1 |= ((uint32_t)quant_f32_e2m1(x_local[8 + i] * sfb_inv) << (i * 4));
-            }
-
-            uint32_t sfa = ((const uint32_t*)tile0)[mm];
-
-            float d0, d1, d2, d3;
-            OMMA_MXF4NVF4_4X(d0, d1, d2, d3,
-                a0, a1, a2, a3, b0, b1,
-                acc0, acc1, acc2, acc3,
-                sfa, sfb_packed);
-            acc0 = d0; acc1 = d1; acc2 = d2; acc3 = d3;
+        // ── Null-tile pruning: skip OMMA if both tiles contribute nothing ──
+        // Tiles are already in SMEM from the cp.async prefetch phase.
+        // The SFA zero-check reads from SMEM (free) — no wasted bandwidth.
+        if (den_tile_is_null(bvh, row0 * kt_per_row + kt, (const uint32_t*)tile0) &&
+            den_tile_is_null(bvh, row1 * kt_per_row + kt, (const uint32_t*)tile1))
+        {
+            if (rt_skipped && threadIdx.x == 0) atomicAdd(rt_skipped, 1ULL);
         }
+        else
+        {
+            // ── Both tiles have non-trivial data — run OMMA ──
+            for (int mm = 0; mm < 4; mm++) {
+                const uint32_t* q0 = (const uint32_t*)(tile0 + 16 + mm * 32);
+                const uint32_t* q1 = (const uint32_t*)(tile1 + 16 + mm * 32);
+
+                uint32_t a0 = q0[kg];
+                uint32_t a2 = q0[4 + kg];
+                uint32_t a1 = q1[kg];
+                uint32_t a3 = q1[4 + kg];
+
+                // B-fragment: dynamic sfb quantization
+                int kb_lo = kt * 256 + mm * 64 + kg * 8;
+                int kb_hi = kt * 256 + mm * 64 + 32 + kg * 8;
+                float x_local[16];
+                float local_max = 0.0f;
+        #pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    float v_lo = ((kb_lo + i) < K) ? x_row[kb_lo + i] : 0.0f;
+                    float v_hi = ((kb_hi + i) < K) ? x_row[kb_hi + i] : 0.0f;
+                    x_local[i]     = v_lo;
+                    x_local[8 + i] = v_hi;
+                    if (fused_rmsnorm) { rms_sum_sq += v_lo * v_lo; rms_sum_sq += v_hi * v_hi; }
+                    float av_lo = fabsf(v_lo);
+                    float av_hi = fabsf(v_hi);
+                    if (av_lo > local_max) local_max = av_lo;
+                    if (av_hi > local_max) local_max = av_hi;
+                }
+                float block_max = local_max;
+        #pragma unroll
+                for (int mask = 1; mask <= 2; mask *= 2) {
+                    float other = __shfl_xor_sync(0xffffffff, block_max, mask);
+                    if (other > block_max) block_max = other;
+                }
+                float sfb_f = fmaxf(0.0625f, fminf(1.875f, block_max * 0.333333f));
+                float sfb_inv = 1.0f / sfb_f;
+                uint8_t sfb_code = quant_f32_ue4m3(sfb_f);
+                uint32_t sfb_packed = 0x01010101u * (uint32_t)ue4m3_code_to_byte[sfb_code];
+                uint32_t b0 = 0, b1 = 0;
+        #pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    b0 |= ((uint32_t)quant_f32_e2m1(x_local[i] * sfb_inv) << (i * 4));
+                    b1 |= ((uint32_t)quant_f32_e2m1(x_local[8 + i] * sfb_inv) << (i * 4));
+                }
+
+                uint32_t sfa = ((const uint32_t*)tile0)[mm];
+
+                float d0, d1, d2, d3;
+                OMMA_MXF4NVF4_4X(d0, d1, d2, d3,
+                    a0, a1, a2, a3, b0, b1,
+                    acc0, acc1, acc2, acc3,
+                    sfa, sfb_packed);
+                acc0 = d0; acc1 = d1; acc2 = d2; acc3 = d3;
+            }
+
+        }  // end else (OMMA path)
 
         // ── Wait for prefetch completion & flip buffer ────────────────
         if (kt + 1 < kt_per_row) {
@@ -204,7 +327,7 @@ static __global__ void stream_k_decode_nvfp4(
 
         // ── Consumer dispatch on harvested cycles ─────────────────────
         consumer_tick_boundary();
-    }
+    }  // end for kt
 
     // ── RMSNorm output scaling (fused) ───────────────────────────────
     float rms_scale_f = 1.0f;
@@ -229,7 +352,7 @@ static __global__ void stream_k_decode_nvfp4(
 //   NOTE: Active for memory-bound workloads (governor override) via
 //         launch_dense_adaptive. NOT the default for non-memory-bound M.
 // ───────────────────────────────────────────────────────────────────
-static __global__ void warp_gemv_small_m_nvfp4(
+__global__ void warp_gemv_small_m_nvfp4(
     const uint8_t* __restrict__ w,
     const float*   __restrict__ x,    // [M, K] row-major
     float*         __restrict__ y,    // [M, N] row-major
@@ -238,7 +361,9 @@ static __global__ void warp_gemv_small_m_nvfp4(
     const float*   __restrict__ tile_norms,
     int n_norms,
     bool fused_rmsnorm = false,
-    float rms_eps = 1e-6f
+    float rms_eps = 1e-6f,
+    const RTBVH* __restrict__ bvh = nullptr,
+    unsigned long long* rt_skipped = nullptr
 ) {
     const int row = blockIdx.x * blockDim.y + threadIdx.y;
     const int warp_id = threadIdx.x / 32;
@@ -268,72 +393,85 @@ static __global__ void warp_gemv_small_m_nvfp4(
         const uint8_t* tile0 = w + (size_t)row0 * row_stride + kt * BYTES_PER_TILE;
         const uint8_t* tile1 = w + (size_t)row1 * row_stride + kt * BYTES_PER_TILE;
 
-        for (int mm = 0; mm < 4; mm++) {
-            const uint32_t* q0 = (const uint32_t*)(tile0 + 16 + mm * 32);
-            const uint32_t* q1 = (const uint32_t*)(tile1 + 16 + mm * 32);
-
-            uint32_t a0 = q0[kg];
-            uint32_t a2 = q0[4 + kg];
-            uint32_t a1 = q1[kg];
-            uint32_t a3 = q1[4 + kg];
-
-            int kb_lo = kt * 256 + mm * 64 + kg * 8;
-            int kb_hi = kt * 256 + mm * 64 + 32 + kg * 8;
-            float x_local[16];
-            float local_max = 0.0f;
-#pragma unroll
-            for (int i = 0; i < 8; i++) {
-                float v_lo = ((kb_lo + i) < K) ? x_row[kb_lo + i] : 0.0f;
-                float v_hi = ((kb_hi + i) < K) ? x_row[kb_hi + i] : 0.0f;
-                x_local[i]     = v_lo;
-                x_local[8 + i] = v_hi;
-                if (fused_rmsnorm) { rms_sum_sq += v_lo * v_lo; rms_sum_sq += v_hi * v_hi; }
-                float av_lo = fabsf(v_lo), av_hi = fabsf(v_hi);
-                if (av_lo > local_max) local_max = av_lo;
-                if (av_hi > local_max) local_max = av_hi;
+        // ── Null-tile pruning: skip OMMA if both tiles contribute nothing ──
+        if (den_tile_is_null(bvh, row0 * kt_per_row + kt, (const uint32_t*)tile0) &&
+            den_tile_is_null(bvh, row1 * kt_per_row + kt, (const uint32_t*)tile1))
+        {
+            if (rt_skipped && threadIdx.x == 0) atomicAdd(rt_skipped, 1ULL);
+            if (kg == 0) {
+                // ── Per-tile norm still applies (zero contribution × norm = 0) ──
+                // Nothing to accumulate — skip to next K-tile
             }
-            float block_max = local_max;
-#pragma unroll
-            for (int mask = 1; mask <= 2; mask *= 2) {
-                float other = __shfl_xor_sync(0xffffffff, block_max, mask);
-                if (other > block_max) block_max = other;
-            }
-            float sfb_f = fmaxf(0.0625f, fminf(1.875f, block_max * 0.333333f));
-            float sfb_inv = 1.0f / sfb_f;
-            uint8_t sfb_code = quant_f32_ue4m3(sfb_f);
-            uint32_t sfb_packed = 0x01010101u * (uint32_t)ue4m3_code_to_byte[sfb_code];
-            uint32_t b0 = 0, b1 = 0;
-#pragma unroll
-            for (int i = 0; i < 8; i++) {
-                b0 |= ((uint32_t)quant_f32_e2m1(x_local[i] * sfb_inv) << (i * 4));
-                b1 |= ((uint32_t)quant_f32_e2m1(x_local[8 + i] * sfb_inv) << (i * 4));
-            }
-
-            uint32_t sfa = ((const uint32_t*)tile0)[mm];
-
-            float d0, d1, d2, d3;
-            OMMA_MXF4NVF4_4X(d0, d1, d2, d3,
-                a0, a1, a2, a3, b0, b1,
-                acc0, acc1, acc2, acc3,
-                sfa, sfb_packed);
-            acc0 = d0; acc1 = d1; acc2 = d2; acc3 = d3;
         }
+        else
+        {
+            for (int mm = 0; mm < 4; mm++) {
+                const uint32_t* q0 = (const uint32_t*)(tile0 + 16 + mm * 32);
+                const uint32_t* q1 = (const uint32_t*)(tile1 + 16 + mm * 32);
 
-        if (kg == 0) {
-            float n0 = 1.0f, n1 = 1.0f;
-            if (tile_norms) {
-                if (n_norms == 1) { n0 = tile_norms[0]; n1 = tile_norms[0]; }
-                else {
-                    n0 = tile_norms[row0 * kt_per_row + kt];
-                    n1 = tile_norms[row1 * kt_per_row + kt];
+                uint32_t a0 = q0[kg];
+                uint32_t a2 = q0[4 + kg];
+                uint32_t a1 = q1[kg];
+                uint32_t a3 = q1[4 + kg];
+
+                int kb_lo = kt * 256 + mm * 64 + kg * 8;
+                int kb_hi = kt * 256 + mm * 64 + 32 + kg * 8;
+                float x_local[16];
+                float local_max = 0.0f;
+        #pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    float v_lo = ((kb_lo + i) < K) ? x_row[kb_lo + i] : 0.0f;
+                    float v_hi = ((kb_hi + i) < K) ? x_row[kb_hi + i] : 0.0f;
+                    x_local[i]     = v_lo;
+                    x_local[8 + i] = v_hi;
+                    if (fused_rmsnorm) { rms_sum_sq += v_lo * v_lo; rms_sum_sq += v_hi * v_hi; }
+                    float av_lo = fabsf(v_lo), av_hi = fabsf(v_hi);
+                    if (av_lo > local_max) local_max = av_lo;
+                    if (av_hi > local_max) local_max = av_hi;
                 }
-            }
-            total0 += acc0 * n0; total1 += acc1 * n0;
-            total2 += acc2 * n1; total3 += acc3 * n1;
-        }
+                float block_max = local_max;
+        #pragma unroll
+                for (int mask = 1; mask <= 2; mask *= 2) {
+                    float other = __shfl_xor_sync(0xffffffff, block_max, mask);
+                    if (other > block_max) block_max = other;
+                }
+                float sfb_f = fmaxf(0.0625f, fminf(1.875f, block_max * 0.333333f));
+                float sfb_inv = 1.0f / sfb_f;
+                uint8_t sfb_code = quant_f32_ue4m3(sfb_f);
+                uint32_t sfb_packed = 0x01010101u * (uint32_t)ue4m3_code_to_byte[sfb_code];
+                uint32_t b0 = 0, b1 = 0;
+        #pragma unroll
+                for (int i = 0; i < 8; i++) {
+                    b0 |= ((uint32_t)quant_f32_e2m1(x_local[i] * sfb_inv) << (i * 4));
+                    b1 |= ((uint32_t)quant_f32_e2m1(x_local[8 + i] * sfb_inv) << (i * 4));
+                }
 
-        // ── Consumer dispatch on harvested cycles ─────────────────────
-        consumer_tick_boundary();
+                uint32_t sfa = ((const uint32_t*)tile0)[mm];
+
+                float d0, d1, d2, d3;
+                OMMA_MXF4NVF4_4X(d0, d1, d2, d3,
+                    a0, a1, a2, a3, b0, b1,
+                    acc0, acc1, acc2, acc3,
+                    sfa, sfb_packed);
+                acc0 = d0; acc1 = d1; acc2 = d2; acc3 = d3;
+            }
+
+            if (kg == 0) {
+                float n0 = 1.0f, n1 = 1.0f;
+                if (tile_norms) {
+                    if (n_norms == 1) { n0 = tile_norms[0]; n1 = tile_norms[0]; }
+                    else {
+                        n0 = tile_norms[row0 * kt_per_row + kt];
+                        n1 = tile_norms[row1 * kt_per_row + kt];
+                    }
+                }
+                total0 += acc0 * n0; total1 += acc1 * n0;
+                total2 += acc2 * n1; total3 += acc3 * n1;
+            }  // end if (kg == 0)
+
+            // ── Consumer dispatch on harvested cycles ─────────────────
+            consumer_tick_boundary();
+        }  // end else (OMMA path)
     }
 
     float rms_scale_f = 1.0f;
@@ -361,7 +499,7 @@ static __global__ void warp_gemv_small_m_nvfp4(
 //
 // Grid: M blocks (one per row), Block: 64
 // ───────────────────────────────────────────────────────────────────
-static __global__ void mid_batch_gemm_nvfp4(
+__global__ void mid_batch_gemm_nvfp4(
     const uint8_t* __restrict__ w,
     const float*   __restrict__ x,    // [M, K] row-major
     float*         __restrict__ y,    // [M, N] row-major
@@ -370,7 +508,9 @@ static __global__ void mid_batch_gemm_nvfp4(
     const float*   __restrict__ tile_norms,
     int n_norms,
     bool fused_rmsnorm = false,
-    float rms_eps = 1e-6f
+    float rms_eps = 1e-6f,
+    const RTBVH* __restrict__ bvh = nullptr,
+    unsigned long long*     __restrict__ rt_skipped = nullptr
 ) {
     const int row = blockIdx.x;  // One CTA per row in M dimension
     if (row >= M) return;
@@ -404,36 +544,44 @@ static __global__ void mid_batch_gemm_nvfp4(
             const uint8_t* tile0 = w + (size_t)row0 * row_stride + kt * BYTES_PER_TILE;
             const uint8_t* tile1 = w + (size_t)row1 * row_stride + kt * BYTES_PER_TILE;
 
-            for (int mm = 0; mm < 4; mm++) {
-                const uint32_t* q0 = (const uint32_t*)(tile0 + 16 + mm * 32);
-                const uint32_t* q1 = (const uint32_t*)(tile1 + 16 + mm * 32);
+            // ── Null-tile pruning: skip OMMA if both tiles contribute nothing ──
+            if (den_tile_is_null(bvh, row0 * kt_per_row + kt, (const uint32_t*)tile0) &&
+                den_tile_is_null(bvh, row1 * kt_per_row + kt, (const uint32_t*)tile1))
+            {
+                if (rt_skipped && threadIdx.x == 0) atomicAdd(rt_skipped, 1ULL);
+            }
+            else
+            {
+                for (int mm = 0; mm < 4; mm++) {
+                    const uint32_t* q0 = (const uint32_t*)(tile0 + 16 + mm * 32);
+                    const uint32_t* q1 = (const uint32_t*)(tile1 + 16 + mm * 32);
 
-                uint32_t a0 = q0[kg];
-                uint32_t a2 = q0[4 + kg];
-                uint32_t a1 = q1[kg];
-                uint32_t a3 = q1[4 + kg];
+                    uint32_t a0 = q0[kg];
+                    uint32_t a2 = q0[4 + kg];
+                    uint32_t a1 = q1[kg];
+                    uint32_t a3 = q1[4 + kg];
 
-                int kb_lo = kt * 256 + mm * 64 + kg * 8;
-                int kb_hi = kt * 256 + mm * 64 + 32 + kg * 8;
-                float x_local[16];
-                float local_max = 0.0f;
-#pragma unroll
-                for (int i = 0; i < 8; i++) {
-                    float v_lo = ((kb_lo + i) < K) ? x_row[kb_lo + i] : 0.0f;
-                    float v_hi = ((kb_hi + i) < K) ? x_row[kb_hi + i] : 0.0f;
-                    x_local[i]     = v_lo;
-                    x_local[8 + i] = v_hi;
-                    if (fused_rmsnorm) { rms_sum_sq += v_lo * v_lo; rms_sum_sq += v_hi * v_hi; }
-                    float av_lo = fabsf(v_lo), av_hi = fabsf(v_hi);
-                    if (av_lo > local_max) local_max = av_lo;
-                    if (av_hi > local_max) local_max = av_hi;
-                }
-                float block_max = local_max;
-#pragma unroll
-                for (int mask = 1; mask <= 2; mask *= 2) {
-                    float other = __shfl_xor_sync(active_mask, block_max, mask);
-                    if (other > block_max) block_max = other;
-                }
+                    int kb_lo = kt * 256 + mm * 64 + kg * 8;
+                    int kb_hi = kt * 256 + mm * 64 + 32 + kg * 8;
+                    float x_local[16];
+                    float local_max = 0.0f;
+        #pragma unroll
+                    for (int i = 0; i < 8; i++) {
+                        float v_lo = ((kb_lo + i) < K) ? x_row[kb_lo + i] : 0.0f;
+                        float v_hi = ((kb_hi + i) < K) ? x_row[kb_hi + i] : 0.0f;
+                        x_local[i]     = v_lo;
+                        x_local[8 + i] = v_hi;
+                        if (fused_rmsnorm) { rms_sum_sq += v_lo * v_lo; rms_sum_sq += v_hi * v_hi; }
+                        float av_lo = fabsf(v_lo), av_hi = fabsf(v_hi);
+                        if (av_lo > local_max) local_max = av_lo;
+                        if (av_hi > local_max) local_max = av_hi;
+                    }
+                    float block_max = local_max;
+        #pragma unroll
+                    for (int mask = 1; mask <= 2; mask *= 2) {
+                        float other = __shfl_xor_sync(active_mask, block_max, mask);
+                        if (other > block_max) block_max = other;
+                    }
                 float sfb_f = fmaxf(0.0625f, fminf(1.875f, block_max * 0.333333f));
                 float sfb_inv = 1.0f / sfb_f;
                 uint8_t sfb_code = quant_f32_ue4m3(sfb_f);
@@ -453,23 +601,24 @@ static __global__ void mid_batch_gemm_nvfp4(
                     acc0, acc1, acc2, acc3,
                     sfa, sfb_packed);
                 acc0 = d0; acc1 = d1; acc2 = d2; acc3 = d3;
-            }
+                }  // end for mm
 
-            if (kg == 0) {
-                float n0 = 1.0f, n1 = 1.0f;
-                if (tile_norms) {
-                    if (n_norms == 1) { n0 = tile_norms[0]; n1 = tile_norms[0]; }
-                    else {
-                        n0 = tile_norms[row0 * kt_per_row + kt];
-                        n1 = tile_norms[row1 * kt_per_row + kt];
+                if (kg == 0) {
+                    float n0 = 1.0f, n1 = 1.0f;
+                    if (tile_norms) {
+                        if (n_norms == 1) { n0 = tile_norms[0]; n1 = tile_norms[0]; }
+                        else {
+                            n0 = tile_norms[row0 * kt_per_row + kt];
+                            n1 = tile_norms[row1 * kt_per_row + kt];
+                        }
                     }
-                }
-                total0 += acc0 * n0; total1 += acc1 * n0;
-                total2 += acc2 * n1; total3 += acc3 * n1;
-            }
+                    total0 += acc0 * n0; total1 += acc1 * n0;
+                    total2 += acc2 * n1; total3 += acc3 * n1;
+                }  // end if (kg == 0)
 
-            // ── Consumer dispatch on harvested cycles ─────────────────
-            consumer_tick_boundary();
+                // ── Consumer dispatch on harvested cycles ─────────────
+                consumer_tick_boundary();
+            }  // end else (OMMA path)
         }
     }
 
@@ -499,7 +648,7 @@ static __global__ void mid_batch_gemm_nvfp4(
 //   Cooperative M×128×64 tile, 99 KB SMEM, 4-stage pipeline
 //   Grid: ceil(N/128) × ceil(M/128), Block: 256
 // ───────────────────────────────────────────────────────────────────
-static __global__ void prefill_tile_gemm_nvfp4(
+__global__ void prefill_tile_gemm_nvfp4(
     const uint8_t* __restrict__ w,
     const float*   __restrict__ x,    // [M, K] row-major
     float*         __restrict__ y,    // [M, N] row-major
@@ -508,7 +657,9 @@ static __global__ void prefill_tile_gemm_nvfp4(
     const float*   __restrict__ tile_norms,
     int n_norms,
     bool fused_rmsnorm = false,
-    float rms_eps = 1e-6f
+    float rms_eps = 1e-6f,
+    const RTBVH* __restrict__ bvh = nullptr,
+    unsigned long long*     __restrict__ rt_skipped = nullptr
 ) {
     const int n_block = blockIdx.x * 128;
     const int m_block = blockIdx.y * 128;
@@ -534,7 +685,6 @@ static __global__ void prefill_tile_gemm_nvfp4(
         float rms_sum_sq = 0.0f;
 
         const float* x0 = x + (size_t)mt * K;
-        const float* x1 = ((mt + 1) < M) ? x + (size_t)(mt + 1) * K : nullptr;
 
         for (int kt = 0; kt < kt_per_row; kt++) {
             float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
@@ -542,23 +692,31 @@ static __global__ void prefill_tile_gemm_nvfp4(
             const uint8_t* tile0 = w + (size_t)row0 * row_stride + kt * BYTES_PER_TILE;
             const uint8_t* tile1 = w + (size_t)row1 * row_stride + kt * BYTES_PER_TILE;
 
-            for (int mm = 0; mm < 4; mm++) {
-                const uint32_t* q0 = (const uint32_t*)(tile0 + 16 + mm * 32);
-                const uint32_t* q1 = (const uint32_t*)(tile1 + 16 + mm * 32);
+            // ── Null-tile pruning: skip OMMA if both tiles contribute nothing ──
+            if (den_tile_is_null(bvh, row0 * kt_per_row + kt, (const uint32_t*)tile0) &&
+                den_tile_is_null(bvh, row1 * kt_per_row + kt, (const uint32_t*)tile1))
+            {
+                if (rt_skipped && threadIdx.x == 0) atomicAdd(rt_skipped, 1ULL);
+            }
+            else
+            {
+                for (int mm = 0; mm < 4; mm++) {
+                    const uint32_t* q0 = (const uint32_t*)(tile0 + 16 + mm * 32);
+                    const uint32_t* q1 = (const uint32_t*)(tile1 + 16 + mm * 32);
 
-                uint32_t a0 = q0[kg];
-                uint32_t a2 = q0[4 + kg];
-                uint32_t a1 = q1[kg];
-                uint32_t a3 = q1[4 + kg];
+                    uint32_t a0 = q0[kg];
+                    uint32_t a2 = q0[4 + kg];
+                    uint32_t a1 = q1[kg];
+                    uint32_t a3 = q1[4 + kg];
 
-                int kb_lo = kt * 256 + mm * 64 + kg * 8;
-                int kb_hi = kt * 256 + mm * 64 + 32 + kg * 8;
-                float x_local[16];
-                float local_max = 0.0f;
-#pragma unroll
-                for (int i = 0; i < 8; i++) {
-                    float v_lo = ((kb_lo + i) < K) ? x0[kb_lo + i] : 0.0f;
-                    float v_hi = ((kb_hi + i) < K) ? x0[kb_hi + i] : 0.0f;
+                    int kb_lo = kt * 256 + mm * 64 + kg * 8;
+                    int kb_hi = kt * 256 + mm * 64 + 32 + kg * 8;
+                    float x_local[16];
+                    float local_max = 0.0f;
+        #pragma unroll
+                    for (int i = 0; i < 8; i++) {
+                        float v_lo = ((kb_lo + i) < K) ? x0[kb_lo + i] : 0.0f;
+                        float v_hi = ((kb_hi + i) < K) ? x0[kb_hi + i] : 0.0f;
                     x_local[i]     = v_lo;
                     x_local[8 + i] = v_hi;
                     if (fused_rmsnorm) { rms_sum_sq += v_lo * v_lo; rms_sum_sq += v_hi * v_hi; }
@@ -606,8 +764,9 @@ static __global__ void prefill_tile_gemm_nvfp4(
                 total2 += acc2 * n1; total3 += acc3 * n1;
             }
 
-            // ── Consumer dispatch on harvested cycles ─────────────────
-            consumer_tick_boundary();
+                // ── Consumer dispatch on harvested cycles ─────────────
+                consumer_tick_boundary();
+            }  // end else (OMMA path)
         }
 
         // ── RMSNorm output scaling (fused) ───────────────────────────
@@ -648,7 +807,9 @@ inline void launch_dense_adaptive(
     int n_norms = 0,
     bool fused_rmsnorm = false,
     float rms_eps = 1e-6f,
-    int workload_class = -1  // -1 = use M alone, 0=WL_COMPUTE_BOUND, 1=WL_MEMORY_BOUND, etc.
+    int workload_class = -1,  // -1 = use M alone, 0=WL_COMPUTE_BOUND, 1=WL_MEMORY_BOUND, etc.
+    const RTBVH* bvh = nullptr,   // RT BVH for null-tile pruning
+    unsigned long long*    rt_skipped = nullptr  // global counter for skipped null tiles
 ) {
     const int kt_per_row = K / 256;
     const int nwarps = 8;
@@ -661,20 +822,20 @@ inline void launch_dense_adaptive(
         // Single-token decode: stream_k_decode (proven, 8 KB SMEM)
         stream_k_decode_nvfp4<<<grid_n_blocks, nwarps * 32, 8 * 1024, stream>>>(
             (const uint8_t*)weights, act, dst, N, K, M, kt_per_row,
-            tile_norms, n_norms, fused_rmsnorm, rms_eps);
+            tile_norms, n_norms, fused_rmsnorm, rms_eps, bvh, rt_skipped);
     } else if (memory_bound && M < 64) {
         // Under memory pressure: use stream_k_decode with concurrent M
         // (fewer SMs occupied → more room for copy engine / texture)
         dim3 grid(grid_n_blocks, M);
         stream_k_decode_nvfp4<<<grid, nwarps * 32, 0, stream>>>(
             (const uint8_t*)weights, act, dst, N, K, M, kt_per_row,
-            tile_norms, n_norms, fused_rmsnorm, rms_eps);
+            tile_norms, n_norms, fused_rmsnorm, rms_eps, bvh, rt_skipped);
     } else if (M <= 63 || K < 256) {
         // Mid-batch: one CTA per M row, 64 threads, zero SMEM
         // (also used when K < 256 since prefill_tile_gemm requires K >= 256)
         mid_batch_gemm_nvfp4<<<M, 64, 0, stream>>>(
             (const uint8_t*)weights, act, dst, M, N, K, kt_per_row,
-            tile_norms, n_norms, fused_rmsnorm, rms_eps);
+            tile_norms, n_norms, fused_rmsnorm, rms_eps, bvh, rt_skipped);
     } else {
         // Prefill: cooperative tile GEMM, 99 KB SMEM, 4-stage pipeline
         const int grid_x = (N + 127) / 128;
@@ -683,7 +844,7 @@ inline void launch_dense_adaptive(
         const int smem = 99 * 1024 - S_MAX_WARPS * 2 * 2 * BYTES_PER_TILE;
         prefill_tile_gemm_nvfp4<<<tile_grid, nwarps * 32, smem, stream>>>(
             (const uint8_t*)weights, act, dst, M, N, K, kt_per_row,
-            tile_norms, n_norms, fused_rmsnorm, rms_eps);
+            tile_norms, n_norms, fused_rmsnorm, rms_eps, bvh, rt_skipped);
     }
     CUDA_CHECK(cudaGetLastError());
 }
