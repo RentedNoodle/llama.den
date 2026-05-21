@@ -42,27 +42,23 @@ ggml_cgraph * llm_build_context::build_qwen35moe() {
 
         float KQ_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
 
-        // Gemma-style RMSNorm offset: weights stored as zero-init offsets, add 1.0f
-        ggml_tensor * rms_ones = ggml_fill(ctx0, ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_embd), 1.0f);
-        cb(rms_ones, "rms_ones", -1);
-
         const int n_transformer_layers = n_layer - hparams.nextn_predict_layers;
         for (int il = 0; il < n_transformer_layers; ++il) {
 
             if (hparams.is_recurrent(il)) {
                 cur = delta.build_layer_attn_linear(ctx0, gf, inpL, il == n_transformer_layers - 1 ? inp_out_ids : nullptr, il, cb);
             } else {
-                cur = build_std_attention(gf, ggml_add(ctx0, model.layers[il].attn_norm, rms_ones), inpL, inp_pos, il == n_transformer_layers - 1 ? inp_out_ids : nullptr, nullptr,
+                cur = build_std_attention(gf, model.layers[il].attn_norm, inpL, inp_pos, il == n_transformer_layers - 1 ? inp_out_ids : nullptr, nullptr,
                         KQ_mask, nullptr, nullptr, KQ_scale, 0.0f, 0, il, true, false, true, false, true);
             }
 
-            cur = llm_build_std_moe_ffn(ctx0, lctx, ggml_add(ctx0, model.layers[il].ffn_norm, rms_ones), cur,
+            cur = llm_build_std_moe_ffn(ctx0, lctx, model.layers[il].ffn_norm, cur,
                     model.layers[il].ffn_gate_inp,  nullptr,
                     model.layers[il].ffn_up_exps,   nullptr,
                     model.layers[il].ffn_gate_exps, nullptr,
                     model.layers[il].ffn_down_exps, nullptr,
                     nullptr,
-                    model.layers[il].ffn_up_shexp,    nullptr,
+                    model.layers[il].ffn_up_shexp,    nullptr, // we don't have shared expert biases?
                     model.layers[il].ffn_gate_shexp,  nullptr,
                     model.layers[il].ffn_down_shexp,  nullptr,
                     n_expert, n_expert_used,
@@ -81,7 +77,7 @@ ggml_cgraph * llm_build_context::build_qwen35moe() {
             ggml_set_output(inpL);
         }
 
-        cur = build_output(lctx, ctx0, inpL, model.output, ggml_add(ctx0, model.output_norm, rms_ones), cb);
+        cur = build_output(lctx, ctx0, inpL, model.output, model.output_norm, cb);
         cb(cur, "result_output", -1);
     }
 
@@ -132,21 +128,17 @@ ggml_cgraph * llm_build_context::build_qwen35() {
 
         cur = nullptr;
 
-        // Gemma-style RMSNorm offset: weights stored as zero-init offsets, add 1.0f
-        ggml_tensor * rms_ones = ggml_fill(ctx0, ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_embd), 1.0f);
-        cb(rms_ones, "rms_ones", -1);
-
         const int n_transformer_layers = n_layer - hparams.nextn_predict_layers;
         for (int il = 0; il < n_transformer_layers; ++il) {
 
             if (hparams.is_recurrent(il)) {
                 cur = delta.build_layer_attn_linear(ctx0, gf, inpL, il == n_transformer_layers - 1 ? inp_out_ids : nullptr, il, cb);
             } else {
-                cur = build_std_attention(gf, ggml_add(ctx0, model.layers[il].attn_norm, rms_ones), inpL, inp_pos, il == n_transformer_layers - 1 ? inp_out_ids : nullptr, nullptr,
+                cur = build_std_attention(gf, model.layers[il].attn_norm, inpL, inp_pos, il == n_transformer_layers - 1 ? inp_out_ids : nullptr, nullptr,
                         KQ_mask, nullptr, nullptr, KQ_scale, 0.0f, 0, il, true, false, true, false, true);
             }
 
-            cur = llm_build_ffn(ctx0, lctx, ggml_add(ctx0, model.layers[il].ffn_norm, rms_ones), cur,
+            cur = llm_build_ffn(ctx0, lctx, model.layers[il].ffn_norm, cur,
                     model.layers[il].ffn_up,   NULL, NULL,
                     model.layers[il].ffn_gate, NULL, NULL,
                     model.layers[il].ffn_down, NULL, NULL,
@@ -160,11 +152,14 @@ ggml_cgraph * llm_build_context::build_qwen35() {
         }
 
         if (lctx.cparams.mtp) {
+            //struct ggml_tensor * embd_copy = ggml_dup(ctx0, inpL);
+            //cb(embd_copy, "result_mtp_embd", -1);
+            //ggml_set_output(embd_copy);
             cb(inpL, "result_mtp_embd", -1);
             ggml_set_output(inpL);
         }
 
-        cur = build_output(lctx, ctx0, inpL, model.output, ggml_add(ctx0, model.output_norm, rms_ones), cb);
+        cur = build_output(lctx, ctx0, inpL, model.output, model.output_norm, cb);
         cb(cur, "result_output", -1);
     }
 
@@ -182,17 +177,13 @@ struct ggml_tensor * llm_build_context::build_qwen35moe_mtp(
 
     const int il = hparams.n_layer - 1;
 
-    // Gemma-style RMSNorm offset: weights stored as zero-init offsets, add 1.0f
-    ggml_tensor * rms_ones = ggml_fill(ctx0, ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_embd), 1.0f);
-    cb(rms_ones, "rms_ones", il);
-
     struct ggml_tensor * KQ_mask = build_inp_KQ_mask();
     struct ggml_tensor * inp_out_ids = (n_tokens > 1 && n_outputs < n_tokens) ? build_inp_out_ids() : nullptr;
 
     ggml_tensor * token_emb = build_inp_embd_mtp(model.tok_embd);
 
-    ggml_tensor * token_emb_norm = llm_build_norm(ctx0, token_emb, hparams, ggml_add(ctx0, mtp_layer.nextn.enorm, rms_ones), NULL, LLM_NORM_RMS, cb, il);
-    ggml_tensor * hidden_state_norm = llm_build_norm(ctx0, prev_embeddings, hparams, ggml_add(ctx0, mtp_layer.nextn.hnorm, rms_ones), NULL, LLM_NORM_RMS, cb, il);
+    ggml_tensor * token_emb_norm = llm_build_norm(ctx0, token_emb, hparams, mtp_layer.nextn.enorm, NULL, LLM_NORM_RMS, cb, il);
+    ggml_tensor * hidden_state_norm = llm_build_norm(ctx0, prev_embeddings, hparams, mtp_layer.nextn.hnorm, NULL, LLM_NORM_RMS, cb, il);
 
     ggml_tensor * cur;
     if (mtp_layer.nextn.eh_proj != nullptr) {
@@ -219,7 +210,7 @@ struct ggml_tensor * llm_build_context::build_qwen35moe_mtp(
 
     const float kq_scale = 1.0f / sqrtf(float(n_embd_head));
 
-    cur = build_std_attention(gf, ggml_add(ctx0, mtp_layer.attn_norm, rms_ones), cur,
+    cur = build_std_attention(gf, mtp_layer.attn_norm, cur,
             inp_pos, nullptr, nullptr,
             KQ_mask, nullptr, nullptr,
             kq_scale, 0.0f, 0, il, true, false, true, false, true, nullptr);
@@ -228,7 +219,7 @@ struct ggml_tensor * llm_build_context::build_qwen35moe_mtp(
         cur = ggml_get_rows(ctx0, cur, inp_out_ids);
     }
 
-    cur = llm_build_std_moe_ffn(ctx0, lctx, ggml_add(ctx0, mtp_layer.ffn_norm, rms_ones), cur,
+    cur = llm_build_std_moe_ffn(ctx0, lctx, mtp_layer.ffn_norm, cur,
             mtp_layer.ffn_gate_inp,  nullptr,
             mtp_layer.ffn_up_exps,   nullptr,
             mtp_layer.ffn_gate_exps, nullptr,
@@ -247,9 +238,7 @@ struct ggml_tensor * llm_build_context::build_qwen35moe_mtp(
 
     cb(cur, "result_norm", -1);
 
-    // shared_head_norm may be null (TENSOR_NOT_REQUIRED)
-    cur = build_output(lctx, ctx0, cur, model.output_mtp,
-            mtp_layer.nextn.shared_head_norm ? ggml_add(ctx0, mtp_layer.nextn.shared_head_norm, rms_ones) : nullptr, cb);
+    cur = build_output(lctx, ctx0, cur, model.output_mtp, mtp_layer.nextn.shared_head_norm, cb);
     cb(cur, "result_output", -1);
 
     return cur;
@@ -264,18 +253,14 @@ struct ggml_tensor * llm_build_context::build_qwen35_mtp(
 
     const int il = hparams.n_layer - 1;
 
-    // Gemma-style RMSNorm offset: weights stored as zero-init offsets, add 1.0f
-    ggml_tensor * rms_ones = ggml_fill(ctx0, ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, n_embd), 1.0f);
-    cb(rms_ones, "rms_ones", il);
-
     struct ggml_tensor * KQ_mask = build_inp_KQ_mask();
 
     struct ggml_tensor * inp_out_ids = (n_tokens > 1 && n_outputs < n_tokens) ? build_inp_out_ids() : nullptr;
 
     ggml_tensor * token_emb = build_inp_embd_mtp(model.tok_embd);
 
-    ggml_tensor * token_emb_norm = llm_build_norm(ctx0, token_emb, hparams, ggml_add(ctx0, mtp_layer.nextn.enorm, rms_ones), NULL, LLM_NORM_RMS, cb, il);
-    ggml_tensor * hidden_state_norm = llm_build_norm(ctx0, prev_embeddings, hparams, ggml_add(ctx0, mtp_layer.nextn.hnorm, rms_ones), NULL, LLM_NORM_RMS, cb, il);
+    ggml_tensor * token_emb_norm = llm_build_norm(ctx0, token_emb, hparams, mtp_layer.nextn.enorm, NULL, LLM_NORM_RMS, cb, il);
+    ggml_tensor * hidden_state_norm = llm_build_norm(ctx0, prev_embeddings, hparams, mtp_layer.nextn.hnorm, NULL, LLM_NORM_RMS, cb, il);
 
     ggml_tensor * cur;
     if (mtp_layer.nextn.eh_proj != nullptr) {
@@ -305,7 +290,7 @@ struct ggml_tensor * llm_build_context::build_qwen35_mtp(
 
     const float kq_scale = 1.0f / sqrtf(float(n_embd_head));
 
-    cur = build_std_attention(gf, ggml_add(ctx0, mtp_layer.attn_norm, rms_ones), cur,
+    cur = build_std_attention(gf, mtp_layer.attn_norm, cur,
             inp_pos, nullptr, nullptr,
             KQ_mask, nullptr, nullptr,
             kq_scale, 0.0f, 0, il, true, false, true, false, true, nullptr);
@@ -316,7 +301,7 @@ struct ggml_tensor * llm_build_context::build_qwen35_mtp(
 
     // Dense FFN — optional (9B and 4B don't have FFN in MTP layer)
     if (mtp_layer.ffn_gate != nullptr) {
-        cur = llm_build_ffn(ctx0, lctx, ggml_add(ctx0, mtp_layer.ffn_norm, rms_ones), cur,
+        cur = llm_build_ffn(ctx0, lctx, mtp_layer.ffn_norm, cur,
                 mtp_layer.ffn_up,   NULL, NULL,
                 mtp_layer.ffn_gate, NULL, NULL,
                 mtp_layer.ffn_down, NULL, NULL,
@@ -327,11 +312,12 @@ struct ggml_tensor * llm_build_context::build_qwen35_mtp(
     cur = lctx.cvec.apply_to(ctx0, cur, il);
     cb(cur, "ffn_out", il);
 
+    // As far as I can tell this was wrong. We need the FFN output, and not the normalized result.
+    //cur = llm_build_norm(ctx0, cur, hparams, mtp_layer.nextn.shared_head_norm, NULL, LLM_NORM_RMS, cb, il);
     cb(cur, "result_norm", -1);
 
-    // shared_head_norm may be null (TENSOR_NOT_REQUIRED)
-    cur = build_output(lctx, ctx0, cur, model.output_mtp,
-            mtp_layer.nextn.shared_head_norm ? ggml_add(ctx0, mtp_layer.nextn.shared_head_norm, rms_ones) : nullptr, cb);
+    //cur = build_output(lctx, ctx0, cur, model.output, nullptr, cb);
+    cur = build_output(lctx, ctx0, cur, model.output_mtp, mtp_layer.nextn.shared_head_norm, cb);
     cb(cur, "result_output", -1);
 
     return cur;
