@@ -1,13 +1,31 @@
 # =============================================================================
 #  LLAMA.DEN — Blackwell NVFP4 Inference Engine
-#  OMMA.SF.16864 · SM120 Native · 5206 Tensor Core Instructions
+#  OMMA.SF.16864 · SM120 Native · 5433 Tensor Core Instructions
 #  CUDA 12.8 · 50+ CUDA Files · 8 Kernel Variants · Paris Gate PASSED
 # =============================================================================
+
+# *** Project Den Fork ***
+
+**This is the inference engine for [Project Den](https://github.com/RentedNoodle/den-nvfp4-optimizations) — Dreya NVFP4 OMMA Cognitive Engine.**
+
+### Custom additions in this fork
+
+| Feature | Description |
+|---|---|
+| **NVFP4 OMMA.SF.16864** | 5,433 native tensor core ops for Blackwell SM120 |
+| **Multi-kernel architecture** | `k1_dense.cuh`, `k1_moe_35b.cuh`, `k1_multimodal.cuh` in `specialized/` |
+| **Governor FSM with GOV_LEARN** | 14 states including GOV_LEARN (always-on learning state), 3 pressure axes |
+| **Consumer compute market** | 4-slot SM slot table, harvested cycles at tile boundaries, zero-cost when idle |
+| **SSM selective_scan CUDA kernel** | Native Mamba SSM support for Qwen3.5 hybrid models |
+| **RT core integration** | BVH traversal for MoE expert routing, tile culling, null-tile prune |
+| **CUDA 12.8 / SM120** | Blackwell consumer GPU target — the only fork with working `mxf4nvf4` consumer support |
+
+---
 
 # llama.den — Blackwell NVFP4 Inference Engine
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![OMMA.SF.16864](https://img.shields.io/badge/OMMA.SF.16864-5206-brightgreen)](https://github.com/RentedNoodle/llama.den)
+[![OMMA.SF.16864](https://img.shields.io/badge/OMMA.SF.16864-5433-brightgreen)](https://github.com/RentedNoodle/llama.den)
 [![Paris Gate](https://img.shields.io/badge/Paris%20Gate-PASSED-success)](https://github.com/RentedNoodle/llama.den)
 [![50 Novel Concepts](https://img.shields.io/badge/Novel%20Concepts-50-blueviolet)](https://github.com/RentedNoodle/den-nvfp4-optimizations)
 [![CUDA 12.8](https://img.shields.io/badge/CUDA-12.8-blue)](https://developer.nvidia.com/cuda-toolkit)
@@ -73,7 +91,7 @@ For CPU-only: drop `-DGGML_CUDA=ON` and `-DCMAKE_CUDA_ARCHITECTURES`.
 ```bash
 # SASS audit
 /usr/local/cuda-12.8/bin/cuobjdump --dump-sass build/ggml/src/libggml.so | grep -c "OMMA.SF.16864"
-# Expected: >= 5206
+# Expected: >= 5433
 
 # Paris Gate
 ./build/bin/llama-cli -m Qwen3.5-4B-NVFP4-PARIS.gguf -ngl 999 -p "The capital of France is" -n 5 --temp 0 --seed 42
@@ -189,4 +207,4 @@ All in `ggml/src/ggml-cuda/`:
 
 MIT License.
 
-*llama.den — Blackwell NVFP4 | 5206 OMMA.SF.16864 | Paris Gate PASSED | 50+ CUDA files | 2026-05-18*
+*llama.den — Project Den Fork · Blackwell NVFP4 | 5433 OMMA.SF.16864 | Paris Gate PASSED | 50+ CUDA files | 2026-05-21*
