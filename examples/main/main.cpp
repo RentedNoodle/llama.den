@@ -750,40 +750,69 @@ int main(int argc, char ** argv) {
                 LOG("saved session to %s\n", path_session.c_str());
             }
 
-            // CATS self-speculative decoding: build candidate tree from logits
-            // and select the best candidate. Enable with CATS_ENABLED=1 env var.
+            // CATS self-speculative decoding: draft chain from top-K logits,
+            // batch-decoded in one forward pass. Model agreement verifies
+            // each successive draft token. Enable with CATS_ENABLED=N (default 3).
             llama_token id;
+            bool cats_accepted = false;
             static int cats_depth_env = -1;
             if (cats_depth_env == -1) {
                 const char * cats_env = getenv("CATS_ENABLED");
-                cats_depth_env = cats_env ? atoi(cats_env) : 0;
+                cats_depth_env = cats_env ? atoi(cats_env) : 3;
             }
             if (cats_depth_env > 0 && cats_depth_env <= 5) {
                 float * logits = llama_get_logits_ith(ctx, -1);
                 int n_vocab = llama_n_vocab(llama_get_model(ctx));
-                auto tree = cats_build_tree(logits, n_vocab,
-                    cats_make_config((uint32_t)cats_depth_env, 4), true);
-                if (tree) {
-                    auto result = cats_verify_fallback(*tree);
-                    if (!result.accepted_tokens.empty()) {
-                        id = result.accepted_tokens[0];
-                        LOG("CATS: selected from %d candidates (depth=%d)\n",
-                            tree->total_candidates(), cats_depth_env);
-                    } else {
-                        id = common_sampler_sample_legacy(ctx_sampling, ctx, ctx_guidance);
+
+                // Draft chain: top-K from current logits at position n_past-1
+                auto top_k = cats_get_top_k(logits, n_vocab, cats_depth_env);
+                if (top_k.size() >= 1) {
+                    std::vector<llama_token> draft;
+                    for (auto & [tok, prob] : top_k) draft.push_back(tok);
+                    int n_draft = (int)draft.size();
+
+                    // Batch: K tokens at [n_past, n_past+1, ..., n_past+K-1]
+                    auto batch = llama_batch_get_one(draft.data(), n_draft, n_past, 0);
+                    for (int i = 0; i < n_draft; i++) batch.logits[i] = 1;
+
+                    if (llama_decode(ctx, batch) == 0) {
+                        // Collect per-position logits
+                        std::vector<const float *> batch_logits(n_draft, nullptr);
+                        for (int i = 0; i < n_draft; i++)
+                            batch_logits[i] = llama_get_logits_ith(ctx, i);
+
+                        // Verify chain acceptance
+                        std::vector<llama_token> accepted;
+                        int n_accepted = cats_verify_chain(
+                            batch_logits.data(), draft, n_vocab, accepted);
+
+                        // Clean up stale KV entries from rejected positions
+                        if (n_accepted < n_draft)
+                            llama_kv_cache_seq_rm(ctx, 0,
+                                n_past + n_accepted, n_past + n_draft - 1);
+
+                        if (n_accepted >= 1) {
+                            cats_accepted = true;
+                            id = accepted[0];
+                            // Accept and output all verified tokens
+                            for (int k = 0; k < n_accepted; k++) {
+                                common_sampler_accept(ctx_sampling, ctx, accepted[k], true);
+                                embd.push_back(accepted[k]);
+                            }
+                            n_remain -= (n_accepted - 1);
+                            LOG("CATS: accepted %d/%d tokens (depth=%d)\n",
+                                n_accepted, n_draft, cats_depth_env);
+                        }
                     }
-                } else {
-                    id = common_sampler_sample_legacy(ctx_sampling, ctx, ctx_guidance);
                 }
-            } else {
+            }
+            if (!cats_accepted) {
                 id = common_sampler_sample_legacy(ctx_sampling, ctx, ctx_guidance);
+                common_sampler_accept(ctx_sampling, ctx, id, /* apply_grammar= */ true);
+                embd.push_back(id);
             }
 
-            common_sampler_accept(ctx_sampling, ctx, id, /* apply_grammar= */ true);
-
             LOG("last: %s\n", LOG_TOKENS_TOSTR_PRETTY(ctx, ctx_sampling->prev).c_str());
-
-            embd.push_back(id);
 
             // echo this to console
             input_echo = true;

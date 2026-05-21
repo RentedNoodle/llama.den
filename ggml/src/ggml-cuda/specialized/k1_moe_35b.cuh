@@ -78,6 +78,7 @@ static __global__ void persistent_moe_35b(
         // ── Shared memory tile buffer: double-buffered cp.async prefetch ──
         // Per-warp double-buffer: MOE_NUM_WARPS x 2 ping-pong x 2 rows x 160 B
         __shared__ __align__(16) uint8_t s_tile[MOE_NUM_WARPS][2][2][MOE_BYTES_PER_TILE];
+        static_assert(MOE_NUM_WARPS * 2 * 2 * MOE_BYTES_PER_TILE <= 99 * 1024, "Tile buffer exceeds 99 KB SMEM limit");
 
         int ping = 0;
         const int sw = warp_id;  // shared-memory warp slot

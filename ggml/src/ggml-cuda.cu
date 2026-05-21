@@ -46,6 +46,7 @@
 #include "ggml-cuda/den_e2m1_rmsnorm.cuh"       // E2M1-native RMSNorm
 #include "ggml-cuda/den_governor_context.h"     // GovernorContext struct + C ABI (emotion router)
 #include "ggml-cuda/den_mxf8f6f4_gemv.cuh"
+#include "ggml-cuda/den_governor_dispatch.cuh"  // FSM governor dispatch bridge — after mxf8f6f4, before omma_attn
 #include "ggml-cuda/den_omma_attention.cuh"   // OMMA-as-attention (gated)
 #include "ggml-cuda/rope.cuh"
 #include "ggml-cuda/scale.cuh"
@@ -353,6 +354,13 @@ static ggml_cuda_device_info ggml_cuda_init() {
         g_gov.mma_avail = true;
         g_gov.governor_ctx = (GovernorContext*)den_governor_init();
         g_gov_init = true;
+    }
+
+    // ── FSM Governor init (G1-G4: workload classification, dispatch routing) ──
+    {
+        size_t free_bytes = 0, total_bytes = 0;
+        cudaMemGetInfo(&free_bytes, &total_bytes);
+        den::governor_dispatch::init(true, free_bytes, total_bytes);
     }
 
 #ifdef DEN_USE_CONSTANT_SCALE_TABLE
@@ -2695,20 +2703,21 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
         if (debug) printf("%s(%s): ggml_cuda_mul_mat_batched_cublas\n", __func__, dst->name);
         // KQ + KQV multi-batch without FlashAttention
         ggml_cuda_mul_mat_batched_cublas(ctx, src0, src1, dst);
-    } else if (src0->type == GGML_TYPE_NVFP4 && src1->ne[1] > 1) {
-        // NVFP4 M>1 (prefill): try SM120 driver bridge, fall back to loop GEMV
+    } else if (src0->type == GGML_TYPE_NVFP4) {
+        // Governor-routed NVFP4 dispatch (FSM G1-G4 selects path + kernel variant)
         const int K = (int)src0->ne[0];
         const int N = (int)src0->ne[1];
         const int M = (int)src1->ne[1];
         size_t n_norms = 0;
         const float * tile_norms = den_get_nvfp4_norm_array(src0->name, n_norms);
         cudaStream_t stream = ctx.stream();
-        // Update Governor VRAM tracking
+        // Update FFI Governor VRAM tracking
         if (g_gov_init) {
             size_t free_bytes, total_bytes;
             if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess)
                 g_gov.vram_free = free_bytes;
         }
+        // Path B override (DEN_ROUTE=sm120, debugging only)
         bool sm120_ok = false;
         {
             const char* den_route = getenv("DEN_ROUTE");
@@ -2724,44 +2733,12 @@ static int ggml_cuda_mul_mat(ggml_backend_cuda_context & ctx, const ggml_tensor 
             const float* act_data = fused_rms
                 ? (const float*)g_rms_fusion_src->data
                 : (const float*)src1->data;
-            den_k1_dense_dispatch(
-                src0->data, act_data, (float *)dst->data,
+            // Governor-routed dispatch: FSM selects ComputePath + kernel variant
+            den::governor_dispatch::dispatch_nvfp4(
+                src0->data, act_data, (float*)dst->data,
                 M, N, K, stream, tile_norms, (int)n_norms,
                 fused_rms, fused_rms ? g_rms_fusion_eps : 1e-6f);
-            if (fused_rms) g_rms_fusion_src = nullptr;
-        }
-    } else if (src0->type == GGML_TYPE_NVFP4 && src1->ne[1] == 1) {
-        // NVFP4 M=1 (decode): try SM120 driver bridge, fall back to legacy GEMV
-        const int K = (int)src0->ne[0];
-        const int N = (int)src0->ne[1];
-        size_t n_norms = 0;
-        const float * tile_norms = den_get_nvfp4_norm_array(src0->name, n_norms);
-        cudaStream_t stream = ctx.stream();
-        // Update Governor VRAM tracking
-        if (g_gov_init) {
-            size_t free_bytes, total_bytes;
-            if (cudaMemGetInfo(&free_bytes, &total_bytes) == cudaSuccess)
-                g_gov.vram_free = free_bytes;
-        }
-        bool sm120_ok = false;
-        {
-            const char* den_route = getenv("DEN_ROUTE");
-            bool force_path_b = (den_route && strcmp(den_route, "sm120") == 0);
-            if (force_path_b && DenSm120Driver::instance().is_initialized()) {
-                sm120_ok = DenSm120Driver::instance().launch_gemv(
-                    (const uint8_t*)src0->data, (const float*)src1->data, (float*)dst->data,
-                    N, K, stream, tile_norms, (int)n_norms);
-            }
-        }
-        if (!sm120_ok) {
-            bool fused_rms = (g_rms_fusion_src != nullptr);
-            const float* act_data = fused_rms
-                ? (const float*)g_rms_fusion_src->data
-                : (const float*)src1->data;
-            den_mxf4nvf4_gemv_launch(
-                src0->data, act_data, (float *)dst->data,
-                N, K, stream, tile_norms, (int)n_norms,
-                fused_rms, fused_rms ? g_rms_fusion_eps : 1e-6f);
+            den::governor_dispatch::log_decision(src0->name, M, N, K);
             if (fused_rms) g_rms_fusion_src = nullptr;
         }
     } else if (use_dequantize_mul_mat_vec) {
@@ -4214,15 +4191,22 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_FLASH_ATTN_EXT:
             // ── NVFP4 OMMA-accelerated attention ─────────────────────────
-            // When enabled via GovernorContext::omma_attention_enabled,
-            // replaces standard FP16 flash attention with NVFP4 tile-based
-            // OMMA-attention. 4x compression, tensor core accelerated.
-            if (g_gov_init && g_gov.governor_ctx &&
-                g_gov.governor_ctx->omma_attention_enabled)
+            // Routes to NVFP4 tile-based attention when K is already in NVFP4
+            // format (GGML_TYPE_NVFP4), or when the governor flag
+            // omma_attention_enabled requests it. Scale-gated sparse attention:
+            // reads attn_scale_threshold from GovernorContext to skip tiles
+            // where sfa×sfb product is negligible. 4x compression, tensor core
+            // accelerated via OMMA.SF.16864.
             {
-                ggml_cuda_flash_attn_ext_nvfp4(ctx, dst);
-            } else {
-                ggml_cuda_flash_attn_ext(ctx, dst);
+                const ggml_tensor * K = dst->src[1];
+                const bool is_nvfp4 = (K->type == GGML_TYPE_NVFP4);
+                const bool gov_ok  = g_gov_init && g_gov.governor_ctx;
+                if (is_nvfp4 || (gov_ok && g_gov.governor_ctx->omma_attention_enabled)) {
+                    float threshold = gov_ok ? g_gov.governor_ctx->attn_scale_threshold : 0.0f;
+                    ggml_cuda_flash_attn_ext_nvfp4(ctx, dst, threshold);
+                } else {
+                    ggml_cuda_flash_attn_ext(ctx, dst);
+                }
             }
             break;
         default:

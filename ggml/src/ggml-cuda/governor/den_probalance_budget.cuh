@@ -131,6 +131,7 @@ struct ProBalanceAllocator {
         switch (wc) {
         case WL_GPU_COMPUTE:
         case WL_HEAVY_3D_GAME:
+        case WL_COMPUTE_BOUND:
             // Compute-heavy — OMMA paths get extra, memory and TMU take a cut.
             set_budget(MECH_OMMA_PRIMARY,  TOTAL_BUDGET * 0.32f);
             set_budget(MECH_OMMA_MXFP4,    TOTAL_BUDGET * 0.15f);
@@ -171,16 +172,57 @@ struct ProBalanceAllocator {
             set_budget(MECH_SPARE,         TOTAL_BUDGET * 0.01f);
             break;
 
+        case WL_MEMORY_BOUND:
+            // Memory-bound — CE/TMU for async loading, OMMA gets moderate share.
+            set_budget(MECH_OMMA_PRIMARY,  TOTAL_BUDGET * 0.18f);
+            set_budget(MECH_OMMA_MXFP4,    TOTAL_BUDGET * 0.08f);
+            set_budget(MECH_OMMA_FALLBACK, TOTAL_BUDGET * 0.04f);
+            set_budget(MECH_OMMA_DP4A,     TOTAL_BUDGET * 0.02f);
+            set_budget(MECH_MEM_LOAD,      TOTAL_BUDGET * 0.20f);
+            set_budget(MECH_MEM_STORE,     TOTAL_BUDGET * 0.10f);
+            set_budget(MECH_TMU_TEXTURE,   TOTAL_BUDGET * 0.10f);
+            set_budget(MECH_TMU_FILTER,    TOTAL_BUDGET * 0.06f);
+            set_budget(MECH_CE_INFERENCE,  TOTAL_BUDGET * 0.06f);
+            set_budget(MECH_LEARN,         TOTAL_BUDGET * 0.03f);
+            set_budget(MECH_SALIENCY,      TOTAL_BUDGET * 0.03f);
+            set_budget(MECH_CURIOSITY,     TOTAL_BUDGET * 0.02f);
+            set_budget(MECH_TELEMETRY,     TOTAL_BUDGET * 0.02f);
+            set_budget(MECH_INSTRUMENT,    TOTAL_BUDGET * 0.01f);
+            set_budget(MECH_HOTSWAP,       TOTAL_BUDGET * 0.02f);
+            set_budget(MECH_SPARE,         TOTAL_BUDGET * 0.01f);
+            break;
+
+        case WL_RT_HEAVY:
+            // RT-heavy — RT core dispatch gets priority, reduce memory budget.
+            set_budget(MECH_OMMA_PRIMARY,  TOTAL_BUDGET * 0.20f);
+            set_budget(MECH_OMMA_MXFP4,    TOTAL_BUDGET * 0.08f);
+            set_budget(MECH_OMMA_FALLBACK, TOTAL_BUDGET * 0.04f);
+            set_budget(MECH_OMMA_DP4A,     TOTAL_BUDGET * 0.02f);
+            set_budget(MECH_MEM_LOAD,      TOTAL_BUDGET * 0.06f);
+            set_budget(MECH_MEM_STORE,     TOTAL_BUDGET * 0.04f);
+            set_budget(MECH_TMU_TEXTURE,   TOTAL_BUDGET * 0.04f);
+            set_budget(MECH_TMU_FILTER,    TOTAL_BUDGET * 0.02f);
+            set_budget(MECH_CE_INFERENCE,  TOTAL_BUDGET * 0.10f);
+            set_budget(MECH_LEARN,         TOTAL_BUDGET * 0.04f);
+            set_budget(MECH_SALIENCY,      TOTAL_BUDGET * 0.06f);
+            set_budget(MECH_CURIOSITY,     TOTAL_BUDGET * 0.04f);
+            set_budget(MECH_TELEMETRY,     TOTAL_BUDGET * 0.02f);
+            set_budget(MECH_INSTRUMENT,    TOTAL_BUDGET * 0.01f);
+            set_budget(MECH_HOTSWAP,       TOTAL_BUDGET * 0.01f);
+            set_budget(MECH_SPARE,         TOTAL_BUDGET * 0.01f);
+            break;
+
+        case WL_MIXED:
         case WL_LIGHT_2D_GAME:
-            // Light gaming — balance, slightly favour TMU/texture.
+            // Mixed / light gaming — balanced profile.
             set_budget(MECH_OMMA_PRIMARY,  TOTAL_BUDGET * 0.22f);
             set_budget(MECH_OMMA_MXFP4,    TOTAL_BUDGET * 0.10f);
             set_budget(MECH_OMMA_FALLBACK, TOTAL_BUDGET * 0.05f);
             set_budget(MECH_OMMA_DP4A,     TOTAL_BUDGET * 0.03f);
             set_budget(MECH_MEM_LOAD,      TOTAL_BUDGET * 0.08f);
             set_budget(MECH_MEM_STORE,     TOTAL_BUDGET * 0.05f);
-            set_budget(MECH_TMU_TEXTURE,   TOTAL_BUDGET * 0.10f);
-            set_budget(MECH_TMU_FILTER,    TOTAL_BUDGET * 0.06f);
+            set_budget(MECH_TMU_TEXTURE,   TOTAL_BUDGET * 0.08f);
+            set_budget(MECH_TMU_FILTER,    TOTAL_BUDGET * 0.04f);
             set_budget(MECH_CE_INFERENCE,  TOTAL_BUDGET * 0.08f);
             set_budget(MECH_LEARN,         TOTAL_BUDGET * 0.04f);
             set_budget(MECH_SALIENCY,      TOTAL_BUDGET * 0.04f);

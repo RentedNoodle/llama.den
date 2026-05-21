@@ -1,8 +1,15 @@
-// den_governor_fsm.cuh — 3-Axis Governor Finite State Machine
+// den_governor_fsm.cuh — Dynamic Heterogeneous Governor FSM
 // GB203-300-A1 SM120 · CUDA 12.8
+// Integrates G1 WorkloadClassifier, G2 ProBalance, G3 HeterogeneousDispatch,
+// and G4 AdaptiveTuner into the 13-state FSM.
 #pragma once
 #include <cstdint>
 #include "../den_compute_path_select.cuh"
+#include "../compute_market.cuh"
+#include "den_workload_classifier.cuh"
+#include "den_probalance_budget.cuh"
+#include "den_heterogeneous_dispatch.cuh"
+#include "den_adaptive_tuner.cuh"
 
 namespace den { namespace governor {
 
@@ -109,6 +116,23 @@ struct GovernorContext {
     cudaEvent_t hotswap_complete;
     volatile int* tdr_heartbeat;
     uint64_t last_heartbeat_timestamp;
+
+    // Consumer compute market — harvested-cycle dispatch at tile boundaries
+    ConsumerSlot     consumer_slots[MAX_CONSUMER_SLOTS];
+    consumer_tick_fn consumer_fn_table[MAX_CONSUMER_TYPES];
+    uint32_t         harvest_yield;          // harvested cycles / total cycles * 1000
+    float*           consumer_local_state;   // mapped memory, 70 SMs * state budget
+    float*           consumer_global_state;  // shared across all SMs
+
+    // ── Governor G1-G4: Dynamic Heterogeneous Scheduler ────────────────
+    WorkloadClassifier   classifier;
+    ProBalanceAllocator  allocator;
+    HeterogeneousDispatcher dispatcher;
+    AdaptiveTuner        tuner;
+    bool                 governor_initialized;
+    WorkloadClass        last_workload;        // most recent classification
+    WorkloadClass        prev_workload;        // classification before last
+    HWBlock              selected_hw_block;    // G3 dispatch decision (HW_TENSOR_CORE etc.)
 };
 
 __host__ __device__ inline pressure_level_t effective_pressure(
@@ -145,7 +169,86 @@ __host__ __device__ inline int elastic_cta_count(pressure_level_t p) {
     }
 }
 
-__host__ inline GovState transition_state(GovernorContext* ctx, GovState requested) {
+// ── governor_init ──────────────────────────────────────────────────────────
+// One-time initialisation of all G1-G4 governor components.
+__host__ inline void governor_init(GovernorContext* ctx) {
+    if (ctx->governor_initialized) return;
+    ctx->classifier.init();
+    ctx->allocator.init();
+    ctx->dispatcher.init();
+    ctx->tuner.init();
+    ctx->governor_initialized = true;
+    ctx->last_workload = WL_UNKNOWN;
+    ctx->prev_workload = WL_UNKNOWN;
+    ctx->selected_hw_block = HW_SM;
+}
+
+// ── governor_tick ──────────────────────────────────────────────────────────
+// Run the full G1-G4 pipeline at a state transition or OMMA wave boundary.
+//
+//  1. CLASSIFY  — predict workload class from current metrics
+//  2. BUDGET    — allocate ProBalance budgets per mechanism
+//  3. DISPATCH  — route to optimal hardware block
+//  4. ADAPT     — record prediction error, adjust thresholds every N ticks
+//
+// Caller provides metrics; default 0.0 results in safe (WL_MIXED) classification.
+__host__ inline void governor_tick(
+    GovernorContext* ctx,
+    float omma_util,
+    float mem_bw_util,
+    float rt_queries_per_omma,
+    float l2_hit_rate,
+    float primary_hw_util
+) {
+    // 1. CLASSIFY
+    WorkloadClass wc = ctx->classifier.classify(
+        omma_util, mem_bw_util, rt_queries_per_omma, l2_hit_rate);
+
+    // 2. BUDGET — allocate per-mechanism budgets based on workload
+    ctx->allocator.alloc_budgets(wc);
+
+    // 3. DISPATCH — route to optimal hardware block
+    ctx->selected_hw_block = ctx->dispatcher.dispatch(wc, primary_hw_util);
+
+    // 4. ADAPT — record prediction, adjust thresholds every N ticks
+    ctx->tuner.record_prediction(ctx->prev_workload, wc);
+    if (ctx->tuner.should_retune()) {
+        float adj_l2   = ctx->tuner.get_threshold_adjustment("l2_miss_threshold");
+        float adj_rt   = ctx->tuner.get_threshold_adjustment("rt_query_threshold");
+        // Threshold adjustments are consumed by the bottleneck scanner and
+        // future calibration sweeps; the tuner caches them internally.
+        (void)adj_l2;
+        (void)adj_rt;
+    }
+
+    ctx->prev_workload = ctx->last_workload;
+    ctx->last_workload = wc;
+}
+
+// ── transition_state ───────────────────────────────────────────────────────
+// Transition the Governor FSM to a new state, running the G1-G4 pipeline.
+//
+// Metrics parameters (default 0.0) are forwarded to governor_tick for
+// workload classification and dispatch.  When metrics are unavailable the
+// governor conservatively returns WL_MIXED / HW_SM.
+__host__ inline GovState transition_state(
+    GovernorContext* ctx,
+    GovState requested,
+    float omma_util         = 0.0f,
+    float mem_bw_util       = 0.0f,
+    float rt_queries_per_omma = 0.0f,
+    float l2_hit_rate       = 0.0f,
+    float primary_hw_util   = 0.0f
+) {
+    // Init on first use
+    if (!ctx->governor_initialized) {
+        governor_init(ctx);
+    }
+
+    // Run the G1-G4 pipeline for every state transition
+    governor_tick(ctx,
+        omma_util, mem_bw_util, rt_queries_per_omma, l2_hit_rate, primary_hw_util);
+
     pressure_level_t eff = effective_pressure(*ctx);
     switch (requested) {
         case GOV_LLM_DECODE:

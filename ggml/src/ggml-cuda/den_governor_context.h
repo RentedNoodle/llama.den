@@ -39,6 +39,9 @@ struct GovernorContext {
     uint32_t route_tier_gwt;             // [route:16][gwt_ignition:8][veto:1][reserved:7]
     float    kv_evict_ratio;             // was reserved1 — fraction to evict (default 0.03)
 
+    // [4b] Scale-gated attention threshold (default 0.0 = gating disabled)
+    float    attn_scale_threshold;       // 4 bytes: skip KV tiles where sfa×sfb < threshold
+
     // [5] Feature flags + reserved for Volition + Memory bridge fields
     uint32_t cats_tree_depth : 8;                // CATS tree depth (default 3)
     uint32_t cats_fan_out : 8;                   // CATS fan-out (default 4)
@@ -100,8 +103,8 @@ struct GovernorContext {
 };
 #pragma pack(pop)
 
-static_assert(sizeof(GovernorContext) == 105,
-    "GovernorContext must be 105B (Type Contract fields added)");
+static_assert(sizeof(GovernorContext) == 109,
+    "GovernorContext must be 109B (attn_scale_threshold field added)");
 
 // ── C ABI: extern "C" functions exposed to Rust FFI ────────────────
 

@@ -6,14 +6,23 @@
 
 namespace den { namespace governor {
 
+// Workload classes — unified across Governor G1-G4
+// Windows/D3D-oriented values (0-6) from PressurePredictor.
+// OMMA-oriented values (7-10) from WorkloadClassifier.
 enum WorkloadClass : uint8_t {
+    // System-level / D3D pressure classes (PressurePredictor)
     WL_UNKNOWN          = 0,
     WL_IDLE             = 1,
     WL_BROWSER_GPU      = 2,
     WL_LIGHT_2D_GAME    = 3,
     WL_HEAVY_3D_GAME    = 4,
     WL_GPU_COMPUTE      = 5,
-    WL_COMPOSITOR_BURST = 6
+    WL_COMPOSITOR_BURST = 6,
+    // OMMA wave-level classes (WorkloadClassifier G1)
+    WL_COMPUTE_BOUND    = 7,
+    WL_MEMORY_BOUND     = 8,
+    WL_RT_HEAVY         = 9,
+    WL_MIXED            = 10
 };
 
 struct WorkloadSignature {

@@ -202,7 +202,8 @@ __global__ void __launch_bounds__(256, 1) nvfp4_attention_kernel(
     int n_kv_heads,                          // number of key/value heads (GQA)
     int head_dim,                            // head dimension (typically 128)
     int layer,                               // current layer
-    int n_layers)                            // total layers
+    int n_layers,                            // total layers
+    float attn_scale_threshold)              // scale gate: skip tiles where sfa×sfb < this
 {
     extern __shared__ float shared[];
     float* scores = shared;                  // [n_kv] scores — sized at runtime
@@ -270,14 +271,32 @@ __global__ void __launch_bounds__(256, 1) nvfp4_attention_kernel(
 
             float score = 0.0f;
             for (int ti = 0; ti < tiles_per_kv; ti++) {
+                uint32_t k_sfb = ((const uint32_t*)k_tile[ti].scales)[lane / 8];
+                uint32_t q_sfb_val = ((const uint32_t*)q_tile.scales)[0];  // broadcast
+
+                // ── Scale gate: skip tiles with negligible scale product ──
+                // When attn_scale_threshold > 0, compute sfa×sfb product and
+                // skip the OMMA for this tile if below threshold. The scale
+                // product correlates with information content — tiles with
+                // very small scales contribute near-zero to the attention score.
+                // Zero-overhead at default (threshold=0: gate is always open).
+                if (attn_scale_threshold > 0.0f) {
+                    // Decode the first scale from each side as a proxy for the
+                    // full product. In UE4M3, the leading scale value dominates.
+                    uint8_t k_code = (uint8_t)(k_sfb & 0xFF);
+                    uint8_t q_code = (uint8_t)(q_sfb_val & 0xFF);
+                    float k_scale = kv_ue4m3_to_f32(k_code);
+                    float q_scale = kv_ue4m3_to_f32(q_code);
+                    if (k_scale * q_scale < attn_scale_threshold) {
+                        continue;  // skip this tile — score contribution ≈ 0
+                    }
+                }
+
                 // Load K A-fragment from NVFP4 tile
                 uint32_t a0 = ((const uint32_t*)k_tile[ti].nibbles)[lane * 4 + 0];
                 uint32_t a2 = ((const uint32_t*)k_tile[ti].nibbles)[lane * 4 + 2];
                 uint32_t a1 = ((const uint32_t*)k_tile[ti].nibbles)[lane * 4 + 1];
                 uint32_t a3 = ((const uint32_t*)k_tile[ti].nibbles)[lane * 4 + 3];
-
-                uint32_t k_sfb = ((const uint32_t*)k_tile[ti].scales)[lane / 8];
-                uint32_t q_sfb = ((const uint32_t*)q_tile.scales)[0];  // broadcast
 
                 // Q B-fragment
                 uint32_t b0 = ((const uint32_t*)q_tile.nibbles)[lane * 4 + 0 + ti * (TILE_K / 4)];
@@ -288,7 +307,7 @@ __global__ void __launch_bounds__(256, 1) nvfp4_attention_kernel(
                 OMMA_MXF4NVF4_4X(d0, d1, d2, d3,
                     a0, a1, a2, a3, b0, b1,
                     0.0f, 0.0f, 0.0f, 0.0f,
-                    k_sfb, q_sfb);
+                    k_sfb, q_sfb_val);
                 score += d0;
             }
 
@@ -366,7 +385,8 @@ __host__ inline void launch_nvfp4_attention(
     float* output,
     int n_kv, int n_heads, int n_kv_heads,
     int head_dim, int layer, int n_layers,
-    cudaStream_t stream)
+    cudaStream_t stream,
+    float attn_scale_threshold = 0.0f)
 {
     int tiles_per_kv = (head_dim + TILE_K - 1) / TILE_K;
     size_t shmem = sizeof(float) * n_kv * 2;  // scores + softmax buffer
@@ -374,7 +394,7 @@ __host__ inline void launch_nvfp4_attention(
     dim3 grid(n_heads * ((n_kv + 255) / 256), 1, 1);
     nvfp4_attention_kernel<<<grid, 256, shmem, stream>>>(
         q_ptr, kv_cache, output, n_kv, n_heads, n_kv_heads,
-        head_dim, layer, n_layers);
+        head_dim, layer, n_layers, attn_scale_threshold);
 }
 
 }} // namespace den::nvfp4_attn

@@ -1,7 +1,7 @@
 #pragma once
 
 //
-// den_workload_classifier.cuh — Governor FSM workload classifier
+// den_workload_classifier.cuh — Governor FSM workload classifier (G1)
 //
 // Project Den on Blackwell SM120 (GB203-300-A1, RTX 5070 Ti, 70 SMs)
 //
@@ -12,17 +12,9 @@
 //
 
 #include <cstdio>
+#include "den_pressure_predictor.cuh"
 
-// ---------------------------------------------------------------------------
-// Workload classes
-// ---------------------------------------------------------------------------
-
-enum WorkloadClass {
-    WORKLOAD_COMPUTE_BOUND,   // OMMA ALU is the dominant limiter
-    WORKLOAD_MEMORY_BOUND,    // DRAM bandwidth or L2 miss rate is the bottleneck
-    WORKLOAD_RT_HEAVY,        // Ray-tracing / special-function-unit heavy
-    WORKLOAD_MIXED            // No single resource dominates
-};
+namespace den { namespace governor {
 
 // ---------------------------------------------------------------------------
 // WorkloadClassifier
@@ -62,21 +54,21 @@ struct WorkloadClassifier {
                            float l2_hit_rate) const {
         // 1) RT-heavy — SFU pressure dominates
         if (rt_queries_per_omma > 2.0f) {
-            return WORKLOAD_RT_HEAVY;
+            return WL_RT_HEAVY;
         }
 
         // 2) Memory-bound — bandwidth saturated or L2 thrashing
         if (mem_bw_util > 0.8f || l2_hit_rate < 0.7f) {
-            return WORKLOAD_MEMORY_BOUND;
+            return WL_MEMORY_BOUND;
         }
 
         // 3) Compute-bound — OMMA pipeline is the limiter
         if (omma_util > 0.8f) {
-            return WORKLOAD_COMPUTE_BOUND;
+            return WL_COMPUTE_BOUND;
         }
 
         // 4) Everything else → mixed
-        return WORKLOAD_MIXED;
+        return WL_MIXED;
     }
 
     // ------------------------------------------------------------------
@@ -121,10 +113,10 @@ struct WorkloadClassifier {
         // Which class was predicted?
         float *pred_w = nullptr;
         switch (predicted) {
-            case WORKLOAD_COMPUTE_BOUND: pred_w = &compute_weight; break;
-            case WORKLOAD_MEMORY_BOUND:  pred_w = &memory_weight;  break;
-            case WORKLOAD_RT_HEAVY:      pred_w = &rt_weight;      break;
-            default: break;  // WORKLOAD_MIXED — no single weight to decay
+            case WL_COMPUTE_BOUND: pred_w = &compute_weight; break;
+            case WL_MEMORY_BOUND:  pred_w = &memory_weight;  break;
+            case WL_RT_HEAVY:      pred_w = &rt_weight;      break;
+            default: break;  // WL_MIXED — no single weight to decay
         }
 
         // Which class was actual?
@@ -133,21 +125,21 @@ struct WorkloadClassifier {
         float *other_w2    = nullptr;
         float  delta       = 0.0f;
         switch (actual) {
-            case WORKLOAD_COMPUTE_BOUND:
+            case WL_COMPUTE_BOUND:
                 actual_w = &compute_weight;
                 other_w  = &memory_weight;
                 other_w2 = &rt_weight;
                 delta    = LR * (1.0f - compute_weight) + MOM * prev_delta_c;
                 prev_delta_c = delta;
                 break;
-            case WORKLOAD_MEMORY_BOUND:
+            case WL_MEMORY_BOUND:
                 actual_w = &memory_weight;
                 other_w  = &compute_weight;
                 other_w2 = &rt_weight;
                 delta    = LR * (1.0f - memory_weight) + MOM * prev_delta_m;
                 prev_delta_m = delta;
                 break;
-            case WORKLOAD_RT_HEAVY:
+            case WL_RT_HEAVY:
                 actual_w = &rt_weight;
                 other_w  = &compute_weight;
                 other_w2 = &memory_weight;
@@ -191,13 +183,20 @@ struct WorkloadClassifier {
     // ------------------------------------------------------------------
     const char* to_string(WorkloadClass wc) const {
         switch (wc) {
-            case WORKLOAD_COMPUTE_BOUND: return "COMPUTE_BOUND";
-            case WORKLOAD_MEMORY_BOUND:  return "MEMORY_BOUND";
-            case WORKLOAD_RT_HEAVY:      return "RT_HEAVY";
-            case WORKLOAD_MIXED:         return "MIXED";
-            default:                     return "UNKNOWN";
+            case WL_COMPUTE_BOUND:    return "COMPUTE_BOUND";
+            case WL_MEMORY_BOUND:     return "MEMORY_BOUND";
+            case WL_RT_HEAVY:         return "RT_HEAVY";
+            case WL_MIXED:            return "MIXED";
+            case WL_UNKNOWN:          return "UNKNOWN";
+            case WL_IDLE:             return "IDLE";
+            case WL_BROWSER_GPU:      return "BROWSER_GPU";
+            case WL_LIGHT_2D_GAME:    return "LIGHT_2D_GAME";
+            case WL_HEAVY_3D_GAME:    return "HEAVY_3D_GAME";
+            case WL_GPU_COMPUTE:      return "GPU_COMPUTE";
+            case WL_COMPOSITOR_BURST: return "COMPOSITOR_BURST";
+            default:                  return "UNKNOWN";
         }
     }
 };
 
-#endif // DEN_WORKLOAD_CLASSIFIER_CUH
+}} // namespace den::governor

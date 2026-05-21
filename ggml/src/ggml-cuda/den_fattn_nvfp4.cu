@@ -12,7 +12,8 @@
 
 // NVFP4 flash attention — drop-in replacement for the standard path.
 // Quantizes Q, K, V on-the-fly, computes OMMA scores, softmax, weighted V sum.
-void ggml_cuda_flash_attn_ext_nvfp4(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
+void ggml_cuda_flash_attn_ext_nvfp4(ggml_backend_cuda_context & ctx, ggml_tensor * dst,
+                                     float attn_scale_threshold) {
     const ggml_tensor * Q = dst->src[0];
     const ggml_tensor * K = dst->src[1];
     const ggml_tensor * V = dst->src[2];
@@ -76,11 +77,12 @@ void ggml_cuda_flash_attn_ext_nvfp4(ggml_backend_cuda_context & ctx, ggml_tensor
 
             // Launch NVFP4 attention kernel
             // This uses OMMA for scores, softmax, weighted V sum
+            // attn_scale_threshold gates tiles by sfa×sfb product (0 = disabled)
             den::nvfp4_attn::launch_nvfp4_attention(
                 q_data, d_tile_buf, d_output,
                 seq_len, n_heads, n_kv_heads,
                 head_dim, 0, 1,
-                ctx.stream());
+                ctx.stream(), attn_scale_threshold);
 
             // Copy output back to the result tensor
             // Output shape: [head_dim, n_heads] — one result per query token

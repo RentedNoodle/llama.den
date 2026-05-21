@@ -38,10 +38,11 @@ void* den_governor_init(void) {
     ctx->neuro_da_5ht = 0; // will be written by den_neuromod_write
     ctx->neuro_ach_ne = 0;
     ctx->route_tier_gwt = 0;
+    ctx->attn_scale_threshold = 0.0f; // scale gating disabled by default
     ctx->cats_tree_depth = 3;  // default CATS depth=3
     ctx->cats_fan_out = 4;     // default CATS fan-out=4
     ctx->pdl_launch_enabled = 0; // PDL device-side launch disabled by default
-    ctx->cats_enabled = 0;
+    ctx->cats_enabled = 1;
     ctx->omma_attention_enabled = 0;
     ctx->speculative_attention_enabled = 0;
     ctx->register_kv_cache_enabled = 0;
@@ -279,7 +280,7 @@ void den_subvocal_disable(void* ctx_ptr) {
 
 extern __constant__ float g_personality_scale;
 
-void den_personality_scale_write(void* ctx_ptr, float scale) {
+extern "C" void den_personality_scale_write(void* ctx_ptr, float scale) {
     if (!ctx_ptr) return;
     // Write to a reserved slot in GovernorContext (byte offset 56, after kv_evict_ratio).
     // The GEMV kernel reads this via mapped memory — no cudaMemcpy needed.
