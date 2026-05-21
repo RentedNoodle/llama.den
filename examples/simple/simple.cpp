@@ -113,6 +113,38 @@ int main(int argc, char ** argv) {
             auto   n_vocab = llama_n_vocab(model);
             auto * logits  = llama_get_logits_ith(ctx, batch.n_tokens - 1);
 
+            // DEBUG: dump logit stats for first decode step
+            if (n_decode == 0) {
+                float lmin = logits[0], lmax = logits[0];
+                int imin = 0, imax = 0;
+                double lsum = 0.0;
+                for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
+                    if (logits[token_id] < lmin) { lmin = logits[token_id]; imin = token_id; }
+                    if (logits[token_id] > lmax) { lmax = logits[token_id]; imax = token_id; }
+                    lsum += logits[token_id];
+                }
+                LOG_TEE("\n[DEBUG] logits: min=%f (token %d) max=%f (token %d) mean=%f first_10=",
+                        lmin, imin, lmax, imax, (float)(lsum / n_vocab));
+                for (int i = 0; i < 10 && i < n_vocab; i++) {
+                    LOG_TEE("%f ", logits[i]);
+                }
+                LOG_TEE("... token220=%f token0=%f\n", logits[220], logits[0]);
+
+                // Also dump top-5 tokens
+                std::vector<std::pair<float, llama_token>> sorted;
+                sorted.reserve(n_vocab);
+                for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
+                    sorted.emplace_back(logits[token_id], token_id);
+                }
+                std::partial_sort(sorted.begin(), sorted.begin() + 5, sorted.end(),
+                    [](auto & a, auto & b) { return a.first > b.first; });
+                LOG_TEE("[DEBUG] top-5 tokens: ");
+                for (int i = 0; i < 5; i++) {
+                    LOG_TEE("%d:%f ", sorted[i].second, sorted[i].first);
+                }
+                LOG_TEE("\n");
+            }
+
             std::vector<llama_token_data> candidates;
             candidates.reserve(n_vocab);
 
@@ -132,7 +164,12 @@ int main(int argc, char ** argv) {
                 break;
             }
 
-            LOG_TEE("%s", common_token_to_piece(ctx, new_token_id).c_str());
+            std::string piece = common_token_to_piece(ctx, new_token_id);
+            LOG_TEE("[token=%d piece='%s' hex=", new_token_id, piece.c_str());
+            for (char c : piece) {
+                LOG_TEE("%02x", (unsigned char)c);
+            }
+            LOG_TEE("]");
             fflush(stdout);
 
             // prepare the next batch

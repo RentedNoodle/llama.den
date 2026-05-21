@@ -2586,10 +2586,14 @@ class Qwen3_5Model(Qwen2Model):
                 self.gguf_writer.add_rope_dimension_sections(sections)
             partial_factor = rope_params.get("partial_rotary_factor")
             if partial_factor is not None:
-                self.gguf_writer.add_rope_dimension_count(
-                    int(self.hparams.get("hidden_size", 1024)
-                        // self.hparams.get("num_attention_heads", 8)
-                        * partial_factor))
+                # Use head_dim if available (Qwen3.5 has head_dim in text_config),
+                # otherwise fall back to hidden_size // num_attention_heads
+                n_rot = int(
+                    self.hparams.get("head_dim",
+                        self.hparams.get("hidden_size", 1024)
+                        // self.hparams.get("num_attention_heads", 8))
+                    * partial_factor)
+                self.gguf_writer.add_rope_dimension_count(n_rot)
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         # Skip vision encoder and MTP tensors (not used by llama.cpp runtime yet)
