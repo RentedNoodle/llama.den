@@ -148,6 +148,7 @@ enum common_speculative_type {
     COMMON_SPECULATIVE_TYPE_NGRAM_MOD,
     COMMON_SPECULATIVE_TYPE_NGRAM_CACHE,   // self-speculative decoding with 3-level n-gram cache
     COMMON_SPECULATIVE_TYPE_SUFFIX,        // self-speculative suffix-decoding (arXiv:2411.04975)
+    COMMON_SPECULATIVE_TYPE_CATS,          // self-speculative cascaded tree (CATS) — top-K logits as draft
     COMMON_SPECULATIVE_TYPE_COUNT          // number of types, unknown type
 };
 
@@ -191,7 +192,7 @@ struct common_params_model {
 struct common_ngram_mod;
 
 struct common_params_speculative {
-    common_speculative_type type = COMMON_SPECULATIVE_TYPE_NONE; // type of speculative decoding
+    common_speculative_type type = COMMON_SPECULATIVE_TYPE_CATS; // type of speculative decoding (default: CATS self-spec)
 
     // Recurrent-model checkpoint strategy for speculative decoding.
     int recurrent_ckpt_mode = LLAMA_SPEC_CKPT_AUTO;
@@ -207,6 +208,9 @@ struct common_params_speculative {
 
     float   p_split = 0.1f; // speculative decoding split probability
     float   p_min = 0.75f; // minimum speculative decoding probability (greedy)
+
+    // CATS self-speculative decoding (top-K logits as draft tokens)
+    int32_t cats_k = 4; // number of draft tokens for CATS self-spec (K in top-K)
 
     // ngram-based speculative decoding
 

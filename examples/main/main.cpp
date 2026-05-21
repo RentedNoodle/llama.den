@@ -752,20 +752,19 @@ int main(int argc, char ** argv) {
 
             // CATS self-speculative decoding: draft chain from top-K logits,
             // batch-decoded in one forward pass. Model agreement verifies
-            // each successive draft token. Enable with CATS_ENABLED=N (default 3).
+            // each successive draft token. Enabled by default as the primary
+            // speculative path (--spec-type cats, --spec-cats-k K).
+            // Disable with --spec-type none.
             llama_token id;
             bool cats_accepted = false;
-            static int cats_depth_env = -1;
-            if (cats_depth_env == -1) {
-                const char * cats_env = getenv("CATS_ENABLED");
-                cats_depth_env = cats_env ? atoi(cats_env) : 3;
-            }
-            if (cats_depth_env > 0 && cats_depth_env <= 5) {
+            int cats_k = params.speculative.cats_k;
+            if (params.speculative.type == COMMON_SPECULATIVE_TYPE_CATS
+                && cats_k > 0 && cats_k <= 16) {
                 float * logits = llama_get_logits_ith(ctx, -1);
                 int n_vocab = llama_n_vocab(llama_get_model(ctx));
 
                 // Draft chain: top-K from current logits at position n_past-1
-                auto top_k = cats_get_top_k(logits, n_vocab, cats_depth_env);
+                auto top_k = cats_get_top_k(logits, n_vocab, cats_k);
                 if (top_k.size() >= 1) {
                     std::vector<llama_token> draft;
                     for (auto & [tok, prob] : top_k) draft.push_back(tok);
@@ -803,7 +802,7 @@ int main(int argc, char ** argv) {
                             }
                             n_remain -= (n_accepted - 1);
                             LOG("CATS: accepted %d/%d tokens (depth=%d)\n",
-                                n_accepted, n_draft, cats_depth_env);
+                                n_accepted, n_draft, cats_k);
                         }
                     }
                 }

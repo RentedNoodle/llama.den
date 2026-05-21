@@ -104,6 +104,7 @@ bool common_speculative_type_is_self_spec(enum common_speculative_type type) {
         case COMMON_SPECULATIVE_TYPE_NGRAM_MOD:
         case COMMON_SPECULATIVE_TYPE_NGRAM_CACHE:
         case COMMON_SPECULATIVE_TYPE_SUFFIX:
+        case COMMON_SPECULATIVE_TYPE_CATS:
             return true;
         default:
             return false;
@@ -1473,6 +1474,15 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
         } else {
             throw std::invalid_argument("unknown speculative decoding type");
         }
+        return true;
+    }
+    if (arg == "--spec-cats-k") {
+        CHECK_ARG
+        int value = std::stoi(argv[i]);
+        if (value < 1 || value > 16) {
+            throw std::invalid_argument("CATS draft K must be between 1 and 16 inclusive");
+        }
+        params.speculative.cats_k = value;
         return true;
     }
     if (arg == "--spec-ngram-size-n") {
@@ -3155,7 +3165,8 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
     options.push_back({ "*", "--spec-stage SPEC[:k=v,...]",    "explicit speculative stage. repeat once for a supported two-stage chain.\n"
                                                               "examples: --spec-stage ngram-mod:n_max=64,n_min=2 --spec-stage mtp:n_max=1\n"
                                                               "supported two-stage shape in this PR: self-spec first, then mtp or draft fallback" });
-    options.push_back({ "*", "--spec-type Name [none | mtp | ngram-cache | ngram-simple | ngram-map-k | ngram-map-k4v | ngram-mod | suffix]", "single-stage speculative selection when --spec-stage is not used (default: %d)\n", (int)params.speculative.type});
+    options.push_back({ "*", "--spec-type Name [none | mtp | cats | ngram-cache | ngram-simple | ngram-map-k | ngram-map-k4v | ngram-mod | suffix]", "single-stage speculative selection when --spec-stage is not used (default: %s)\n", common_speculative_type_to_str(params.speculative.type).c_str()});
+    options.push_back({ "*", "--spec-cats-k N",       "number of draft tokens for CATS self-speculative decoding (default: %d)\n", params.speculative.cats_k });
     options.push_back({ "*", "--spec-ngram-size-n N", "ngram size N for ngram-simple/ngram-map speculative decoding, length of lookup n-gram (default: %d)\n",params.speculative.ngram_size_n });
 
     options.push_back({ "*", "--spec-ngram-size-m N", "ngram size M for ngram-simple/ngram-map speculative decoding, length of draft m-gram (default: %d)\n", params.speculative.ngram_size_m });

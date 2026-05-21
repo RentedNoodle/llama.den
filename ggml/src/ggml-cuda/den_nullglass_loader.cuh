@@ -1,5 +1,5 @@
 /**
- * den_nullglass_loader.cuh — DENPACK V4 NULLGLASS Zero-Copy Loader
+ * den_nullglass_loader.cuh — DENPACK NULLGLASS Zero-Copy Loader
  *
  * 160-byte NULLGLASS Tile (atomic execution unit):
  *   [0:143]   FP4 weight data (block_fp4_mmq, OMMA.SF.16864 native)

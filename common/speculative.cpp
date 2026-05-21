@@ -32,7 +32,8 @@ const std::vector<enum common_speculative_type> common_speculative_types = {
     COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V,
     COMMON_SPECULATIVE_TYPE_NGRAM_MOD,
     COMMON_SPECULATIVE_TYPE_NGRAM_CACHE,
-    COMMON_SPECULATIVE_TYPE_SUFFIX
+    COMMON_SPECULATIVE_TYPE_SUFFIX,
+    COMMON_SPECULATIVE_TYPE_CATS
 };
 
 const std::map<std::string, enum common_speculative_type> common_speculative_type_from_name_map = {
@@ -45,7 +46,8 @@ const std::map<std::string, enum common_speculative_type> common_speculative_typ
     {"ngram_map_k4v", COMMON_SPECULATIVE_TYPE_NGRAM_MAP_K4V},
     {"ngram_mod",     COMMON_SPECULATIVE_TYPE_NGRAM_MOD},
     {"ngram_cache",   COMMON_SPECULATIVE_TYPE_NGRAM_CACHE},
-    {"suffix",        COMMON_SPECULATIVE_TYPE_SUFFIX}
+    {"suffix",        COMMON_SPECULATIVE_TYPE_SUFFIX},
+    {"cats",          COMMON_SPECULATIVE_TYPE_CATS}
 };
 
 struct common_speculative_config {
@@ -1056,6 +1058,7 @@ std::string common_speculative_type_to_str(enum common_speculative_type type) {
         case COMMON_SPECULATIVE_TYPE_NGRAM_MOD:     return "ngram_mod";
         case COMMON_SPECULATIVE_TYPE_NGRAM_CACHE:   return "ngram_cache";
         case COMMON_SPECULATIVE_TYPE_SUFFIX:        return "suffix";
+        case COMMON_SPECULATIVE_TYPE_CATS:          return "cats";
         default:                                    return "unknown";
     }
 }
