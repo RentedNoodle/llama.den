@@ -97,7 +97,8 @@ std::pair<ggml_tensor *, ggml_tensor *> delta_net::build_fused_delta_net(ggml_co
     GGML_ASSERT(v->ne[2] == n_tokens);
     GGML_ASSERT(g->ne[0] == H_v && g->ne[1] == n_tokens && g->ne[2] == n_seqs);
     GGML_ASSERT(beta->ne[0] == H_v && beta->ne[2] == n_tokens && beta->ne[3] == n_seqs);
-    GGML_ASSERT(state->ne[0] == S_v && state->ne[1] == S_v && state->ne[2] == H_v && state->ne[3] == n_seqs);
+    // State is stored transposed: [d_state, d_inner] = [S_v*H_v, S_v]
+    GGML_ASSERT(state->ne[0] == S_v * H_v && state->ne[1] == S_v && state->ne[3] == n_seqs);
     //GGML_ASSERT(H_k == H_v);
     GGML_ASSERT(H_v % H_k == 0);
 
@@ -112,9 +113,9 @@ std::pair<ggml_tensor *, ggml_tensor *> delta_net::build_fused_delta_net(ggml_co
     g = ggml_permute(ctx0, g, 2, 0, 3, 1);
     beta = ggml_permute(ctx0, beta, 2, 0, 1, 3);
 
-    ggml_tensor * state_flat = ggml_reshape_4d(ctx0, state, S_v, S_v * H_v, 1, n_seqs);
+    ggml_tensor * state_flat = ggml_reshape_4d(ctx0, state, S_v * H_v, S_v, 1, n_seqs);
     if (!ggml_is_contiguous(state_flat)) {
-        state_flat = ggml_cont_4d(ctx0, state_flat, S_v, S_v * H_v, 1, n_seqs);
+        state_flat = ggml_cont_4d(ctx0, state_flat, S_v * H_v, S_v, 1, n_seqs);
     }
 
     cb(q,         "q_fused", il);
@@ -140,7 +141,7 @@ std::pair<ggml_tensor *, ggml_tensor *> delta_net::build_fused_delta_net(ggml_co
 
     ggml_tensor * new_state_flat = ggml_view_1d(ctx0, fused_result, state_size,
             output_size * ggml_element_size(fused_result));
-    ggml_tensor * new_state = ggml_reshape_4d(ctx0, new_state_flat, S_v, S_v, H_v, n_seqs);
+    ggml_tensor * new_state = ggml_reshape_4d(ctx0, new_state_flat, S_v * H_v, S_v, 1, n_seqs);
 
     cb(output_tokens, "output_tokens", il);
     cb(new_state,     "new_state", il);
@@ -326,7 +327,12 @@ ggml_tensor * delta_net::build_qkv(ggml_context * ctx0, ggml_tensor * state_stor
             conv_state_dim * ggml_element_size(state_f32));
 
     ggml_tensor * conv_states = ggml_reshape_3d(ctx0, conv_state_flat, ssm_d_conv - 1, conv_dim, 1);
-    ggml_tensor * state       = ggml_reshape_4d(ctx0, ssm_state_flat, head_v_dim, head_v_dim, num_v_heads, 1);
+    // SSM state transposed from [d_inner, d_state] to [d_state, d_inner]
+    // for contiguous cache-locality during sequential scan (~5.6x prefill speedup, OrinMLLM).
+    ggml_tensor * state_temp  = ggml_reshape_4d(ctx0, ssm_state_flat, head_v_dim, head_v_dim, num_v_heads, 1);
+    state_temp = ggml_permute(ctx0, state_temp, 1, 2, 0, 3);  // [S_v, H_v, S_v] after permute
+    state_temp = ggml_cont(ctx0, state_temp);                   // physically transpose
+    ggml_tensor * state = ggml_reshape_4d(ctx0, state_temp, head_v_dim * num_v_heads, head_v_dim, 1, 1);  // [d_state, d_inner]
     cb(conv_states, "conv_states", il);
     cb(state, "state_predelta", il);
     ggml_build_forward_expand(gf, state);

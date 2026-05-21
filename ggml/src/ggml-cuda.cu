@@ -354,6 +354,8 @@ static ggml_cuda_device_info ggml_cuda_init() {
         g_gov.pressure = 0; g_gov.intent = 0; g_gov.state = 0;
         g_gov.mma_avail = true;
         g_gov.governor_ctx = (GovernorContext*)den_governor_init();
+        // Enable feature flags
+        g_gov.governor_ctx->rmsnorm_fusion_enabled = 1;
         g_gov_init = true;
     }
 
@@ -3956,10 +3958,23 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
                 next->src[1] == dst &&
                 g_gov_init && g_gov.governor_ctx &&
                 g_gov.governor_ctx->rmsnorm_fusion_enabled) {
-                // Fuse: skip RMS_NORM, signal MUL_MAT to compute RMS internally
-                g_rms_fusion_src = dst->src[0];
-                memcpy(&g_rms_fusion_eps, dst->op_params, sizeof(float));
-                break;
+                // Only fuse for single-consumer (recurrent layers).
+                // Multi-consumer (attention=4 MUL_MAT, FFN=2 MUL_MAT) would leave
+                // uninitialized data in the RMSNorm output for subsequent consumers.
+                bool single_consumer = true;
+                for (int j = i + 2; j < cgraph->n_nodes; ++j) {
+                    if (cgraph->nodes[j]->op == GGML_OP_MUL_MAT &&
+                        cgraph->nodes[j]->src[1] == dst) {
+                        single_consumer = false;
+                        break;
+                    }
+                }
+                if (single_consumer) {
+                    // Fuse: skip RMS_NORM, signal MUL_MAT to compute RMS internally
+                    g_rms_fusion_src = dst->src[0];
+                    memcpy(&g_rms_fusion_eps, dst->op_params, sizeof(float));
+                    break;
+                }
             }
             ggml_cuda_op_rms_norm(ctx, dst);
             break;
