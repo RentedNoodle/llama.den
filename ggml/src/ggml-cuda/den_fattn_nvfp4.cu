@@ -7,6 +7,11 @@
 // For 256K context with persistent NVFP4 KV tiles (den_nvfp4_kv_cache.cuh),
 // the quantize step is skipped and tiles are read directly.
 
+// ── Device symbol storage for landscape-attention fusion (§13) ─────
+// Provides __device__ storage for den_landscape_base pointer.
+// Must be defined in exactly one TU before landscape_loader.cuh inclusion.
+#define LANDSCAPE_GLOBAL_DEFS
+
 #include "den_nvfp4_attention.cuh"
 #include "fattn.cuh"
 

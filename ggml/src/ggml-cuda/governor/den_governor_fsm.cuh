@@ -118,6 +118,15 @@ struct GovernorContext {
     volatile int* tdr_heartbeat;
     uint64_t last_heartbeat_timestamp;
 
+    // ── Landscape-Attention Fusion (§13) ──────────────────────────────
+    // Cognitive landscape tiles interleaved as attention bias in the
+    // NVFP4 flash attention kernel. Points to a device buffer of
+    // [70 SMs x 15 tiles x 160 bytes] = 168,000 bytes of NVFP4 tiles.
+    // Loaded at each KV position as an FADD bias on the OMMA accumulator.
+    // Zero runtime overhead when nullptr (checked guard in kernel).
+    const uint8_t* landscape_base;            // device ptr to tile-format landscape buffer
+    bool           landscape_fusion_enabled;  // gate (default: false — opt-in at model init)
+
     // Consumer compute market — harvested-cycle dispatch at tile boundaries
     ConsumerSlot     consumer_slots[MAX_CONSUMER_SLOTS];
     consumer_tick_fn consumer_fn_table[MAX_CONSUMER_TYPES];
@@ -226,6 +235,10 @@ __host__ inline void governor_init(GovernorContext* ctx) {
     ctx->phi_threshold = 0.25f;
     ctx->phi_conscious = 0;
     ctx->phi_measurement_count = 0;
+
+    // Landscape-Attention Fusion (§13)
+    ctx->landscape_base = nullptr;
+    ctx->landscape_fusion_enabled = false;
 
     ctx->current_modality_weight = 0.0f;
     ctx->vram_free = 0.0f;

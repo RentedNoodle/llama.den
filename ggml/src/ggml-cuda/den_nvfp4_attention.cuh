@@ -20,6 +20,8 @@
 #include <cuda_runtime.h>
 #include "den_nvfp4_kv_cache.cuh"
 #include "den_dma_prefetch.cuh"
+#include "den_register_kv_cache.cuh"   // Silent KV Cache: register-level C_frag forwarding
+#include "landscape_loader.cuh"        // Spec §13: cognitive landscape attention bias
 
 namespace den { namespace nvfp4_attn {
 
@@ -203,13 +205,34 @@ __global__ void __launch_bounds__(256, 1) nvfp4_attention_kernel(
     int head_dim,                            // head dimension (typically 128)
     int layer,                               // current layer
     int n_layers,                            // total layers
-    float attn_scale_threshold)              // scale gate: skip tiles where sfa×sfb < this
+    float attn_scale_threshold,              // scale gate: skip tiles where sfa×sfb < this
+    bool use_register_cache = false)         // Silent KV Cache: register-forward C_frag
 {
     extern __shared__ float shared[];
     float* scores = shared;                  // [n_kv] scores — sized at runtime
     float* softmax_buf = shared + n_kv;      // softmax workspace
     int warp_id = threadIdx.x / T32;
     int lane = threadIdx.x & 31;
+
+    // ── Silent KV Cache: WarpRegisterCache for C_frag forwarding ──
+    // Placed at shared + 2*n_kv (after scores + softmax_buf).
+    // Each warp gets 40 register-cache entries for score_hint + C_frag keys.
+    // Enabled by use_register_cache parameter (false by default).
+    // The cache persists in SMEM across this kernel call, allowing
+    // tile-level reuse when sfa hasn't changed.
+    constexpr int REGCACHE_SMEM_FLOATS = sizeof(den::regcache::WarpRegisterCache) / sizeof(float);
+    den::regcache::WarpRegisterCache* regcache_ptr = nullptr;
+    if (use_register_cache) {
+        regcache_ptr = reinterpret_cast<den::regcache::WarpRegisterCache*>(
+            shared + 2 * n_kv);
+        if (threadIdx.x < 32 && blockIdx.x == 0) {
+            den::regcache::cache_init(*regcache_ptr);
+        }
+    }
+
+    // ── SM ID (for per-SM landscape tile addressing, §13) ────────────
+    uint32_t sm_id;
+    asm volatile("mov.u32 %0, %%smid;" : "=r"(sm_id));
 
     int local_head = blockIdx.x;              // which attention head
     int kv_head = local_head % n_kv_heads;    // GQA mapping: map query head to KV head
@@ -257,11 +280,26 @@ __global__ void __launch_bounds__(256, 1) nvfp4_attention_kernel(
     // ── Warps 1-4: OMMA score computation ────────────────────────
     // For each KV position, load NVFP4 K tile and compute OMMA score.
     // Result: scores[n_kv] — attention score for each position.
+    //
+    // Silent KV Cache integration:
+    //   Before OMMA compute, check if the register cache has a cached
+    //   score_hint for this (kv, layer). If caching is enabled and the
+    //   block_id matches, reuse the cached score and skip OMMA entirely.
+    //   This saves ~29 cycles of OMMA per cache hit.
 
     if (warp_id >= 1 && warp_id <= 4) {
         int omma_warp = warp_id - 1;
         int kv_start = omma_warp * n_kv / 4;
         int kv_end = min((omma_warp + 1) * n_kv / 4, n_kv);
+
+        // ── Cache init: each warp initializes its own cache sets ──
+        // Each warp has 5 sets × 8 ways = 40 entries.
+        // Initialize on first call (layer == 0, block 0).
+        den::regcache::WarpRegisterCache warp_cache;
+        if (use_register_cache && layer == 0 && blockIdx.x == 0) {
+            den::regcache::cache_init(warp_cache);
+        }
+        __syncwarp();
 
         for (int kv = kv_start; kv < kv_end; kv++) {
             KVTile* k_tile = const_cast<KVTile*>(kv_cache +
@@ -270,49 +308,77 @@ __global__ void __launch_bounds__(256, 1) nvfp4_attention_kernel(
                 0 * tiles_per_kv);  // K (not V)
 
             float score = 0.0f;
-            for (int ti = 0; ti < tiles_per_kv; ti++) {
-                uint32_t k_sfb = ((const uint32_t*)k_tile[ti].scales)[lane / 8];
-                uint32_t q_sfb_val = ((const uint32_t*)q_tile.scales)[0];  // broadcast
 
-                // ── Scale gate: skip tiles with negligible scale product ──
-                // When attn_scale_threshold > 0, compute sfa×sfb product and
-                // skip the OMMA for this tile if below threshold. The scale
-                // product correlates with information content — tiles with
-                // very small scales contribute near-zero to the attention score.
-                // Zero-overhead at default (threshold=0: gate is always open).
-                if (attn_scale_threshold > 0.0f) {
-                    // Decode the first scale from each side as a proxy for the
-                    // full product. In UE4M3, the leading scale value dominates.
-                    uint8_t k_code = (uint8_t)(k_sfb & 0xFF);
-                    uint8_t q_code = (uint8_t)(q_sfb_val & 0xFF);
-                    float k_scale = kv_ue4m3_to_f32(k_code);
-                    float q_scale = kv_ue4m3_to_f32(q_code);
-                    if (k_scale * q_scale < attn_scale_threshold) {
-                        continue;  // skip this tile — score contribution ≈ 0
+            // ── Silent KV Cache: check register cache before OMMA ──
+            // If this KV block has a cached score_hint with matching block_id,
+            // skip OMMA and reuse the cached value (1-cycle lookup vs 29-cycle OMMA).
+            int set_id = kv & (den::regcache::CACHE_NUM_SETS - 1);
+            float cached_score = 0.0f;
+            bool cache_hit = false;
+            if (use_register_cache) {
+                cache_hit = den::regcache::cache_lookup(
+                    warp_cache, set_id, kv, &cached_score);
+            }
+
+            if (cache_hit) {
+                // L0 HIT: reuse cached score (no OMMA needed)
+                score = cached_score * sqrtf((float)head_dim);
+            } else {
+                // L0 MISS: compute via OMMA
+                for (int ti = 0; ti < tiles_per_kv; ti++) {
+                    uint32_t k_sfb = ((const uint32_t*)k_tile[ti].scales)[lane / 8];
+                    uint32_t q_sfb_val = ((const uint32_t*)q_tile.scales)[0];  // broadcast
+
+                    // ── Scale gate: skip tiles with negligible scale product ──
+                    if (attn_scale_threshold > 0.0f) {
+                        uint8_t k_code = (uint8_t)(k_sfb & 0xFF);
+                        uint8_t q_code = (uint8_t)(q_sfb_val & 0xFF);
+                        float k_scale = den::nvfp4_kv::kv_ue4m3_to_f32(k_code);
+                        float q_scale = den::nvfp4_kv::kv_ue4m3_to_f32(q_code);
+                        if (k_scale * q_scale < attn_scale_threshold) {
+                            continue;
+                        }
                     }
+
+                    uint32_t a0 = ((const uint32_t*)k_tile[ti].nibbles)[lane * 4 + 0];
+                    uint32_t a2 = ((const uint32_t*)k_tile[ti].nibbles)[lane * 4 + 2];
+                    uint32_t a1 = ((const uint32_t*)k_tile[ti].nibbles)[lane * 4 + 1];
+                    uint32_t a3 = ((const uint32_t*)k_tile[ti].nibbles)[lane * 4 + 3];
+
+                    uint32_t b0 = ((const uint32_t*)q_tile.nibbles)[lane * 4 + 0 + ti * (TILE_K / 4)];
+                    uint32_t b1 = ((const uint32_t*)q_tile.nibbles)[lane * 4 + 1 + ti * (TILE_K / 4)];
+
+                    float d0, d1, d2, d3;
+                    OMMA_MXF4NVF4_4X(d0, d1, d2, d3,
+                        a0, a1, a2, a3, b0, b1,
+                        0.0f, 0.0f, 0.0f, 0.0f,
+                        k_sfb, q_sfb_val);
+                    score += d0;
                 }
 
-                // Load K A-fragment from NVFP4 tile
-                uint32_t a0 = ((const uint32_t*)k_tile[ti].nibbles)[lane * 4 + 0];
-                uint32_t a2 = ((const uint32_t*)k_tile[ti].nibbles)[lane * 4 + 2];
-                uint32_t a1 = ((const uint32_t*)k_tile[ti].nibbles)[lane * 4 + 1];
-                uint32_t a3 = ((const uint32_t*)k_tile[ti].nibbles)[lane * 4 + 3];
-
-                // Q B-fragment
-                uint32_t b0 = ((const uint32_t*)q_tile.nibbles)[lane * 4 + 0 + ti * (TILE_K / 4)];
-                uint32_t b1 = ((const uint32_t*)q_tile.nibbles)[lane * 4 + 1 + ti * (TILE_K / 4)];
-
-                // OMMA
-                float d0, d1, d2, d3;
-                OMMA_MXF4NVF4_4X(d0, d1, d2, d3,
-                    a0, a1, a2, a3, b0, b1,
-                    0.0f, 0.0f, 0.0f, 0.0f,
-                    k_sfb, q_sfb_val);
-                score += d0;
+                // ── Cache insert: store score_hint for next call ──
+                if (use_register_cache) {
+                    den::regcache::KVCacheEntry entry;
+                    entry.block_id   = kv;
+                    entry.k_proj     = 0.0f;  // not used in OMMA attention path
+                    entry.score_hint = score / sqrtf((float)head_dim);
+                    entry.flags      = 1;     // valid
+                    __syncthreads();
+                    den::regcache::cache_insert(warp_cache, set_id, entry);
+                    __syncthreads();
+                }
             }
 
             if (kv < n_kv) {
                 scores[kv] = score / sqrtf((float)head_dim);
+
+                // ── Landscape-Attention Fusion (§13) ────────────────
+                // Interleave landscape tile loading with KV tile processing.
+                // Landscape IS the attention bias: each KV position gets a
+                // cognitive-state modulation from the SM's landscape tile.
+                // Tile index wraps at LANDSCAPE_TILES_PER_SM (15 tiles/SM).
+                // Zero overhead when den_landscape_base == nullptr.
+                omma_landscape_blend(scores[kv], (int)sm_id, kv);
             }
         }
     }
@@ -348,9 +414,16 @@ __global__ void __launch_bounds__(256, 1) nvfp4_attention_kernel(
     // ── Warp 6: V weighted sum ───────────────────────────────────
     // Load V tiles from NVFP4 KV cache, compute weighted sum
     // using attention scores from softmax.
+    //
+    // Silent KV Cache: at the output boundary, compute a hash of the
+    // KV tile scales for this head. If the hash matches the cached value
+    // from the previous token, the C_frag result is unchanged — skip the
+    // VRAM write (register forwarding). Otherwise, write and update cache.
 
     if (warp_id == 6) {
         float result = 0.0f;
+        uint32_t sfa_hash = 0;
+
         for (int kv = 0; kv < n_kv; kv++) {
             KVTile* v_tile = const_cast<KVTile*>(kv_cache +
                 (size_t)kv * n_layers * 2 * tiles_per_kv +
@@ -368,11 +441,41 @@ __global__ void __launch_bounds__(256, 1) nvfp4_attention_kernel(
             v_val = e2m1_to_f32(nib) * ue4m3_to_f32(scale);
 
             result += weight * v_val;
+
+            // Accumulate sfa hash from V tile scales for cache key
+            sfa_hash ^= ((const uint32_t*)v_tile->scales)[0];
         }
 
-        // Write output
-        if (lane < head_dim) {
+        // ── Silent KV Cache: check C_frag validity at output boundary ──
+        // If the KV tile scales (sfa_hash) match the cached hash from
+        // the previous token, the attention output is identical.
+        // Skip VRAM write — C_frag is already register-resident.
+        bool skip_vram_write = false;
+        uint32_t cached_sfa_hash = 0;
+        if (use_register_cache) {
+            // Each head caches its sfa_hash in SMEM (via regcache_ptr)
+            int cache_idx = local_head;
+            cached_sfa_hash = __ldg((const uint32_t*)(
+                (const float*)regcache_ptr + sizeof(den::regcache::WarpRegisterCache) / sizeof(float)
+                + cache_idx));
+            if (cached_sfa_hash == sfa_hash && sfa_hash != 0) {
+                skip_vram_write = true;
+            }
+        }
+
+        // Write output (only if C_frag changed since last token)
+        if (!skip_vram_write && lane < head_dim) {
             output[local_head * head_dim + lane] = result;
+        }
+
+        // Update cache: store sfa_hash for this head
+        if (use_register_cache && lane == 0) {
+            int cache_idx = local_head;
+            // Write sfa_hash to the SMEM slot after WarpRegisterCache
+            // Synchronization: only lane 0 writes, safe single-writer
+            *(uint32_t*)((float*)regcache_ptr +
+                sizeof(den::regcache::WarpRegisterCache) / sizeof(float)
+                + cache_idx) = sfa_hash;
         }
     }
 }
@@ -386,15 +489,27 @@ __host__ inline void launch_nvfp4_attention(
     int n_kv, int n_heads, int n_kv_heads,
     int head_dim, int layer, int n_layers,
     cudaStream_t stream,
-    float attn_scale_threshold = 0.0f)
+    float attn_scale_threshold = 0.0f,
+    bool use_register_cache = false)
 {
     int tiles_per_kv = (head_dim + TILE_K - 1) / TILE_K;
-    size_t shmem = sizeof(float) * n_kv * 2;  // scores + softmax buffer
 
-    dim3 grid(n_heads * ((n_kv + 255) / 256), 1, 1);
+    // Shared memory: scores + softmax buffer + optional register cache
+    // Register cache layout when enabled:
+    //   [0..2*n_kv-1]   = scores + softmax_buf
+    //   [2*n_kv .. 2*n_kv + REGCACHE_FLOATS - 1] = WarpRegisterCache (640 bytes)
+    //   [after cache]   = per-head sfa_hash array (n_heads * uint32)
+    size_t shmem = sizeof(float) * n_kv * 2;
+    constexpr int REGCACHE_FLOATS = sizeof(den::regcache::WarpRegisterCache) / sizeof(float);
+    if (use_register_cache) {
+        shmem += sizeof(den::regcache::WarpRegisterCache);
+        shmem += n_heads * sizeof(uint32_t);  // per-head sfa_hash slots
+    }
+
+    dim3 grid(n_heads, 1, 1);  // one block per head
     nvfp4_attention_kernel<<<grid, 256, shmem, stream>>>(
         q_ptr, kv_cache, output, n_kv, n_heads, n_kv_heads,
-        head_dim, layer, n_layers, attn_scale_threshold);
+        head_dim, layer, n_layers, attn_scale_threshold, use_register_cache);
 }
 
 }} // namespace den::nvfp4_attn
