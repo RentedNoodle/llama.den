@@ -4191,18 +4191,18 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_FLASH_ATTN_EXT:
             // ── NVFP4 OMMA-accelerated attention ─────────────────────────
-            // Routes to NVFP4 tile-based attention when K is already in NVFP4
-            // format (GGML_TYPE_NVFP4), or when the governor flag
-            // omma_attention_enabled requests it. Scale-gated sparse attention:
-            // reads attn_scale_threshold from GovernorContext to skip tiles
-            // where sfa×sfb product is negligible. 4x compression, tensor core
-            // accelerated via OMMA.SF.16864.
+            // Routes to NVFP4 tile-based attention ONLY when K is NVFP4 format
+            // (GGML_TYPE_NVFP4). Scale-gated sparse attention reads
+            // attn_scale_threshold from GovernorContext to skip tiles where
+            // sfa×sfb product is negligible. NEVER routes BF16/F16 attention
+            // through NVFP4 path — that causes SIGSEGV.
             {
                 const ggml_tensor * K = dst->src[1];
-                const bool is_nvfp4 = (K->type == GGML_TYPE_NVFP4);
-                const bool gov_ok  = g_gov_init && g_gov.governor_ctx;
-                if (is_nvfp4 || (gov_ok && g_gov.governor_ctx->omma_attention_enabled)) {
-                    float threshold = gov_ok ? g_gov.governor_ctx->attn_scale_threshold : 0.0f;
+                if (K->type == GGML_TYPE_NVFP4) {
+                    float threshold = 0.0f;
+                    if (g_gov_init && g_gov.governor_ctx) {
+                        threshold = g_gov.governor_ctx->attn_scale_threshold;
+                    }
                     ggml_cuda_flash_attn_ext_nvfp4(ctx, dst, threshold);
                 } else {
                     ggml_cuda_flash_attn_ext(ctx, dst);
