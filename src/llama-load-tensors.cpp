@@ -1,14 +1,11 @@
 #include "llama-model-loader.h"
 #include "llama-impl.h"
-#include "llama-mmap.h"
 #include "llama-model.h"
 #include "ggml.h"
 
 
-#include <set>
 #include <map>
 #include <array>
-#include <future>
 #include <regex>
 #include <unordered_set>
 
@@ -1684,6 +1681,10 @@ bool create_tensors_helper::create_qwen35_tensors(const LLM_TN & tn) {
             // Q/K normalization for attention layers
             layer.attn_q_norm = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), { n_embd_head_k }, flags);
             layer.attn_k_norm = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_K_NORM, "weight", i), { n_embd_head_k }, flags);
+
+            // Output gate for full attention layers (per-channel sigmoid gate after o_proj)
+            layer.wqkv_gate = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_GATE, "weight", i), { n_embd },
+                llama_model_loader::TENSOR_NOT_REQUIRED | flags);
         } else {
             // Linear attention (gated delta net) specific tensors
             // Create tensors with calculated dimensions
@@ -3813,7 +3814,6 @@ static void distribute_mla_tensors_for_split_mode_graph(
     const int n_embd_head_k = hparams.n_embd_head_k(il);
     const int n_embd_head_v = hparams.n_embd_head_v(il);
     const int qk_rope       = hparams.n_rot;
-    const int qk_nope       = n_embd_head_k - qk_rope;
 
     // granularity=4: keeps wo row blocks K-quant-aligned (% 256) and gqa_ratio % 4 == 0 for FA-MMA.
     auto split_heads = create_split(n_head, 4, cur_splits, mem_used);
@@ -3908,8 +3908,6 @@ static void check_delta_split(ggml_tensor * t, llama_split_tensor & l_split) {
         //auto data = &l_split.ranges[is];
         //std::memcpy(extra->splits[is]->op_params, &data, sizeof(data));
     }
-    auto data = &l_split.ranges;
-    std::memcpy(t->op_params, &data, sizeof(data));
 }
 
 static void prepare_up_gate_split(ggml_tensor * t, llama_split_tensor & split) {

@@ -3,11 +3,9 @@
 #include "llama-cparams.h"
 #include "llama-model.h"
 #include "llama-context.h"
-#include "llama-delta-net.h"
 
 #include "ggml.h"
 
-#include <unordered_set>
 #include <algorithm>
 
 uint32_t llm_build_context::llama_kv_qnext_state_slots(const llama_kv_cache & kv_self) {
@@ -2736,7 +2734,7 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
                     cb(cur, "flash_attn_h", il_cb);
                 }
 
-                if (model.layers[il].wqkv_gate) {
+                if (model.layers[il].wqkv_gate && hparams.is_recurrent(il)) {
                     auto wqkv_gate = (ggml_split_tensor_t *)model.layers[il].wqkv_gate->extra;
                     GGML_ASSERT(wqkv_gate && wqkv_gate->splits[id]);
                     auto gate = llm_build_lora_mm(lctx, ctx0, wqkv_gate->splits[id], input_normed);
@@ -2855,7 +2853,8 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
         cb(Qcur, "Qcur_temp_scaled", il);
     }
 
-    if (auto wqkv_gate = model.layers[il].wqkv_gate; wqkv_gate != nullptr) {
+    // Recurrent gate path: per-head gating before o_proj (wqkv_gate is {n_embd, value_dim})
+    if (auto wqkv_gate = model.layers[il].wqkv_gate; wqkv_gate != nullptr && hparams.is_recurrent(il)) {
         cur = llm_build_kv(ctx0, lctx, kv_self, gf,
                 nullptr, nullptr,
                 Kcur, Vcur, Qcur, KQ_mask, n_tokens, kv_head, n_kv, KQ_scale, cb, il, sinks, n_swa);
@@ -2896,6 +2895,17 @@ ggml_tensor * llm_build_context::build_std_attention(ggml_cgraph * gf, ggml_tens
                     model.layers[il].wo, model.layers[il].bo,
                     Kcur, Vcur, Qcur, KQ_mask, n_tokens, kv_head, n_kv, KQ_scale, cb, il, sinks, n_swa);
         }
+    }
+
+    // Qwen3.5 full attention output gate: output *= sigmoid(per-channel gate) after o_proj
+    if ((model.arch == LLM_ARCH_QWEN35 || model.arch == LLM_ARCH_QWEN35MOE) &&
+        !hparams.is_recurrent(il) && model.layers[il].wqkv_gate != nullptr) {
+        // wqkv_gate is {n_embd} for attention layers — per-channel learned sigmoid gate
+        auto gate_sig = ggml_sigmoid(ctx0, model.layers[il].wqkv_gate);
+        cb(gate_sig, "output_gate_sig", il);
+        auto gate_exp = ggml_repeat(ctx0, gate_sig, cur);
+        cur = ggml_mul(ctx0, cur, gate_exp);
+        cb(cur, "attn_out_gated", il);
     }
 
     if (inp_out_ids) {
