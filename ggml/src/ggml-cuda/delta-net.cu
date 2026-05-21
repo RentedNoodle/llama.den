@@ -71,7 +71,7 @@ __global__ void delta_net_recurrent_f32(
     // For head h: columns h*HEAD_DIM to (h+1)*HEAD_DIM
     // state[row, col] for head h = state[row, h*HEAD_DIM + col]
     // Linear index: row + (h*HEAD_DIM + col) * HEAD_DIM = row + h*HEAD_DIM^2 + col*HEAD_DIM
-    const int64_t state_head_offset = head_idx * HEAD_DIM;
+    const int64_t state_head_offset = head_idx * HEAD_DIM * HEAD_DIM;
     const int64_t state_batch_stride = HEAD_DIM * HEAD_DIM * n_heads;
 
     // State step stride for save_all_states: HEAD_DIM^2 * n_heads * n_seqs
@@ -109,8 +109,7 @@ __global__ void delta_net_recurrent_f32(
     float state_local[HEAD_DIM/num_warps];
     for (int i = 0; i < HEAD_DIM/num_warps; ++i) {
         int col = num_warps*i + col_idx_0;
-        // Transposed state layout: [d_state, d_inner] for contiguous scan
-        state_local[i] = state_src[col + row_out * HEAD_DIM * n_heads];
+        state_local[i] = state_src[col*HEAD_DIM + row_out];
     }
 
     constexpr int WARP_SIZE_S = WARP_SIZE + 1;
@@ -174,8 +173,7 @@ __global__ void delta_net_recurrent_f32(
             float * state_step_dst = saved_states + batch_idx * state_batch_stride + state_head_offset + t * state_step_stride;
             for (int i = 0; i < HEAD_DIM/num_warps; ++i) {
                 int col = num_warps*i + col_idx_0;
-                // Transposed layout store
-                state_step_dst[col + row_out * HEAD_DIM * n_heads] = state_local[i];
+                state_step_dst[col*HEAD_DIM + row_out] = state_local[i];
             }
         }
 
@@ -186,10 +184,10 @@ __global__ void delta_net_recurrent_f32(
         // reduction and after the loop exit.
         __syncthreads();
     }
-    // Copy the final state to its destination (transposed layout)
+    // Copy the final state to its destination
     for (int i = 0; i < HEAD_DIM/num_warps; ++i) {
         int col = num_warps*i + col_idx_0;
-        state_dst[col + row_out * HEAD_DIM * n_heads] = state_local[i];
+        state_dst[col*HEAD_DIM + row_out] = state_local[i];
     }
 }
 
@@ -278,8 +276,8 @@ void ggml_cuda_op_delta_net(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
     GGML_ASSERT(src3->ne[0] == n_tokens && src3->ne[1] == 1 && src3->ne[2] == n_heads && src3->ne[3] == n_seqs);
     // Beta: [1, n_tokens, n_heads, n_seqs]
     GGML_ASSERT(src4->ne[0] == 1 && src4->ne[1] == n_tokens && src4->ne[2] == n_heads && src4->ne[3] == n_seqs);
-    // State (transposed): [head_dim*n_heads, head_dim, 1, n_seqs]
-    GGML_ASSERT(src5->ne[0] == head_dim * n_heads && src5->ne[1] == head_dim && src5->ne[2] == 1 && src5->ne[3] == n_seqs);
+    // State: [head_dim, head_dim*n_heads, 1, n_seqs]
+    GGML_ASSERT(src5->ne[0] == head_dim && src5->ne[1] == head_dim * n_heads && src5->ne[2] == 1 && src5->ne[3] == n_seqs);
 
     // Verify output tensor size
     const int64_t output_size = head_dim * n_tokens * n_heads * n_seqs;
