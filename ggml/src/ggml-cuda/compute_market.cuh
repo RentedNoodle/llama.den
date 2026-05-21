@@ -16,6 +16,7 @@
 
 // Consumer type IDs — registered by host, dispatched by device
 #define CONSUMER_PHI_MEASURER  6   // Integrated information measurement
+#define CONSUMER_OCR           7   // NVOF-based desktop OCR change detection
 
 // Flags for ConsumerType
 #define CONSUMER_FLAG_PERSISTENT     (1u << 0)
