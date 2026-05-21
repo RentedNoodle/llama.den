@@ -1,9 +1,5 @@
 #include "ssm-conv.cuh"
 
-// HARD RULE: SSM state MUST be FP32. FP16 causes numerical drift that produces
-// garbage output after ~200 autoregressive tokens (OrinMLLM report).
-static_assert(sizeof(float) == 4, "SSM state element must be 4 bytes (FP32)");
-
 #define CUDA_SSM_CONV_BLOCK_SIZE 256
 
 template <int split_n_t, bool save_steps>
@@ -260,8 +256,6 @@ static __global__ void ssm_conv_multi_seq_unique_f32_kernel(
     float * state_row = dst_state + (size_t) seq * nr * nc + (size_t) row * nc;
     const float * c_row = src2 + (size_t) row * nc;
 
-    // GDN conv order: compute using OLD state values, THEN update state.
-    // Values are read into local vars before writing to state_row.
     float sumf = 0.0f;
     for (int i0 = 0; i0 < nc - 1; ++i0) {
         const float v = src_state_row[i0];
@@ -307,14 +301,12 @@ static __global__ void ssm_conv_multi_seq_unique_f32_kernel_nc4(
     const float s2 = src_state_row[2];
     const float x  = src1[row + (size_t) t * src1_nb1];
 
-    // GDN conv order: compute using OLD state first (OrinMLLM).
-    dst_x[row + (size_t) t * nr] = s0 * c_row[0] + s1 * c_row[1] + s2 * c_row[2] + x * c_row[3];
-
-    // Then update state.
     state_row[0] = s0;
     state_row[1] = s1;
     state_row[2] = s2;
     state_row[3] = x;
+
+    dst_x[row + (size_t) t * nr] = s0 * c_row[0] + s1 * c_row[1] + s2 * c_row[2] + x * c_row[3];
 }
 
 static __global__ void ssm_conv_f32_kernel(
@@ -358,24 +350,11 @@ static __global__ void ssm_conv_f32_kernel(
             src_state_row = state_row + 1;
         }
 
-        // GDN conv order: compute conv1d using OLD state, THEN update state.
-        // Using the updated state for computation would incorporate future information
-        // and causes quality loss (OrinMLLM report).
-        float sumf = 0.0f;
-        for (int i0 = 0; i0 < nc - 1; ++i0) {
-            sumf += src_state_row[i0] * c_row[i0];
-        }
-        const float new_x = src1[row + (size_t) t * src1_nb1];
-        sumf += new_x * c_row[nc - 1];
-        dst_x[row + (size_t) t * nr] = sumf;
-
-        // Now update state: shift old state and insert new input for next step.
         for (int i0 = 0; i0 < nc - 1; ++i0) {
             state_row[i0] = src_state_row[i0];
         }
-        state_row[nc - 1] = new_x;
+        state_row[nc - 1] = src1[row + (size_t) t * src1_nb1];
 
-        // Multi-sequence copy of updated state
         for (int i3 = 1; i3 < n_kv; ++i3) {
             const int seq = sq[i3];
             if (seq < 0 || seq >= n_kv) {
@@ -387,6 +366,12 @@ static __global__ void ssm_conv_f32_kernel(
                 state_row_copy[i0] = state_row[i0];
             }
         }
+
+        float sumf = 0.0f;
+        for (int i0 = 0; i0 < nc; ++i0) {
+            sumf += state_row[i0] * c_row[i0];
+        }
+        dst_x[row + (size_t) t * nr] = sumf;
     }
 }
 
@@ -441,10 +426,6 @@ static __global__ void ssm_conv_f32_kernel_nc4(
         const float s2 = src_state_row[2];
         const float x = src1[row + (size_t) t * src1_nb1];
 
-        // GDN conv order: compute output using OLD state first (OrinMLLM).
-        dst_x[row + (size_t) t * nr] = s0 * c0 + s1 * c1 + s2 * c2 + x * c3;
-
-        // Then update state with new input for next step.
         state_row[0] = s0;
         state_row[1] = s1;
         state_row[2] = s2;
@@ -464,6 +445,8 @@ static __global__ void ssm_conv_f32_kernel_nc4(
                 state_row_copy[3] = x;
             }
         }
+
+        dst_x[row + (size_t) t * nr] = s0 * c0 + s1 * c1 + s2 * c2 + x * c3;
     }
 }
 

@@ -5,10 +5,6 @@
 
 // Delta Net Linear Attention Kernel for Qwen3-Next (HEAD_DIM=128)
 // State layout: [S_v, S_v*H_v, 1, n_seqs] (column-major)
-//
-// HARD RULE: SSM state MUST be FP32. FP16 causes numerical drift that produces
-// garbage output after ~200 autoregressive tokens (OrinMLLM report).
-static_assert(sizeof(float) == 4, "SSM state element must be 4 bytes (FP32)");
 
 __device__ __forceinline__ float sigmoid_f(float x) {
     return 1.0f / (1.0f + expf(-x));
@@ -118,9 +114,6 @@ __global__ void delta_net_recurrent_f32(
     auto all_sum1 = all_sum;
     auto all_sum2 = all_sum1 + WARP_SIZE_S*num_stored_rows;
 
-    // DeltaNet order constraint: decay->memory_read->delta->update->output
-    // MUST be sequential per v_dim. Separating phases into different kernels
-    // or loops causes output deviation (OrinMLLM report).
     for (int64_t t = 0; t < n_tokens; t++) {
         float sum_kq = 0.0f;
         for (int i = tid; i < HEAD_DIM; i += block_size) {
@@ -155,17 +148,15 @@ __global__ void delta_net_recurrent_f32(
 
         //float sv_new = beta_val * (v_ptr[t * qkv_stride_token + row_out] - sum1 * decay);
         float sv_new = beta_val * (v_ptr[t * vnb1 + row_out] - sum1 * decay);
+        if (col_idx_0 == 0) {
+            out_base[t * out_token_stride + row_out] = sum2 * decay + sv_new * attn_score;
+        }
 
-        // UPDATE state BEFORE output (correct 5-step: DECAY->READ->DELTA->UPDATE->OUTPUT)
         for (int i = 0; i < HEAD_DIM/num_warps; ++i) {
             int col = num_warps*i + col_idx_0;
             float new_state_val = decay * state_local[i] + sv_new * sK[col];
             new_state_val = fminf(fmaxf(new_state_val, -1e6f), 1e6f);
             state_local[i] = new_state_val;
-        }
-
-        if (col_idx_0 == 0) {
-            out_base[t * out_token_stride + row_out] = sum2 * decay + sv_new * attn_score;
         }
 
         // Save per-step state if requested
