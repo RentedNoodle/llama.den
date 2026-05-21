@@ -19,6 +19,7 @@
 #include "../cp-async.cuh"         // cp.async tile prefetch for double-buffer
 #include "../compute_market.cuh"   // SM slot table, consumer dispatch
 #include "../specialized/reg_broadcast.cuh"  // Register-level tile broadcast (#30)
+#include "../tile_vliw.cuh"        // NULLGLASS VLIW flags + OPAQUE tile opcodes [four-tile fusion]
 
 // ── Inline RT BVH types (device-compatible subset) ──────────────────
 // Full definitions in den_rt_bvh.cuh (host-side build functions with std::vector).
@@ -151,7 +152,10 @@ __global__ void stream_k_decode_nvfp4(
     bool fused_rmsnorm = false,
     float rms_eps = 1e-6f,
     const RTBVH* __restrict__ bvh = nullptr,
-    unsigned long long*     __restrict__ rt_skipped = nullptr
+    unsigned long long*     __restrict__ rt_skipped = nullptr,
+    // ── Four-tile fusion: extra NVFP4 tiles for KV + consumer instruction ──
+    const uint8_t* __restrict__ kv_tiles = nullptr,    // NVFP4 KV cache tile
+    const uint8_t* __restrict__ consumer_ci = nullptr   // Consumer instruction tile (OPAQUE)
 ) {
     const int warp_id = threadIdx.x / 32;
     const int lane    = threadIdx.x & 31;
@@ -187,49 +191,98 @@ __global__ void stream_k_decode_nvfp4(
     float rms_sum_sq = 0.0f;
 
     // ── Shared memory tile buffer: double-buffered cp.async prefetch ──
-    // Per-warp double-buffer: S_MAX_WARPS x 2 ping-pong slots x 2 rows x BYTES_PER_TILE
-    __shared__ __align__(16) uint8_t s_tile[S_MAX_WARPS][2][2][BYTES_PER_TILE];
-    static_assert(S_MAX_WARPS * 2 * 2 * BYTES_PER_TILE <= 99 * 1024, "Tile buffer exceeds 99 KB SMEM limit");
+    // Four-tile fusion: 4 tiles per ping-pong slot (weight_row0, weight_row1,
+    // KV cache tile, consumer instruction tile). All 4 are loaded in one
+    // fused cp.async commit group for maximal L2 utilization.
+    // Extended from original 2-tile double-buffer.
+    // Total: S_MAX_WARPS x 2 x 4 x 160 = 10,240 bytes (safe within 99 KB SMEM)
+    __shared__ __align__(16) uint8_t s_tile[S_MAX_WARPS][2][4][BYTES_PER_TILE];
+    static_assert(S_MAX_WARPS * 2 * 4 * BYTES_PER_TILE <= 99 * 1024,
+        "Four-tile buffer exceeds 99 KB SMEM limit (10,240 < 101,376 OK)");
 
     int ping = 0;
     const int sw = warp_id;  // shared-memory warp slot
 
-    // ── Prime: prefetch K-tile 0 into ping buffer ─────────────────────
-    // 10 cp.async chunks per tile (16 B each = 160 B total)
+    // ── Prime: fused 4-tile cp.async commit group ─────────────────────
+    // 10 cp.async chunks per tile (16 B each = 160 B total), 3 tiles per
+    // lane group (lanes 0-9 handle tiles 0+2, lanes 10-19 handle tiles 1+3).
+    // All 4 tile loads issue before cp_async_wait_all, forming one fused
+    // commit group per the cp.async ordering rules.
+    // Tiles: [0]=weight_row0, [1]=weight_row1, [2]=KV cache, [3]=consumer_ci
     if (_wr_lead) {
         const uint8_t* t0 = w + (size_t)row0 * row_stride;
         const uint8_t* t1 = w + (size_t)row1 * row_stride;
+        const uint8_t* t2 = kv_tiles ? kv_tiles + (size_t)row0 * BYTES_PER_TILE : nullptr;
+        const uint8_t* t3 = consumer_ci;
         if (lane < 10) {
+            // Tile 0: weight row0 (10 chunks)
             cp_async_cg_16<0>(
                 (unsigned)__cvta_generic_to_shared(&s_tile[sw][0][0][lane * 16]),
                 t0 + lane * 16);
+            // Tile 2: KV cache tile (10 chunks) — fused in same commit group
+            if (t2) {
+                cp_async_cg_16<0>(
+                    (unsigned)__cvta_generic_to_shared(&s_tile[sw][0][2][lane * 16]),
+                    t2 + lane * 16);
+            }
         }
         if (lane >= 10 && lane < 20) {
+            // Tile 1: weight row1 (10 chunks)
             cp_async_cg_16<0>(
                 (unsigned)__cvta_generic_to_shared(&s_tile[sw][0][1][(lane - 10) * 16]),
                 t1 + (lane - 10) * 16);
+            // Tile 3: consumer instruction tile (10 chunks)
+            if (t3) {
+                cp_async_cg_16<0>(
+                    (unsigned)__cvta_generic_to_shared(&s_tile[sw][0][3][(lane - 10) * 16]),
+                    t3 + (lane - 10) * 16);
+            }
         }
         cp_async_wait_all();
     }
     __syncwarp();
+    // ── OPAQUE check: if consumer CI tile is an instruction, execute now ──
+    // Tile 3 carries the consumer instruction. When OPAQUE, it's an opcode,
+    // not weight data. Execute before OMMA dispatch.
+    bool opaque_consumed = false;
+    if (consumer_ci && tile_is_opaque(&s_tile[sw][0][3][0])) {
+        float* C_frag_unused = nullptr;  // stream_k_decode doesn't accumulate C_frag
+        execute_opaque_tile(&s_tile[sw][0][3][0], C_frag_unused, nullptr, nullptr);
+        opaque_consumed = true;
+    }
 
     for (int kt = 0; kt < kt_per_row; kt++) {
         float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
 
-        // ── Prefetch next K-tile into !ping buffer (overlaps with OMMA) ──
+        // ── Four-tile fused prefetch into !ping buffer (overlaps with OMMA) ──
+        // All 4 tiles loaded in one cp.async commit group before wait_all.
+        // Tiles 0-1: next K-tiles (weight row0/row1)
+        // Tiles 2-3: KV cache + consumer instruction (reuse same tiles, no K-step)
         if (kt + 1 < kt_per_row) {
             if (_wr_lead) {
                 const uint8_t* t0n = w + (size_t)row0 * row_stride + (kt + 1) * BYTES_PER_TILE;
                 const uint8_t* t1n = w + (size_t)row1 * row_stride + (kt + 1) * BYTES_PER_TILE;
+                const uint8_t* t2n = kv_tiles;  // KV tile pointer (constant across K-steps)
+                const uint8_t* t3n = consumer_ci;  // Consumer instruction tile
                 if (lane < 10) {
                     cp_async_cg_16<0>(
                         (unsigned)__cvta_generic_to_shared(&s_tile[sw][!ping][0][lane * 16]),
                         t0n + lane * 16);
+                    if (t2n) {
+                        cp_async_cg_16<0>(
+                            (unsigned)__cvta_generic_to_shared(&s_tile[sw][!ping][2][lane * 16]),
+                            t2n + lane * 16);
+                    }
                 }
                 if (lane >= 10 && lane < 20) {
                     cp_async_cg_16<0>(
                         (unsigned)__cvta_generic_to_shared(&s_tile[sw][!ping][1][(lane - 10) * 16]),
                         t1n + (lane - 10) * 16);
+                    if (t3n) {
+                        cp_async_cg_16<0>(
+                            (unsigned)__cvta_generic_to_shared(&s_tile[sw][!ping][3][(lane - 10) * 16]),
+                            t3n + (lane - 10) * 16);
+                    }
                 }
             }
         }
@@ -310,6 +363,13 @@ __global__ void stream_k_decode_nvfp4(
             __syncwarp();
         }
         ping = !ping;
+        // ── OPAQUE check on the now-active consumer instruction tile ──
+        // After ping flip, the newly loaded tile 3 (consumer CI) is live.
+        // If OPAQUE, execute the encoded instruction (zero-cost when NOP).
+        if (consumer_ci && tile_is_opaque(&s_tile[sw][ping][3][0])) {
+            float* C_frag_unused = nullptr;
+            execute_opaque_tile(&s_tile[sw][ping][3][0], C_frag_unused, nullptr, nullptr);
+        }
 
         // Apply per-tile norm
         if (kg == 0) {
