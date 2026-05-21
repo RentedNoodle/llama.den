@@ -15,6 +15,8 @@
 // Host dispatch stubs live here for Phase 5 Governor integration.
 
 #include "den_omma_shared.cuh"
+#define COMPUTE_MARKET_GLOBAL_DEFS  // defines __device__ globals in this TU
+// compute_market.cuh is included via specialized/k1_dense.cuh
 #include "specialized/k1_dense.cuh"
 
 // Non-inline dispatch visible to ggml-cuda.cu via k1_dense.h.
@@ -35,3 +37,50 @@ void den_k1_dense_dispatch(
 {
     den::k1_dense::launch_dense_adaptive(weights, act, dst, M, N, K, stream, tile_norms, n_norms, fused_rmsnorm, rms_eps);
 }
+
+// ── Compute market device globals ─────────────────────────────────────
+// Defined via COMPUTE_MARKET_GLOBAL_DEFS in compute_market.cuh
+// (included via specialized/k1_dense.cuh above).
+
+// ── Host API implementations ──────────────────────────────────────────
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+int den_consumer_register(uint16_t type_id, uint16_t tick_budget,
+                           consumer_tick_fn fn, uint32_t state_size) {
+    (void)state_size; // reserved for future state buffer allocation
+    // Find empty slot
+    for (int i = 0; i < MAX_CONSUMER_SLOTS; i++) {
+        ConsumerSlot slot;
+        cudaMemcpyFromSymbol(&slot, den_consumer_slots, sizeof(ConsumerSlot),
+                              i * sizeof(ConsumerSlot), cudaMemcpyDeviceToHost);
+        if (slot.consumer_id == 0) {
+            // Populate slot
+            slot.consumer_id = type_id;
+            slot.tick_budget = tick_budget;
+            slot.state_ptr = 0; // computed at init
+
+            cudaMemcpyToSymbol(den_consumer_slots, &slot, sizeof(ConsumerSlot),
+                               i * sizeof(ConsumerSlot), cudaMemcpyHostToDevice);
+
+            // Register function pointer
+            cudaMemcpyToSymbol(den_consumer_fn_table, &fn, sizeof(consumer_tick_fn),
+                               type_id * sizeof(consumer_tick_fn), cudaMemcpyHostToDevice);
+            return i; // return slot index
+        }
+    }
+    return -1; // no empty slots
+}
+
+int den_consumer_unregister(uint16_t slot_id) {
+    if (slot_id >= MAX_CONSUMER_SLOTS) return -1;
+    ConsumerSlot empty = {0, 0, 0};
+    cudaMemcpyToSymbol(den_consumer_slots, &empty, sizeof(ConsumerSlot),
+                       slot_id * sizeof(ConsumerSlot), cudaMemcpyHostToDevice);
+    return 0;
+}
+
+#ifdef __cplusplus
+}
+#endif
