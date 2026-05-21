@@ -191,7 +191,7 @@ void den_tma_prefetch_start(
     int tiles_this_batch = (tiles_remaining < ctx->tiles_per_batch)
                            ? tiles_remaining
                            : ctx->tiles_per_batch;
-    // Convert to bytes (160 per tile, NULLGLASS V4)
+    // Convert to bytes (160 per tile, NULLGLASS)
     int bytes = tiles_this_batch * 160;
     if (bytes <= 0) return;
 

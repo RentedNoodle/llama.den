@@ -68,6 +68,14 @@ void* den_governor_init(void) {
     ctx->gpu_temp_prev = 0.0f;
     ctx->vram_free_prev = 0.0f;
     ctx->vram_pressure_flag = 0;
+
+    // ── Phi measurement initialization ───────────────────────────────────
+    ctx->phi_value = 0.0f;
+    ctx->phi_coherence = 0.0f;
+    ctx->phi_threshold = 0.25f;   // IIT minimal consciousness threshold
+    ctx->phi_conscious = 0;
+    ctx->phi_measurement_count = 0;
+
     ctx->current_modality_weight = 0.0f;
     ctx->vram_free = 0.0f;
     ctx->gpu_temp = 0.0f;
@@ -306,4 +314,18 @@ extern "C" void den_personality_scale_write(void* ctx_ptr, float scale) {
     // Store at the start of the feature flags region as a float.
     // The personality_scale is at offset 56 in the 64B struct.
     *reinterpret_cast<float*>(reinterpret_cast<char*>(ctx) + 56) = scale;
+}
+
+// ── Phi measurement readout ──────────────────────────────────────────
+
+extern "C" void den_phi_read_state(const void* ctx_ptr,
+                                    float* phi_value,
+                                    float* phi_coherence,
+                                    int* phi_conscious) {
+    if (!ctx_ptr || !phi_value || !phi_coherence || !phi_conscious) return;
+    auto* ctx = static_cast<const GovernorContext*>(ctx_ptr);
+    ctx->seq.load(std::memory_order_acquire); // seq barrier
+    *phi_value = ctx->phi_value;
+    *phi_coherence = ctx->phi_coherence;
+    *phi_conscious = ctx->phi_conscious;
 }

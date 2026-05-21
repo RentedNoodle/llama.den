@@ -2,7 +2,7 @@
 //
 // Graph Capture Compatibility Note:
 // NVFP4 tiles are fixed-size (144 bytes per tile, padded to 160 with
-// NULLGLASS V4 header). This invariability means a CUDA graph of the
+// NULLGLASS header). This invariability means a CUDA graph of the
 // entire decode step has a fixed memory footprint — no variable-length
 // allocations needed during replay. The KV pointer table is updated via
 // cudaMemcpyToSymbolAsync (graph-compatible). This is the enabling

@@ -20,7 +20,7 @@ __device__ int32_t g_persistent_work_counter = 0;
     const int SFA_OFFSET = 136;
     const int COARSE_OFFSET = 128;
 #else
-    const int TILE_BYTES = 160;   // NULLGLASS V4: 160B tiles with 16B cognitive header
+    const int TILE_BYTES = 160;   // NULLGLASS: 160B tiles with 16B cognitive header
     const int NIB_OFFSET = 16;
     const int SFA_OFFSET = 0;
     const int COARSE_OFFSET = 160; // sentinel: not present in 160B tiles

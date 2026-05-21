@@ -266,7 +266,7 @@ __host__ __device__ __forceinline__ uint32_t prosody_sfa_from_pad_packed(uint64_
 
 // ── In-place tile header override ───────────────────────────────────────────
 
-// NULLGLASS V4 tile layout (160 bytes):
+// NULLGLASS tile layout (160 bytes):
 //   Bytes 0-143:   FP4 weight data (block_fp4_mmq)
 //   Byte  144:      sfa (scale factor A)
 //   Byte  145:      sfb (scale factor B)
@@ -278,7 +278,7 @@ __host__ __device__ __forceinline__ uint32_t prosody_sfa_from_pad_packed(uint64_
 //
 // sfa is at offset 144, sfb at offset 145 — each is a single 4xUE4M3 uint32.
 // Wait: the GGUF stores byte 144 as sfa (single byte!) and byte 145 as sfb.
-// Actually, looking at the NULLGLASS V4 spec:
+// Actually, looking at the NULLGLASS spec:
 //   "Byte 144: sfa (UE4M3 scale factor A)"
 //   "Byte 145: sfb (UE4M3 scale factor B)"
 // These are single UE4M3 bytes — NOT the full 4xUE4M3 uint32.
@@ -290,15 +290,15 @@ __host__ __device__ __forceinline__ uint32_t prosody_sfa_from_pad_packed(uint64_
 // code and byte 145 (sfb) with the phoneme UE4M3 code.
 // At OMMA time, the tensor core broadcasts these across all 4 K-groups.
 
-#define TILE_SFA_OFFSET  144  // byte offset of sfa in NULLGLASS V4 tile
-#define TILE_SFB_OFFSET  145  // byte offset of sfb in NULLGLASS V4 tile
+#define TILE_SFA_OFFSET  144  // byte offset of sfa in NULLGLASS tile
+#define TILE_SFB_OFFSET  145  // byte offset of sfb in NULLGLASS tile
 
 // Override a single NVFP4 tile's sfa byte in-place with a prosody code.
-// The tile pointer must point to the start of a 160-byte NULLGLASS V4 tile.
+// The tile pointer must point to the start of a 160-byte NULLGLASS tile.
 // This is intended to be called before OMMA compute.
 //
 // Parameters:
-//   tile:    pointer to the start of a 160-byte NULLGLASS V4 tile
+//   tile:    pointer to the start of a 160-byte NULLGLASS tile
 //   prosody_sfa_byte: the UE4M3 code to write at byte 144
 __device__ __forceinline__ void override_tile_prosody_sfa(
     uint8_t* tile, uint8_t prosody_sfa_byte)
@@ -309,7 +309,7 @@ __device__ __forceinline__ void override_tile_prosody_sfa(
 // Override a single NVFP4 tile's sfb byte in-place with a phoneme code.
 //
 // Parameters:
-//   tile:      pointer to the start of a 160-byte NULLGLASS V4 tile
+//   tile:      pointer to the start of a 160-byte NULLGLASS tile
 //   phoneme_sfb_byte: the UE4M3 code to write at byte 145
 __device__ __forceinline__ void override_tile_phoneme_sfb(
     uint8_t* tile, uint8_t phoneme_sfb_byte)
@@ -325,12 +325,12 @@ __device__ __forceinline__ void override_tile_prosody_phoneme(
     tile[TILE_SFB_OFFSET] = phoneme_sfb_byte;
 }
 
-// Override sfa in a NULLGLASS V4 tile header using the full 4-byte word.
+// Override sfa in a NULLGLASS tile header using the full 4-byte word.
 // Writes bytes at offsets 144-147 (sfa byte + sfb byte + 2 padding bytes).
 // sfb and padding are preserved.
 //
 // Parameters:
-//   tile:   pointer to the start of a 160-byte NULLGLASS V4 tile
+//   tile:   pointer to the start of a 160-byte NULLGLASS tile
 //   sfa_u32: packed 4xUE4M3 sfa word (bytes: [p][e][d][neutral])
 __device__ __forceinline__ void override_tile_sfa_u32(
     uint8_t* tile, uint32_t sfa_u32)
@@ -357,7 +357,7 @@ __device__ __forceinline__ void override_tile_sfa_u32(
 // Block dimensions: 128 threads
 //
 // Parameters:
-//   tiles:         device pointer to NVFP4 tiles (NULLGLASS V4, 160B each)
+//   tiles:         device pointer to NVFP4 tiles (NULLGLASS, 160B each)
 //   prosody_sfa:   device pointer to per-tile prosody sfa bytes (num_tiles bytes)
 //   phoneme_sfb:   device pointer to per-tile phoneme sfb bytes (num_tiles bytes)
 //                  If NULL, sfb is left unchanged.

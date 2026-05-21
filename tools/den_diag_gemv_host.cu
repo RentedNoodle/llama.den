@@ -62,7 +62,7 @@ static constexpr int TILE_BYTES_160   = 160;
 
 // ── Synthetic weight data builder ─────────────────────────────────────────────
 // Builds a flat buffer of N rows x kt_per_row tiles, each tile occupying
-// TILE_BYTES_160 bytes.  This matches the NULLGLASS V4 tile format so the
+// TILE_BYTES_160 bytes.  This matches the NULLGLASS tile format so the
 // tile_bytes=160 kernel reads correctly and the tile_bytes=144 kernel reads
 // from wrong addresses (demonstrating the stride bug).
 //

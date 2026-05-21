@@ -27,7 +27,7 @@
 //
 // KV Cache Page Layout:
 //   NVFP4 tile = 144 bytes, padded to KV_PAGE_SIZE = 256 bytes (128B cache line
-//   alignment + room for the 16B NULLGLASS V4 header). CE0 stride = 2 pages,
+//   alignment + room for the 16B NULLGLASS header). CE0 stride = 2 pages,
 //   CE1 stride = 2 pages. Each engine touches every other page.
 //
 // Usage (weight streaming):
@@ -56,7 +56,7 @@
 // ── Constants ───────────────────────────────────────────────────────────────
 
 // KV cache page size for DMA prefetch.
-// NVFP4 block_fp4_mmq tile = 144 bytes. NULLGLASS V4 header = 16 bytes.
+// NVFP4 block_fp4_mmq tile = 144 bytes. NULLGLASS header = 16 bytes.
 // Rounded to next 128B cache line boundary: 160 -> 256 for safety + future
 // headers (Hadamard signs, phase tag, ESAB bias, UV correction ptr, policy flags).
 // 256B also matches common L2 cache line sector granularity on Blackwell.
@@ -292,7 +292,7 @@ __host__ int den_dual_ce_init(DualCopyEngineState* state) {
 // dev_tiles:  GPU destination (contiguous buffer)
 // host_tiles: CPU source (pinned)
 // bytes:      total transfer size
-// tile_stride: stride per tile in bytes (typically 160 for NULLGLASS V4)
+// tile_stride: stride per tile in bytes (typically 160 for NULLGLASS)
 //
 // CE0 copies even-numbered tiles (0, 2, 4, ...).
 // CE1 copies odd-numbered tiles (1, 3, 5, ...).
@@ -454,7 +454,7 @@ struct DualKvPrefetchDesc {
 //   CE1: pages 1, 3, 5, 7... at kv_start + (p*2+1) * page_size
 //
 // page_size should be KV_PAGE_SIZE (256) for NVFP4 KV cache tiles.
-// The 144-byte NVFP4 tile + 16-byte NULLGLASS V4 header is padded to
+// The 144-byte NVFP4 tile + 16-byte NULLGLASS header is padded to
 // 256 bytes for 128B cache line alignment and future header expansion.
 //
 // Returns a zeroed descriptor (ce0_pages=ce1_pages=0) when the range is
@@ -752,7 +752,7 @@ __host__ void den_kv_prefetch_streams_destroy(DualKvPrefetchStreams* state) {
 #endif
 
 // NVFP4 tile stride in bytes.
-// 144B block_fp4_mmq data + 16B NULLGLASS V4 header = 160B.
+// 144B block_fp4_mmq data + 16B NULLGLASS header = 160B.
 // Matches proven GEMV kernel default tile_bytes=160.
 #ifndef TILE_BYTES
 #define TILE_BYTES 160

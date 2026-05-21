@@ -70,7 +70,7 @@ __device__ int g_living_shutdown = 0;
 #define COGNITIVE_NWARPS      8
 #define PERCEPTION_NWARPS     8
 
-// Tile constants (matching NULLGLASS V4 — 160B padded tile format)
+// Tile constants (matching NULLGLASS — 160B padded tile format)
 #define NVFP4_TILE_BYTES      160
 #define NIB_OFFSET            16
 #define SFA_OFFSET            0

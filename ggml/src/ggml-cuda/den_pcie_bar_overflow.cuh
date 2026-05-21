@@ -41,7 +41,7 @@ struct PCIeBAROverflow {
 //
 // @param cpu_buffer   Pointer to a CPU-allocated buffer (malloc, aligned_alloc, etc.)
 // @param size         Size of the CPU buffer in bytes
-// @param tile_sz      Tile size in bytes (typically 144 for block_fp4_mmq or 160 for NULLGLASS V4)
+// @param tile_sz      Tile size in bytes (typically 144 for block_fp4_mmq or 160 for NULLGLASS)
 // @param mgr          [out] Manager struct to initialize
 //
 // @return true on success, false on failure.

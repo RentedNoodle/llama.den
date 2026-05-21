@@ -58,7 +58,7 @@
 // Max 32 slabs = 8 GB total tile capacity (fits 16 GB VRAM margin)
 #define DEN_SLAB_MAX              32
 
-// NVFP4 tile size (block_fp4_mmq format, NULLGLASS V4: 160B)
+// NVFP4 tile size (block_fp4_mmq format, NULLGLASS: 160B)
 #define DEN_SLAB_TILE_SIZE         160
 
 // Tiles per slab: 256 MB / 160 B = ~1,677,721

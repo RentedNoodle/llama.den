@@ -25,7 +25,7 @@
 // ── Constants ────────────────────────────────────────────────────────────────
 
 // Default NVFP4 tile stride in bytes.
-// 144B block_fp4_mmq data + 16B NULLGLASS V4 header = 160B.
+// 144B block_fp4_mmq data + 16B NULLGLASS header = 160B.
 // Matches proven GEMV kernel default tile_bytes=160.
 #ifndef TILE_BYTES
 #define TILE_BYTES 160

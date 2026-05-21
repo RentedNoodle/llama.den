@@ -214,7 +214,7 @@ __global__ void ocr_conv_im2col_kernel(
                 // Weight tile format (160 bytes per K=256 block):
                 //   bytes 0-15:  4 x uint32_t sfa (one per K=64 sub-block)
                 //   bytes 16-143: nibble data (32 bytes per K=64 sub-block)
-                //   bytes 144-159: cognitive header (NULLGLASS V4)
+                //   bytes 144-159: cognitive header (NULLGLASS)
                 //     Each sub-block: 16 rows, K=64, packed as 4+4 uint32s
                 //     per row-half (a0..a3). Selected by kg (0..3).
                 //

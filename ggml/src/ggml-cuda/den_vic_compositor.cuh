@@ -19,7 +19,7 @@
  * References:
  *   - NVIDIA VIC (Video Image Compositor) — TRM GB203, Chapter 18
  *   - OMMA.SF.16864 tile emission in den_omma_shared.cuh
- *   - NULLGLASS V4 tile format (160 B tile, 144 B FP4 + 16 B header)
+ *   - NULLGLASS tile format (160 B tile, 144 B FP4 + 16 B header)
  */
 
 #pragma once

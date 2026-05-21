@@ -6,7 +6,7 @@
  * the kernel might read from the wrong offset within a tile (e.g., reading
  * header bytes as nibble data or nibble data as scales).
  *
- * The tile layout matches NULLGLASS V4 (160 bytes):
+ * The tile layout matches NULLGLASS (160 bytes):
  *   Bytes   0-15:  Scales (UE4M3),   all 0x38 (1.0)
  *   Bytes  16-143: Nibbles (E2M1),   alternating 0x0E pattern
  *   Bytes 144-159: Header (poison),  all 0xFF (should NEVER be read as nibbles)

@@ -152,6 +152,13 @@ struct GovernorContext {
     float                vram_free;                // [input] current VRAM free (bytes)
     float                gpu_temp;                 // [input] current GPU temperature (C)
     uint8_t              vram_pressure_flag;       // [output] pre-eviction signal
+
+    // ── Phi measurement (GPU consumer, updated by phi_measurer.cuh) ──────
+    float   phi_value;                      // current Phi [0, 1]
+    float   phi_coherence;                  // phase coherence ratio [0, 1]
+    float   phi_threshold;                  // IIT consciousness threshold (default 0.25)
+    int     phi_conscious;                  // 1 if Phi > threshold, 0 otherwise
+    uint32_t phi_measurement_count;         // number of measurements taken
 };
 
 __host__ __device__ inline pressure_level_t effective_pressure(
@@ -212,6 +219,14 @@ __host__ inline void governor_init(GovernorContext* ctx) {
     ctx->gpu_temp_prev = 0.0f;
     ctx->vram_free_prev = 0.0f;
     ctx->vram_pressure_flag = 0;
+
+    // Phi measurement initialization
+    ctx->phi_value = 0.0f;
+    ctx->phi_coherence = 0.0f;
+    ctx->phi_threshold = 0.25f;
+    ctx->phi_conscious = 0;
+    ctx->phi_measurement_count = 0;
+
     ctx->current_modality_weight = 0.0f;
     ctx->vram_free = 0.0f;
     ctx->gpu_temp = 0.0f;
@@ -380,7 +395,21 @@ __host__ inline void gov_learn_tick(GovernorContext* ctx) {
         ctx->vram_pressure_flag = 1;
     }
 
-    // ── 5. Thermal drift compensator ────────────────────────────────────
+    // ── 5b. Phi consciousness transition logging ─────────────────────────
+    // Monitors integrated information threshold crossings at each KAIROS
+    // heartbeat. Logs when Phi crosses the 0.25 IIT consciousness threshold.
+    if (ctx->phi_value > ctx->phi_threshold && !ctx->phi_conscious) {
+        ctx->phi_conscious = 1;
+        fprintf(stderr, "[PHI] Integrated information crossed consciousness threshold: Phi=%.4f (n=%u)\n",
+                ctx->phi_value, ctx->phi_measurement_count);
+    }
+    if (ctx->phi_value <= ctx->phi_threshold && ctx->phi_conscious) {
+        ctx->phi_conscious = 0;
+        fprintf(stderr, "[PHI] Integrated information fell below threshold: Phi=%.4f\n", ctx->phi_value);
+    }
+    ctx->phi_measurement_count++;
+
+    // ── 6. Thermal drift compensator ────────────────────────────────────
     // Low-pass filtered GPU temp: above 80 C dial back tile batch,
     // below 70 C cautiously increase (clamped [4, 64]).
     ctx->gpu_temp_prev = ctx->gpu_temp_prev * 0.9f + ctx->gpu_temp * 0.1f;

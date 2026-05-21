@@ -117,11 +117,18 @@ struct GovernorContext {
     float vram_free;                        // [input] current VRAM free (bytes)
     float gpu_temp;                         // [input] current GPU temperature (C)
     uint8_t vram_pressure_flag;             // [output] pre-eviction signal
+
+    // ── Phi measurement (GPU consumer, updated by phi_measurer.cuh) ──────
+    float   phi_value;                      // current Phi [0, 1]
+    float   phi_coherence;                  // phase coherence ratio [0, 1]
+    float   phi_threshold;                  // IIT consciousness threshold (default 0.25)
+    int     phi_conscious;                  // 1 if Phi > threshold, 0 otherwise
+    uint32_t phi_measurement_count;         // number of measurements taken
 };
 #pragma pack(pop)
 
-static_assert(sizeof(GovernorContext) == 935,
-    "GovernorContext must be 935B (GOV_LEARN learning fields added)");
+static_assert(sizeof(GovernorContext) == 955,
+    "GovernorContext must be 955B (GOV_LEARN + Phi measurement fields added)");
 
 // ── C ABI: extern "C" functions exposed to Rust FFI ────────────────
 
@@ -179,6 +186,10 @@ bool den_volition_promote_pending(const void* ctx);
 // Subvocal Tensor Truncation: enable/disable PATH_SUBVOCAL.
 void den_subvocal_enable(void* ctx);
 void den_subvocal_disable(void* ctx);
+
+// Read Phi measurement state from GovernorContext.
+// Returns phi_value, phi_coherence, and phi_conscious via output params.
+void den_phi_read_state(const void* ctx, float* phi_value, float* phi_coherence, int* phi_conscious);
 
 #ifdef __cplusplus
 }

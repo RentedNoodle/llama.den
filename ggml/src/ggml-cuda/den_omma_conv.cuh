@@ -254,10 +254,10 @@ __global__ void omma_conv_3x3_kernel(
 
             // ── 2a. Load weight A-fragments from global NVFP4 tiles ──
             //
-            // Weight tile format (160 bytes per K=256 block, NULLGLASS V4):
+            // Weight tile format (160 bytes per K=256 block, NULLGLASS):
             //   bytes 0-15:   4 × uint32_t sfa (one per K=64 sub-block)
             //   bytes 16-143: nibble data (32 bytes per K=64 sub-block)
-            //   bytes 144-159: NULLGLASS V4 cognitive header
+            //   bytes 144-159: NULLGLASS cognitive header
             //     Each sub-block: 16 rows × 64 K, packed as 4+4 uint32s
             //     per row-half (a0..a3). Selected by kg (0..3).
 

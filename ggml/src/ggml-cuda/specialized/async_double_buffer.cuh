@@ -15,7 +15,7 @@
 // OMMA throughput without stalling on global-memory reads.
 //
 // References:
-//   - NULLGLASS V4 tile: 160 bytes (144B nibbles + 16B header)
+//   - NULLGLASS tile: 160 bytes (144B nibbles + 16B header)
 //   - block_fp4_mmq: 144-byte weight tiles consumed by OMMA.SF.16864.UE4M3.4X
 
 #ifndef DEN_ASYNC_DOUBLE_BUFFER_CUH

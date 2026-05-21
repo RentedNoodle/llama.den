@@ -11,8 +11,11 @@
 #pragma once
 #include <cstdint>
 
-#define MAX_CONSUMER_SLOTS 4
-#define MAX_CONSUMER_TYPES 8
+#define MAX_CONSUMER_SLOTS   4
+#define MAX_CONSUMER_TYPES   8
+
+// Consumer type IDs — registered by host, dispatched by device
+#define CONSUMER_PHI_MEASURER  6   // Integrated information measurement
 
 // Flags for ConsumerType
 #define CONSUMER_FLAG_PERSISTENT     (1u << 0)

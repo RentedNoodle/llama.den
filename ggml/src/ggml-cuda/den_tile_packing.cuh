@@ -30,7 +30,7 @@
 #include <cstdint>
 
 // ── Compile-time constants ───────────────────────────────────────────────────
-// Matches TILE_K=256, TILE_BYTES=160 NULLGLASS V4 format
+// Matches TILE_K=256, TILE_BYTES=160 NULLGLASS format
 static constexpr int DEN_TK_TILE_K       = 256;   // elements per tile (K dimension)
 static constexpr int DEN_TK_TILE_BYTES    = 160;   // 144B NVFP4 data + 16B cognitive header
 static constexpr int DEN_TK_SCALE_BLOCKS  = 16;    // 16 blocks of K=16 per tile

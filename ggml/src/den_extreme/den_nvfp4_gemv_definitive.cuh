@@ -39,7 +39,7 @@ __device__ __forceinline__ uint8_t quant_f32_e2m1(float fv) {
     return n;
 }
 
-// TILE_BYTES = 160 per block_fp4_mmq tile (NULLGLASS V4: 144B data + 16B header)
+// TILE_BYTES = 160 per block_fp4_mmq tile (NULLGLASS: 144B data + 16B header)
 // KBLOCK = 2560 = 16 tiles × 160 bytes = 256 elements per K-block
 #define DEF_TILE_BYTES  160
 #define DEF_KBLOCK_ELEM 256

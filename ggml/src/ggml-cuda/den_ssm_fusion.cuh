@@ -174,7 +174,7 @@ __global__ void ssm_fused_attn_q_kernel(
     // The weight matrix w_q [head_dim, hidden] is stored in NVFP4 tiles:
     //   144B per K=256 block, 160B padded for L2 alignment.
     //
-    // Tile layout (NULLGLASS V4):
+    // Tile layout (NULLGLASS):
     //   bytes  0-15:  4 × uint32 sfa (scale factor A, one per K=64 OMMA)
     //   bytes 16-143: 128B nibble data (4 × 32B per OMMA K=64)
     //   bytes 144-159: header (sfb, Hadamard signs, etc.)
