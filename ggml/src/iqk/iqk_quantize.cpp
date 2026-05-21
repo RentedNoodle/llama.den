@@ -4329,6 +4329,28 @@ void dequantize_row_nvfp4(const block_nvfp4 * x, float * y, int64_t k) {
     }
 }
 
+void vec_dot_nvfp4_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc) {
+    // CPU fallback: dequantize NVFP4 to F32 on-the-fly, then dot with F32 activations.
+    // Slow path (only hit when ngl < 99 pushes NVFP4 layers to CPU).
+    // Note: n may be much larger than QK_NVFP4 (e.g., ne00 = 2560 for [4B model),
+    // so dequant is processed one block at a time to avoid large stack allocation.
+    GGML_ASSERT(n % QK_NVFP4 == 0);
+    int nblock = n / QK_NVFP4;
+    float tmp[QK_NVFP4];
+    for (int ir = 0; ir < nrc; ++ir) {
+        const block_nvfp4 * src0_row = (const block_nvfp4 *)((const char *)vx + ir * bx);
+        const float *       src1_row = (const float *)((const char *)vy + ir * by);
+        float sum = 0.0f;
+        for (int ib = 0; ib < nblock; ++ib) {
+            dequantize_row_nvfp4(src0_row + ib, tmp, QK_NVFP4);
+            for (int i = 0; i < QK_NVFP4; ++i) {
+                sum += tmp[i] * src1_row[ib * QK_NVFP4 + i];
+            }
+        }
+        s[ir * (bs / sizeof(float))] = sum;
+    }
+}
+
 void quantize_row_nvfp4_ref(const float * x, block_nvfp4 * y, int64_t k) {
     (void)x;
     GGML_ASSERT(k % QK_NVFP4 == 0);

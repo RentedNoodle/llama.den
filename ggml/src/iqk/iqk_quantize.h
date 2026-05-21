@@ -78,6 +78,7 @@ void   vec_dot_mxfp4_q8_0_x4(int n, float * GGML_RESTRICT s, size_t bs, const vo
 void   quantize_row_nvfp4_ref(const float * GGML_RESTRICT x, block_nvfp4  * GGML_RESTRICT y, int64_t k);
 void   quantize_row_nvfp4(const float * GGML_RESTRICT x, void * GGML_RESTRICT y, int64_t k);
 void   dequantize_row_nvfp4(const block_nvfp4 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k);
+void   vec_dot_nvfp4_f32(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 void   vec_dot_nvfp4_q8_0_x4(int n, float * GGML_RESTRICT s, size_t bs, const void * GGML_RESTRICT vx, size_t bx, const void * GGML_RESTRICT vy, size_t by, int nrc);
 
 void   quantize_row_iq2_ks_ref(const float * GGML_RESTRICT x, block_iq2_ks  * GGML_RESTRICT y, int64_t k);

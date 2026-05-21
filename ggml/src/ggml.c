@@ -1348,11 +1348,11 @@ static const ggml_type_traits_t type_traits[GGML_TYPE_COUNT] = {
         .blck_size                = QK_NVFP4,
         .type_size                = sizeof(block_nvfp4),
         .is_quantized             = true,
-        .to_float                 = NULL,  // NVFP4: no CPU dequant path — CUDA OMMA only
+        .to_float                 = (ggml_to_float_t) dequantize_row_nvfp4,
         .from_float               = NULL,  // quantize handled on-the-fly in kernel
         .from_float_ref           = NULL,
-        .vec_dot                  = NULL,  // OMMA-only: no CPU fallback exists
-        .vec_dot_type             = GGML_TYPE_NVFP4, // force CUDA routing, CPU will skip
+        .vec_dot                  = (ggml_vec_dot_t) vec_dot_nvfp4_f32,
+        .vec_dot_type             = GGML_TYPE_F32,
         .nrows                    = 1,
         .row_meta_size            = 0,
     },
@@ -12973,6 +12973,7 @@ static void ggml_compute_forward_add(
         case GGML_TYPE_I2_S:
         case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
+        case GGML_TYPE_NVFP4:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:
@@ -13527,6 +13528,7 @@ static void ggml_compute_forward_add1(
         case GGML_TYPE_I2_S:
         case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
+        case GGML_TYPE_NVFP4:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:
@@ -13707,6 +13709,7 @@ static void ggml_compute_forward_acc(
         case GGML_TYPE_I2_S:
         case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
+        case GGML_TYPE_NVFP4:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:
@@ -17693,6 +17696,42 @@ static void ggml_compute_forward_mul_mat_up_gate(
     GGML_ASSERT(nb2 <= nb3);
     GGML_ASSERT(ne13 == 1);
 
+    // NVFP4 CPU fallback: dequant weights to F32, dot with F32 activations,
+    // then apply SiLU activation and combine up×gate.
+    if (type == GGML_TYPE_NVFP4) {
+        const int ncols = (int)ne00;
+        float * tmp_row = (float *)params->wdata + ith * ncols;
+        for (int64_t ir = ith; ir < ne01; ir += nth) {
+            // Dequantize gate weights row
+            dequantize_row_nvfp4(
+                (const block_nvfp4 *)((const char *)src0_2->data + ir * nb01),
+                tmp_row, ncols);
+            float gate_val = 0.0f;
+            for (int i = 0; i < ncols; i++) {
+                gate_val += tmp_row[i] * ((const float *)src1->data)[i];
+            }
+            // SiLU activation
+            float sig = 1.0f / (1.0f + expf(-gate_val));
+            float gate_act = gate_val * sig;
+            // Dequantize up weights row
+            dequantize_row_nvfp4(
+                (const block_nvfp4 *)((const char *)src0_1->data + ir * nb01),
+                tmp_row, ncols);
+            float up_val = 0.0f;
+            for (int i = 0; i < ncols; i++) {
+                up_val += tmp_row[i] * ((const float *)src1->data)[i];
+            }
+            // Apply clamping limit if set
+            float result = up_val * gate_act;
+            float limit = *(const float *)(dst->op_params + 1);
+            if (limit > 1e-6f) {
+                result = fmaxf(-limit, fminf(limit, result));
+            }
+            ((float *)dst->data)[ir] = result;
+        }
+        return;
+    }
+
     ggml_from_float_t const from_float = type_traits[vec_dot_type].from_float;
 
     char * wdata = params->wdata;
@@ -17704,28 +17743,39 @@ static void ggml_compute_forward_mul_mat_up_gate(
     assert(params->wsize >= ne13*nbw3);
     GGML_ASSERT(src1->type == GGML_TYPE_F32);
 
-    for (int64_t i13 = 0; i13 < ne13; ++i13) {
-        for (int64_t i12 = 0; i12 < ne12; ++i12) {
-            for (int64_t i11 = ith; i11 < ne11; i11 += nth) {
-                from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11),
-                           (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1),
-                           ne10);
+    if (from_float) {
+        for (int64_t i13 = 0; i13 < ne13; ++i13) {
+            for (int64_t i12 = 0; i12 < ne12; ++i12) {
+                for (int64_t i11 = ith; i11 < ne11; i11 += nth) {
+                    from_float((float *)((char *) src1->data + i13*nb13 + i12*nb12 + i11*nb11),
+                               (void *)               (wdata + i13*nbw3 + i12*nbw2 + i11*nbw1),
+                               ne10);
+                }
             }
         }
+    } else {
+        // from_float is NULL — no conversion needed (vec_dot_type == src1->type)
+        // Use src1 data directly via wdata pointer
+        wdata = (char *)src1->data;
     }
 
     ggml_barrier(params->shared);
 
     float limit = *(const float *)(dst->op_params + 1);
 
-    const size_t row_size = ggml_row_size(vec_dot_type, ne10);
+    const size_t row_size = ggml_row_size(from_float ? vec_dot_type : src1->type, ne10);
 
     if (!iqk_moe_fused_up_gate(ne01, ne11, ne00, ne11, dst->op_params[0],
                          type, src0_1->data, src0_2->data, nb01,
                          vec_dot_type, (const char *)wdata, row_size,
                          NULL, NULL,
                          (float *)dst->data, nb1, nb2,
-                         NULL, limit, ith, nth)) GGML_ABORT("fatal error");
+                         NULL, limit, ith, nth)) {
+        // If the IQK backend doesn't support this type combination, compute via
+        // dequant-to-F32 and F32 dot product (already handled above for NVFP4).
+        // For other unsupported types, abort.
+        GGML_ABORT("fatal error");
+    }
 
 }
 #endif
@@ -18040,6 +18090,7 @@ static void ggml_compute_forward_out_prod(
         case GGML_TYPE_I2_S:
         case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
+        case GGML_TYPE_NVFP4:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:
@@ -18464,6 +18515,7 @@ static void ggml_compute_forward_set(
         case GGML_TYPE_I2_S:
         case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
+        case GGML_TYPE_NVFP4:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:
@@ -18794,6 +18846,7 @@ static void ggml_compute_forward_get_rows(
         case GGML_TYPE_I2_S:
         case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
+        case GGML_TYPE_NVFP4:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:
@@ -19552,6 +19605,7 @@ static void ggml_compute_forward_clamp(
         case GGML_TYPE_I2_S:
         case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
+        case GGML_TYPE_NVFP4:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:

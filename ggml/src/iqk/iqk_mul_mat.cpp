@@ -792,6 +792,74 @@ extern "C" IQK_API bool iqk_moe_fused_up_gate(long Nx, long Ny, long ne00, int n
     MulMat mm;
 
     auto etypeA = ggml_type(typeA);
+    // NVFP4 CPU fallback: dequant in-place to Q8_0_R8 format so the IQK
+    // kernel pipeline can process it.  This is a slow path (only hit when
+    // ngl < 99 pushes NVFP4 layers to CPU), and Q8_0 round-trip is cheap
+    // enough to not worry about the extra arithmetic.
+    float tmp_f32[QK_NVFP4];
+    if (etypeA == GGML_TYPE_NVFP4) {
+        // Re-pack as Q8_0_R8 rows in the A buffer (strideA is the row stride)
+        const int ncols = (int)ne00;
+        // We need to Nx * row_size bytes for the repacked output. Use a
+        // thread-local buffer or the A buffer itself.  Since the input NVFP4
+        // data is block_nvfp4 (160 B per QK_NVFP4 block) and the output Q8_0
+        // data is smaller (34 B per 32 elements), we can convert row-by-row
+        // and write back into the same memory range without aliasing issues
+        // as long as we don't read the NVFP4 data after overwriting it.
+        // For simplicity, dequant to F32 first, then quantize to Q8_0_R8
+        // into the Vy buffer (reusing the standard IQK output layout).
+        const int qk8 = 32; // QK8_0
+        const int nblock_q8 = (ncols + qk8 - 1) / qk8;
+        const size_t q8_row_size = nblock_q8 * (sizeof(ggml_half) + qk8);
+        // Compute into thread-local scratch then row-by-row into thread's
+        // region of the Vy output pointer (which is the C matrix region,
+        // used as temporary workspace since this is the slow CPU path).
+        char * q8_buf = (char *)C + ith * q8_row_size;
+        for (long ir = ith; ir < Nx; ir += nth) {
+            // Dequant NVFP4 row to F32
+            dequantize_row_nvfp4(
+                (const block_nvfp4 *)((const char *)Aup + ir * strideA),
+                tmp_f32, ncols);
+            // Quantize F32 to Q8_0_R8 (block_q8_0 format)
+            for (int b = 0; b < nblock_q8; b++) {
+                int offset = b * qk8;
+                int remaining = ncols - offset;
+                int len = remaining > qk8 ? qk8 : (int)remaining;
+                float amax = 0.0f;
+                for (int j = 0; j < len; j++) {
+                    float a = fabsf(tmp_f32[offset + j]);
+                    if (a > amax) amax = a;
+                }
+                float d = amax / 127.0f;
+                if (amax == 0.0f) d = 1.0f;
+                ggml_half d_half = GGML_FP32_TO_FP16(d);
+                memcpy(q8_buf + ir * q8_row_size + b * (sizeof(ggml_half) + qk8),
+                       &d_half, sizeof(ggml_half));
+                int8_t * qs = (int8_t *)(q8_buf + ir * q8_row_size +
+                    b * (sizeof(ggml_half) + qk8) + sizeof(ggml_half));
+                float inv_d = 1.0f / d;
+                for (int j = 0; j < len; j++) {
+                    float v = tmp_f32[offset + j] * inv_d;
+                    qs[j] = (int8_t)(v >= 0.0f ? v + 0.5f : v - 0.5f);
+                }
+                for (int j = len; j < qk8; j++) {
+                    qs[j] = 0;
+                }
+            }
+        }
+        // Now compute the fused up+gate using Q8_0_R8 repacked weights
+        // and the original B data (F32 or vec_dot_type).
+        long q8_stride = q8_row_size;
+        if (!iqk_moe_fused_up_gate(Nx, Ny, ne00, ne11, unary_op,
+                GGML_TYPE_Q8_0, q8_buf, q8_buf, q8_stride,
+                typeB, B, strideB,
+                up_b_c, gate_b_c,
+                C, nb1, nb2, vrow_mapping, limit, ith, nth)) {
+            return false;
+        }
+        return true;
+    }
+
     if (auto dequant_type = MulMat::is_dequant_better(etypeA, Ny); dequant_type != etypeA) {
         if (MulMat::prepare(dequant_type, typeB, ne00, mm, Ny)) {
 

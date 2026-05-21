@@ -411,6 +411,7 @@ if (GGML_CUDA)
         # Wavefront tile scheduler + register-level tile broadcast (Project Den optimizations)
         add_compile_definitions(DEN_USE_WAVEFRONT_SCHEDULER)
         add_compile_definitions(DEN_USE_REG_BROADCAST)
+        add_compile_definitions(DEN_USE_CATS)
 
         # Hardware availability defines for GB203-300-A1 SM120 Blackwell.
         # NVENC (encoder) + NVDEC (decoder): present on GB203, ffnvcodec headers
