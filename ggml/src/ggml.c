@@ -19558,6 +19558,36 @@ static void ggml_compute_forward_clamp(
             {
                 ggml_compute_forward_clamp_f32(params, dst);
             } break;
+        case GGML_TYPE_NVFP4:
+            {
+                // CPU fallback: dequant NVFP4 block_fp4_mmq to F32, apply clamp
+                const int ith = params->ith;
+                const int nth = params->nth;
+
+                float min, max;
+                memcpy(&min, (float *) dst->op_params + 0, sizeof(float));
+                memcpy(&max, (float *) dst->op_params + 1, sizeof(float));
+
+                const int n  = ggml_nrows(src0);
+                const int nc = src0->ne[0];
+
+                const size_t nb01 = src0->nb[1];
+                const size_t nb1  = dst->nb[1];
+
+                // Use params->wdata for row scratch buffer
+                // (assuming each thread gets a slice large enough for nc floats)
+                float * tmp = (float *)params->wdata + ith * (nc + 32);
+
+                for (int j = ith; j < n; j += nth) {
+                    dequantize_row_nvfp4(
+                        (const block_nvfp4 *)((const char *)src0->data + j * nb01),
+                        tmp, nc);
+                    float * dst_ptr = (float *)((char *)dst->data + j * nb1);
+                    for (int i = 0; i < nc; i++) {
+                        dst_ptr[i] = MAX(MIN(tmp[i], max), min);
+                    }
+                }
+            } break;
         case GGML_TYPE_F16:
         case GGML_TYPE_BF16:
         case GGML_TYPE_BF16_R16:
@@ -19603,9 +19633,7 @@ static void ggml_compute_forward_clamp(
         case GGML_TYPE_Q5_0_R4:
         case GGML_TYPE_Q6_0_R4:
         case GGML_TYPE_I2_S:
-        case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
-        case GGML_TYPE_NVFP4:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:
