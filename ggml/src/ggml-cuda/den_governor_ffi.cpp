@@ -329,3 +329,32 @@ extern "C" void den_phi_read_state(const void* ctx_ptr,
     *phi_coherence = ctx->phi_coherence;
     *phi_conscious = ctx->phi_conscious;
 }
+
+// ── Neuromodulator read (unpack from GovernorContext) ───────────────────
+
+extern "C" void den_neuromod_read(const void* ctx_ptr,
+                                   float* dopamine,
+                                   float* serotonin,
+                                   float* acetylcholine,
+                                   float* norepinephrine) {
+    if (!ctx_ptr || !dopamine || !serotonin || !acetylcholine || !norepinephrine) return;
+    auto* ctx = static_cast<const GovernorContext*>(ctx_ptr);
+    ctx->seq.load(std::memory_order_acquire); // seq barrier
+
+    // Unpack FP16 neuromodulators from packed pairs
+    // neuro_da_5ht: [DA:16][5HT:16] FP16
+    // neuro_ach_ne: [ACh:16][NE:16] FP16
+    *dopamine        = fp16_to_f32_host((ctx->neuro_da_5ht >> 16) & 0xFFFF);
+    *serotonin       = fp16_to_f32_host(ctx->neuro_da_5ht & 0xFFFF);
+    *acetylcholine   = fp16_to_f32_host((ctx->neuro_ach_ne >> 16) & 0xFFFF);
+    *norepinephrine  = fp16_to_f32_host(ctx->neuro_ach_ne & 0xFFFF);
+}
+
+// ── Cognitive clock read ──────────────────────────────────────────────
+
+extern "C" uint32_t den_cognitive_clock_read(const void* ctx_ptr) {
+    if (!ctx_ptr) return 0;
+    auto* ctx = static_cast<const GovernorContext*>(ctx_ptr);
+    ctx->seq.load(std::memory_order_acquire); // seq barrier
+    return ctx->cognitive_clock;
+}

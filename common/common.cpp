@@ -1437,7 +1437,13 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
     }
     if (arg == "-md" || arg == "--model-draft") {
         CHECK_ARG
-        params.speculative.model = argv[i];
+        if (strcmp(argv[i], "self") == 0) {
+            // --model-draft self: use CATS self-speculation instead of a separate draft model
+            params.speculative.type = COMMON_SPECULATIVE_TYPE_CATS;
+            params.speculative.model = "";
+        } else {
+            params.speculative.model = argv[i];
+        }
         return true;
     }
     if (arg == "--spec-stage") {
@@ -3146,7 +3152,7 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
                                                                         "layer range to apply the control vector(s) to, start and end inclusive" });
     options.push_back({ "*",           "-m,    --model FNAME",          "model path (default: models/$filename with filename from --hf-file\n"
                                                                         "or --model-url if set, otherwise %s)", DEFAULT_MODEL_PATH });
-    options.push_back({ "*",           "-md,   --model-draft FNAME",    "draft model for speculative decoding (default: unused)" });
+    options.push_back({ "*",           "-md,   --model-draft FNAME",    "draft model for speculative decoding. Use \"self\" for CATS self-speculation (default: unused)" });
     options.push_back({ "*",           "-mu,   --model-url MODEL_URL",  "model download url (default: unused)" });
     options.push_back({ "*",           "-hfr,  --hf-repo REPO",         "Hugging Face model repository (default: unused)" });
     options.push_back({ "*",           "-hff,  --hf-file FILE",         "Hugging Face model file (default: unused)" });

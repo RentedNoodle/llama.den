@@ -191,6 +191,15 @@ void den_subvocal_disable(void* ctx);
 // Returns phi_value, phi_coherence, and phi_conscious via output params.
 void den_phi_read_state(const void* ctx, float* phi_value, float* phi_coherence, int* phi_conscious);
 
+// Read neuromodulator levels from GovernorContext.
+// Unpacks the packed FP16 neuromodulator state from GovernorContext.
+void den_neuromod_read(const void* ctx, float* dopamine, float* serotonin,
+                        float* acetylcholine, float* norepinephrine);
+
+// Read current cognitive clock mode from GovernorContext.
+// Returns the cognitive clock value (0=Observe ... 5=InternalThought).
+uint32_t den_cognitive_clock_read(const void* ctx);
+
 #ifdef __cplusplus
 }
 #endif
