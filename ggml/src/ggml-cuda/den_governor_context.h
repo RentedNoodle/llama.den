@@ -99,11 +99,29 @@ struct GovernorContext {
     uint8_t  next_tensor_types[16];         // Predicted next types for promotion
     uint16_t conversion_budget;             // Cycles spent on conversions this step
     uint16_t conversion_budget_max;         // Max allowed per step (default: 100)
+
+    // [8] GOV_LEARN — self-learning fields (826 bytes)
+    float modality_profile[168];            // hourly usage profile (7 days x 24h)
+    float scale_gate_threshold_ema;         // EMA for auto-tuner
+    float baseline_ppl;                     // reference PPL
+    float current_ppl;                      // latest measured PPL
+    float consumer_budget_ema[6];           // per-consumer budget EMA
+    float consumer_usage[6];                // per-consumer recent usage
+    float vram_slope_history[16];           // VRAM slope window
+    uint8_t vram_slope_idx;                 // ring buffer index
+    float gpu_temp_prev;                    // previous temp reading
+    int tile_batch_size;                    // adaptive tile batch
+    float vram_free_prev;                   // previous VRAM free (bytes)
+    uint32_t kairos_tick_count;             // monotonic tick counter
+    float current_modality_weight;          // [input] current modality weight (0..1)
+    float vram_free;                        // [input] current VRAM free (bytes)
+    float gpu_temp;                         // [input] current GPU temperature (C)
+    uint8_t vram_pressure_flag;             // [output] pre-eviction signal
 };
 #pragma pack(pop)
 
-static_assert(sizeof(GovernorContext) == 109,
-    "GovernorContext must be 109B (attn_scale_threshold field added)");
+static_assert(sizeof(GovernorContext) == 935,
+    "GovernorContext must be 935B (GOV_LEARN learning fields added)");
 
 // ── C ABI: extern "C" functions exposed to Rust FFI ────────────────
 

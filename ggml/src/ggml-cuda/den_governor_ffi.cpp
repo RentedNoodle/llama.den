@@ -57,6 +57,24 @@ void* den_governor_init(void) {
     ctx->holographic_prosody_enabled = 0;
     ctx->sm_partitioning_enabled = 0;
 
+    // ── GOV_LEARN initialization ────────────────────────────────────────
+    memset(ctx->modality_profile, 0, sizeof(ctx->modality_profile));
+    ctx->scale_gate_threshold_ema = 0.1f;
+    ctx->baseline_ppl = 10.0f;
+    ctx->current_ppl = 10.0f;
+    ctx->tile_batch_size = 64;
+    ctx->kairos_tick_count = 0;
+    ctx->vram_slope_idx = 0;
+    ctx->gpu_temp_prev = 0.0f;
+    ctx->vram_free_prev = 0.0f;
+    ctx->vram_pressure_flag = 0;
+    ctx->current_modality_weight = 0.0f;
+    ctx->vram_free = 0.0f;
+    ctx->gpu_temp = 0.0f;
+    memset(ctx->consumer_budget_ema, 0, sizeof(ctx->consumer_budget_ema));
+    memset(ctx->consumer_usage, 0, sizeof(ctx->consumer_usage));
+    memset(ctx->vram_slope_history, 0, sizeof(ctx->vram_slope_history));
+
     fprintf(stderr, "[GOVERNOR] ctx=%p size=%zu initialized\n",
             (void*)ctx, sizeof(GovernorContext));
     return ctx;

@@ -94,7 +94,8 @@ enum GovState : uint8_t {
     GOV_TDR_RECOVERY,
     GOV_SLEEP,
     GOV_DREAM,
-    GOV_SUBVOCAL        // Layer-20 truncation for internal cognition ticks
+    GOV_SUBVOCAL,       // Layer-20 truncation for internal cognition ticks
+    GOV_LEARN           // Always-on passive learning observer (14th state)
 };
 
 struct GovernorContext {
@@ -133,6 +134,24 @@ struct GovernorContext {
     WorkloadClass        last_workload;        // most recent classification
     WorkloadClass        prev_workload;        // classification before last
     HWBlock              selected_hw_block;    // G3 dispatch decision (HW_TENSOR_CORE etc.)
+
+    // ── GOV_LEARN — self-learning fields (826 bytes) ─────────────────────
+    float                modality_profile[168];    // hourly usage profile (7 days x 24h)
+    float                scale_gate_threshold_ema; // EMA for auto-tuner
+    float                baseline_ppl;             // reference PPL
+    float                current_ppl;              // latest measured PPL
+    float                consumer_budget_ema[6];   // per-consumer budget EMA
+    float                consumer_usage[6];        // per-consumer recent usage
+    float                vram_slope_history[16];   // VRAM slope window
+    uint8_t              vram_slope_idx;           // ring buffer index
+    float                gpu_temp_prev;            // previous temp reading
+    int                  tile_batch_size;          // adaptive tile batch
+    float                vram_free_prev;           // previous VRAM free (bytes)
+    uint32_t             kairos_tick_count;        // monotonic tick counter
+    float                current_modality_weight;  // [input] current modality weight (0..1)
+    float                vram_free;                // [input] current VRAM free (bytes)
+    float                gpu_temp;                 // [input] current GPU temperature (C)
+    uint8_t              vram_pressure_flag;       // [output] pre-eviction signal
 };
 
 __host__ __device__ inline pressure_level_t effective_pressure(
@@ -181,6 +200,24 @@ __host__ inline void governor_init(GovernorContext* ctx) {
     ctx->last_workload = WL_UNKNOWN;
     ctx->prev_workload = WL_UNKNOWN;
     ctx->selected_hw_block = HW_SM;
+
+    // GOV_LEARN initialization
+    memset(ctx->modality_profile, 0, sizeof(ctx->modality_profile));
+    ctx->scale_gate_threshold_ema = 0.1f;
+    ctx->baseline_ppl = 10.0f;
+    ctx->current_ppl = 10.0f;
+    ctx->tile_batch_size = 64;
+    ctx->kairos_tick_count = 0;
+    ctx->vram_slope_idx = 0;
+    ctx->gpu_temp_prev = 0.0f;
+    ctx->vram_free_prev = 0.0f;
+    ctx->vram_pressure_flag = 0;
+    ctx->current_modality_weight = 0.0f;
+    ctx->vram_free = 0.0f;
+    ctx->gpu_temp = 0.0f;
+    memset(ctx->consumer_budget_ema, 0, sizeof(ctx->consumer_budget_ema));
+    memset(ctx->consumer_usage, 0, sizeof(ctx->consumer_usage));
+    memset(ctx->vram_slope_history, 0, sizeof(ctx->vram_slope_history));
 }
 
 // ── governor_tick ──────────────────────────────────────────────────────────
@@ -225,6 +262,9 @@ __host__ inline void governor_tick(
     ctx->last_workload = wc;
 }
 
+// Forward declaration for gov_learn_tick (defined below, called from transition_state)
+__host__ inline void gov_learn_tick(GovernorContext* ctx);
+
 // ── transition_state ───────────────────────────────────────────────────────
 // Transition the Governor FSM to a new state, running the G1-G4 pipeline.
 //
@@ -248,6 +288,9 @@ __host__ inline GovState transition_state(
     // Run the G1-G4 pipeline for every state transition
     governor_tick(ctx,
         omma_util, mem_bw_util, rt_queries_per_omma, l2_hit_rate, primary_hw_util);
+
+    // GOV_LEARN always ticks — passive learning observer alongside all states
+    gov_learn_tick(ctx);
 
     pressure_level_t eff = effective_pressure(*ctx);
     switch (requested) {
@@ -275,6 +318,76 @@ __host__ inline GovState transition_state(
 __device__ inline void tdr_heartbeat(volatile int* counter) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         atomicAdd((int*)counter, 1);
+    }
+}
+
+// ── gov_learn_tick ──────────────────────────────────────────────────────────
+// Always-on passive learning observer.  Ticks alongside every FSM state
+// transition to evolve five performance models:
+//
+//   1. Modality usage profile  — per-hour-of-week usage histogram
+//   2. Threshold auto-tuner    — adjusts attn_scale_threshold from PPL delta
+//   3. Consumer budget learner — EMA of per-consumer VRAM usage
+//   4. VRAM pressure anticipator — slope detection for pre-eviction signals
+//   5. Thermal drift compensator — batch-size dial-back under sustained load
+//
+// All state lives in GovernorContext.  The function is host-side because
+// the FSM GovernorContext contains C++ objects (WorkloadClassifier etc.)
+// that cannot be accessed from device code.
+//
+// Each of the five sub-learners runs every tick (fast EMA pathways) or
+// at a coarser cadence (modality profile samples every 240 ticks = 1 h).
+__host__ inline void gov_learn_tick(GovernorContext* ctx) {
+    ctx->kairos_tick_count++;
+
+    // ── 1. Modality usage tracker ───────────────────────────────────────
+    // Samples every 240 ticks (15 s x 240 = 1 h) into a 168-bin week profile
+    int hour = (ctx->kairos_tick_count / 240) % 168;
+    ctx->modality_profile[hour] = ctx->modality_profile[hour] * 0.99f
+                                  + ctx->current_modality_weight * 0.01f;
+
+    // ── 2. Threshold auto-tuner ─────────────────────────────────────────
+    // Every tick: compare measured PPL to baseline, nudge threshold up
+    // when PPL is stable (< 5 % drift) or back off when PPL spikes (> 10 %).
+    float delta = ctx->current_ppl - ctx->baseline_ppl;
+    if (delta < 0.05f && ctx->scale_gate_threshold_ema < 0.5f) {
+        ctx->scale_gate_threshold_ema += 0.01f;
+    } else if (delta > 0.1f) {
+        ctx->scale_gate_threshold_ema -= 0.05f;
+        if (ctx->scale_gate_threshold_ema < 0.0f) ctx->scale_gate_threshold_ema = 0.0f;
+    }
+
+    // ── 3. Consumer budget learner ──────────────────────────────────────
+    // Per-consumer EMA (6 slots: LLM, vision, audio, ASR, cognitive, system)
+    for (int i = 0; i < 6; i++) {
+        ctx->consumer_budget_ema[i] = ctx->consumer_budget_ema[i] * 0.99f
+                                      + ctx->consumer_usage[i] * 0.01f;
+    }
+
+    // ── 4. VRAM pressure anticipator ────────────────────────────────────
+    // Ring buffer of VRAM release slopes; 4-sample average < -1 GB/s
+    // triggers a pre-eviction signal.
+    float slope = (ctx->vram_free - ctx->vram_free_prev) / 15.0f;
+    ctx->vram_slope_history[ctx->vram_slope_idx++ % 16] = slope;
+    ctx->vram_free_prev = ctx->vram_free;
+
+    float avg_slope = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        avg_slope += ctx->vram_slope_history[(ctx->vram_slope_idx - 1 - i + 16) % 16];
+    }
+    avg_slope /= 4.0f;
+    if (avg_slope < -1e9f) {
+        ctx->vram_pressure_flag = 1;
+    }
+
+    // ── 5. Thermal drift compensator ────────────────────────────────────
+    // Low-pass filtered GPU temp: above 80 C dial back tile batch,
+    // below 70 C cautiously increase (clamped [4, 64]).
+    ctx->gpu_temp_prev = ctx->gpu_temp_prev * 0.9f + ctx->gpu_temp * 0.1f;
+    if (ctx->gpu_temp_prev > 80.0f && ctx->tile_batch_size > 4) {
+        ctx->tile_batch_size -= 1;
+    } else if (ctx->gpu_temp_prev < 70.0f && ctx->tile_batch_size < 64) {
+        ctx->tile_batch_size += 1;
     }
 }
 
