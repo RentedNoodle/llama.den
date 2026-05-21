@@ -4053,7 +4053,7 @@ static void split_recurrent_tensors(const llama_hparams & hparams, llama_layer &
 
     GGML_ASSERT(layer.ssm_in || (layer.wqkv && layer.wqkv_gate));
     //int repeat_type = layer.ssm_in ? 0 : 1;
-    int repeat_type = layer.ssm_beta_alpha ? 0 : 1;
+    int repeat_type = 0;
 
     {
         // We do not support quantized ssm_dt and ssm_a

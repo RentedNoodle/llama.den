@@ -111,6 +111,12 @@ std::pair<ggml_tensor *, ggml_tensor *> delta_net::build_fused_delta_net(ggml_co
     v = ggml_permute(ctx0, v, 0, 2, 1, 3);
     g = ggml_permute(ctx0, g, 2, 0, 3, 1);
     beta = ggml_permute(ctx0, beta, 2, 0, 1, 3);
+    // CRITICAL: ggml_permute only changes stride attributes — does NOT reorder memory.
+    // The GPU kernel uses flat offset math (t * n_heads) that bypasses permuted strides.
+    // Without ggml_cont, g and beta values are read across WRONG tokens/heads/batches.
+    v    = ggml_cont(ctx0, v);
+    g    = ggml_cont(ctx0, g);
+    beta = ggml_cont(ctx0, beta);
 
     ggml_tensor * state_flat = ggml_reshape_4d(ctx0, state, S_v, S_v * H_v, 1, n_seqs);
     if (!ggml_is_contiguous(state_flat)) {
@@ -401,6 +407,10 @@ ggml_tensor * delta_net::build_gated_output(llama_context & lctx, ggml_context *
 
     ggml_tensor * attn_out_norm = llm_build_context::llm_build_norm(ctx0, attn_out_2d, lctx.model.hparams, ssm_norm, nullptr, LLM_NORM_RMS, cb, il);
     cb(attn_out_norm, "attn_rms_norm", il);
+    // SwiGLU output gate: attn_out *= silu(z) before ssm_out projection.
+    // CoreML/dnova analysis confirms Qwen3.5 SSM uses SiLU (not sigmoid)
+    // for the output gate: "attn_output_gate applied via silu(x @ attn_gate_weight)
+    // before ssm_out projection."
     attn_out_norm = ggml_fused_mul_unary(ctx0, z_2d, attn_out_norm, GGML_UNARY_OP_SILU);
     cb(attn_out_norm, "attn_out_norm", il);
 
@@ -529,7 +539,7 @@ ggml_tensor * delta_net::build_layer_attn_linear_core(ggml_context * ctx0, ggml_
             auto output = build_qkv(ctx0, split_s_l->splits[id], split_ssm_conv1d->splits[id], qkv_mixed, inp_s_seq_qnext, beta, gate,
                                head_k_dim, num_k_heads_id, head_v_dim, num_v_heads_id, hparams.ssm_d_conv,
                                state_seq_id_local, qnext_state_slots, reset_state_local, hparams.f_norm_rms_eps,
-                               l.ssm_beta_alpha ? 0 : 1, il, cb, gf, per_step_ckpt, per_step_conv);
+                               0, il, cb, gf, per_step_ckpt, per_step_conv);
             split_norm = (ggml_split_tensor_t *)l.ssm_norm->extra;
             GGML_ASSERT(split_norm && split_norm->splits[id]);
             auto split_ssm_out = (ggml_split_tensor_t *)l.ssm_out->extra;
@@ -592,7 +602,7 @@ ggml_tensor * delta_net::build_layer_attn_linear_core(ggml_context * ctx0, ggml_
         qkv_mixed, inp_s_seq_qnext, beta, gate,
         head_k_dim, num_k_heads, head_v_dim, num_v_heads, hparams.ssm_d_conv,
         state_seq_id_local, qnext_state_slots, reset_state_local, hparams.f_norm_rms_eps,
-        model.layers[il].ssm_beta_alpha ? 0 : 1, il, cb, gf, per_step_ckpt, per_step_conv);
+        0, il, cb, gf, per_step_ckpt, per_step_conv);
 
     auto gated_output = build_gated_output(lctx, ctx0, model.layers[il].ssm_norm, model.layers[il].ssm_out, output, z, head_v_dim, num_v_heads, n_tok, il, cb);
     if (inp_out_ids) {

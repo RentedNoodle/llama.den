@@ -2302,7 +2302,7 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
         self.gguf_writer.add_ssm_conv_kernel(ssm_conv_kernel)
         self.gguf_writer.add_ssm_time_step_rank(ssm_dt_rank)
         self.gguf_writer.add_ssm_group_count(ssm_group_count)
-        # Rope dimension sections
+        # Rope parameters (mrope sections, freq_base, partial rotary factor)
         rope_params = self.hparams.get("rope_parameters", {})
         if isinstance(rope_params, dict):
             mrope_section = rope_params.get("mrope_section")
@@ -2311,6 +2311,23 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
                 while len(sections) < 4:
                     sections.append(0)
                 self.gguf_writer.add_rope_dimension_sections(sections)
+            # rope_theta (freq_base) is nested inside rope_parameters
+            rope_theta = rope_params.get("rope_theta")
+            if rope_theta is not None:
+                self.gguf_writer.add_rope_freq_base(float(rope_theta))
+            # partial_rotary_factor -> n_rot (rope dimension count)
+            partial_factor = rope_params.get("partial_rotary_factor")
+            if partial_factor is not None:
+                n_rot = int(
+                    self.hparams.get("head_dim",
+                        self.hparams.get("hidden_size", 1024)
+                        // self.hparams.get("num_attention_heads", 8))
+                    * partial_factor)
+                self.gguf_writer.add_rope_dimension_count(n_rot)
+        # Full attention interval (required for recurrent layer marking)
+        full_attn_interval = self.hparams.get("full_attention_interval")
+        if full_attn_interval is not None:
+            self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.full_attention_interval", int(full_attn_interval))
 
     def set_vocab(self):
         try:
@@ -2455,8 +2472,8 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
         if "linear_attn.norm" in name:
             name = name.replace("linear_attn.norm", "ssm_norm")
             name = name.replace("layers.", "blk.")
-            # Gemma-style RMSNorm: effective_weight = 1.0 + stored_weight
-            yield (name, data_torch + 1.0)
+            # Qwen3_5RMSNormGated: standard RMSNorm (NOT Gemma-style), weight is full scale
+            yield (name, data_torch)
             return
 
         for hf_suffix, gguf_suffix in self._ssm_tensor_map:
@@ -2598,6 +2615,14 @@ class Qwen3_5Model(Qwen2Model):
                         // self.hparams.get("num_attention_heads", 8))
                     * partial_factor)
                 self.gguf_writer.add_rope_dimension_count(n_rot)
+            # rope_theta (freq_base) is nested inside rope_parameters
+            rope_theta = rope_params.get("rope_theta")
+            if rope_theta is not None:
+                self.gguf_writer.add_rope_freq_base(float(rope_theta))
+        # Full attention interval (required for recurrent layer marking)
+        full_attn_interval = self.hparams.get("full_attention_interval")
+        if full_attn_interval is not None:
+            self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.full_attention_interval", int(full_attn_interval))
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         # Skip vision encoder and MTP tensors (not used by llama.cpp runtime yet)
@@ -2609,8 +2634,8 @@ class Qwen3_5Model(Qwen2Model):
             name = name.replace("model.language_model.", "")
             name = name.replace("linear_attn.norm", "ssm_norm")
             name = name.replace("layers.", "blk.")
-            # Gemma-style RMSNorm: effective_weight = 1.0 + stored_weight
-            return [(name, data_torch + 1.0)]
+            # Qwen3_5RMSNormGated: standard RMSNorm (NOT Gemma-style), weight is full scale
+            return [(name, data_torch)]
         # Format: model.language_model.layers.{id}.{component}.{weight_name}.weight
         name = name.replace("model.language_model.", "")
         name = name.replace("self_attn.", "")
@@ -2623,9 +2648,9 @@ class Qwen3_5Model(Qwen2Model):
                 break
         # Convert layers.{id} to blk.{id}
         name = name.replace("layers.", "blk.")
-        # Gemma-style RMSNorm: effective_weight = 1.0 + stored_weight
-        if name.endswith("_norm.weight"):
-            data_torch = data_torch + 1.0
+        # Qwen3.5 uses standard RMSNorm (NOT Gemma-style offset).
+        # Gemma bakes effective_weight = 1.0 + stored_weight into the stored
+        # tensor — Qwen3.5 stores the full weight directly. Do NOT add +1.0.
         return [(name, data_torch)]
 
 
