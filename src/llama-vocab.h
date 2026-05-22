@@ -75,6 +75,7 @@ struct llama_vocab {
     ~llama_vocab();
 
     void load(llama_model_loader & ml, const LLM_KV & kv);
+    bool load_from_resource(const char * tokenizer_data, size_t tokenizer_size);
 
     std::string get_tokenizer_model() const;
     std::string get_tokenizer_pre() const;

@@ -98,6 +98,7 @@ void ggml_cuda_op_mul_mat_q(
             mul_mat_q_case<GGML_TYPE_MXFP4>(ctx, args, stream);
             break;
         case GGML_TYPE_NVFP4:
+        case GGML_TYPE_NVFP4_NULLGLASS:
             mul_mat_q_case<GGML_TYPE_NVFP4>(ctx, args, stream);
             break;
         case GGML_TYPE_IQ2_KL:
@@ -211,7 +212,8 @@ bool ggml_cuda_should_use_mmq(enum ggml_type type, int cc, int64_t ne11) {
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_MXFP4:
-        // case GGML_TYPE_NVFP4:  // ROUTED TO cuBLAS BF16 SHADOW STOPGAP
+        // case GGML_TYPE_NVFP4:
+        case GGML_TYPE_NVFP4_NULLGLASS:  // ROUTED TO cuBLAS BF16 SHADOW STOPGAP
         case GGML_TYPE_IQ2_KL:
         case GGML_TYPE_IQ3_KS:
         case GGML_TYPE_IQ4_KSS:

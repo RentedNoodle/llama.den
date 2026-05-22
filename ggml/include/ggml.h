@@ -424,7 +424,7 @@ extern "C" {
         GGML_TYPE_MXFP4     = 39,  // so we are compatible with mainline
         GGML_TYPE_NVFP4     = 40,  // DenQuant FP4 E2M1 + UE4M3 block scales, block_fp4_mmq tiles
         GGML_TYPE_Q1_0_G128 = 41,  // Bonsai 1-bit quants
-        //
+        GGML_TYPE_NVFP4_NULLGLASS = 42,  // Den 160B NULLGLASS tiles, OMMA.SF.16864 native
         //
         GGML_TYPE_Q8_0_X4 = 97,
         GGML_TYPE_Q8_1_X4 = 98,

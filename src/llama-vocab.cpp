@@ -3939,3 +3939,107 @@ int32_t llama_token_to_piece_vocab(
 //                        bool   unparse_special) {
 //    return vocab->detokenize(tokens, n_tokens, text, text_len_max, remove_special, unparse_special);
 //}
+
+// llama_vocab::load_from_resource — load vocab from HuggingFace tokenizer.json buffer
+// Called by den_cli to load tokenizer from the .den resource directory.
+#include "nlohmann/json.hpp"
+
+bool llama_vocab::load_from_resource(const char * tokenizer_data, size_t tokenizer_size) {
+    using json = nlohmann::json;
+
+    json j;
+    try {
+        j = json::parse(tokenizer_data, tokenizer_data + tokenizer_size);
+    } catch (const json::exception & e) {
+        LLAMA_LOG_ERROR("%s: failed to parse tokenizer.json: %s\n", __func__, e.what());
+        return false;
+    }
+
+    std::string model_type = j.value("model", json::object()).value("type", "BPE");
+
+    pimpl->special_bos_id  = 1;
+    pimpl->special_eos_id  = 2;
+    pimpl->special_unk_id  = 0;
+    pimpl->special_sep_id  = LLAMA_TOKEN_NULL;
+    pimpl->special_pad_id  = LLAMA_TOKEN_NULL;
+    pimpl->special_mask_id = LLAMA_TOKEN_NULL;
+    pimpl->special_eot_id  = LLAMA_TOKEN_NULL;
+    pimpl->special_eom_id  = LLAMA_TOKEN_NULL;
+
+    json & model = j["model"];
+
+    if (model_type == "BPE") {
+        pimpl->type             = LLAMA_VOCAB_TYPE_BPE;
+        pimpl->tokenizer_model  = "gpt2";
+        pimpl->add_space_prefix = false;
+        pimpl->add_bos          = false;
+        pimpl->add_eos          = false;
+        pimpl->clean_spaces     = false;
+
+        auto & vocab_map = model["vocab"];
+        int n_tokens = (int)vocab_map.size();
+        pimpl->id_to_token.resize((uint32_t)n_tokens);
+        pimpl->token_to_id.reserve((size_t)n_tokens);
+
+        int max_len = 0, idx = 0;
+        for (auto & [token_str, token_id] : vocab_map.items()) {
+            (void)token_id;
+            int id = idx++;
+            std::string word = token_str;
+            pimpl->token_to_id[word] = (llama_token)id;
+            pimpl->id_to_token[(uint32_t)id].text  = std::move(word);
+            pimpl->id_to_token[(uint32_t)id].score = 0.0f;
+            pimpl->id_to_token[(uint32_t)id].attr  = LLAMA_TOKEN_ATTR_NORMAL;
+            max_len = std::max(max_len, (int)word.size());
+        }
+        pimpl->max_token_len = max_len;
+        pimpl->n_token_types = 0;
+
+        if (model.contains("merges")) {
+            int i = 0;
+            for (auto & m : model["merges"]) {
+                std::string ms = m.get<std::string>();
+                size_t pos = ms.find(' ', 1);
+                if (pos != std::string::npos) {
+                    pimpl->bpe_ranks[std::make_pair(
+                        ms.substr(0, pos), ms.substr(pos + 1))] = i;
+                }
+                i++;
+            }
+        }
+    } else {
+        pimpl->type             = LLAMA_VOCAB_TYPE_SPM;
+        pimpl->tokenizer_model  = "llama";
+        pimpl->add_space_prefix = true;
+        pimpl->add_bos          = true;
+        pimpl->add_eos          = false;
+        pimpl->clean_spaces     = false;
+
+        auto & vocab_arr = model["vocab"];
+        int n_tokens = (int)vocab_arr.size();
+        pimpl->id_to_token.resize((uint32_t)n_tokens);
+        pimpl->token_to_id.reserve((size_t)n_tokens);
+
+        int max_len = 0;
+        for (auto & entry : vocab_arr) {
+            int id = entry.value("id", -1);
+            if (id < 0) continue;
+            std::string word = entry.value("token", "");
+            float score = entry.value("score", 0.0f);
+            if (word.empty()) word = "[EMPTY_" + std::to_string(id) + "]";
+            pimpl->token_to_id[word] = (llama_token)id;
+            pimpl->id_to_token[(uint32_t)id].text  = std::move(word);
+            pimpl->id_to_token[(uint32_t)id].score = score;
+            pimpl->id_to_token[(uint32_t)id].attr  = LLAMA_TOKEN_ATTR_NORMAL;
+            max_len = std::max(max_len, (int)pimpl->id_to_token[(uint32_t)id].text.size());
+        }
+        pimpl->max_token_len = max_len;
+        pimpl->n_token_types = 0;
+    }
+
+    pimpl->init_tokenizer(pimpl->type);
+
+    LLAMA_LOG_INFO("%s: loaded %u tokens, type=%s\n", __func__, n_tokens(),
+                   pimpl->type == LLAMA_VOCAB_TYPE_BPE ? "BPE" : "SPM/Unigram");
+    return true;
+}

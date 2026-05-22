@@ -1,11 +1,12 @@
 #pragma once
 #include <cstdint>
 // ═══════════════════════════════════════════════════════════════════════════════════
-// den_omma_shared.cuh — Shared OMMA primitives for all NVFP4 GEMV kernels
+// den_omma_shared.cuh — Shared OMMA primitives for all NVFP4 GEMV + FlashAttn kernels
 // ═══════════════════════════════════════════════════════════════════════════════════
 //
 // Verbatim extraction from den_mxf4nvf4_gemv.cuh (with lop3.e2m1 addition).
-// Included by: den_mxf4nvf4_gemv.cuh, k1_dense.cu, k1_moe_35b.cu, etc.
+// Included by: den_mxf4nvf4_gemv.cuh, k1_dense.cu, k1_moe_35b.cu,
+//              den_omma_flash_attn.cuh, etc.
 
 // lop3.b32-based branchless E2M1 quantization (replaces predicated if/else chain)
 #include "den_lop3_e2m1.cuh"
@@ -203,3 +204,60 @@ __device__ void smem_load_4x4_f32(float *regs, const float *smem_ptr, int row_st
         : "r"(ra0), "r"(ra1), "r"(ra2), "r"(ra3), \
           "r"(rb0), "r"(rb1), \
           "f"(rc0), "f"(rc1), "f"(rc2), "f"(rc3))
+
+// ── FlashAttention: f16×f16→f16 MMA for PV accumulation ──────────────
+// HMMA m16n8k16 with f16 output (2 regs per tile element, not 4).
+// Used for P*V where P is half2 after online softmax conversion.
+// Register mapping:
+//   ra0..ra3 — 4 × uint32 (8×f16 elements each) A-side (P tile)
+//   rb0..rb1 — 2 × uint32 (4×f16 elements each) B-side (V tile)
+//   rc0..rc1 — 2 × uint32 output C tile (f16, 4 results per thread)
+// Key: f16 output uses only 2 accumulators vs f32's 4 — halves register pressure.
+#define HMMA_F16_F16_F16_M16N8K16(ra0,ra1,ra2,ra3, rb0,rb1, rc0,rc1) \
+    asm volatile( \
+        "mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 " \
+        "{%0,%1}, {%2,%3,%4,%5}, {%6,%7}, {%8,%9};\n" \
+        : "=r"(rc0), "=r"(rc1) \
+        : "r"(ra0), "r"(ra1), "r"(ra2), "r"(ra3), \
+          "r"(rb0), "r"(rb1), \
+          "r"(rc0), "r"(rc1))
+
+// ── Online-softmax warp reduction helpers ─────────────────────────────
+// Row mapping for butterfly shuffle:
+//   8 Q rows per warp (rows 0-7), each row distributed across 4 threads
+//   Threads within row: l=0,1 → cols 0-3 (first half), l=2,3 → cols 4-7
+//   Row index within warp: tid / 4
+//   Lane within row: tid % 4
+//
+// Each thread in the 4-lane row group holds 16 score elements
+// (BN/4 = 64/4 = 16 for BN=64).
+// Row-global max/sum across all 4 threads = 4-lane butterfly.
+
+// Find row-wise maximum across 4-lane row group via butterfly shuffle.
+// Input: local_max = thread's partial max within its 16-element chunk.
+// Returns: row_max = global max across all 4 threads in the row group.
+__device__ __forceinline__ float warp_reduce_row_max(float local_max) {
+    // Lane 0,1 → lower 64 cols, Lane 2,3 → upper 64 cols
+    // First cross: max of lower/upper halves
+    float other = __shfl_xor_sync(0x0F, local_max, 2);  // swap lane pairs
+    float row_max = fmaxf(local_max, other);
+    // Second cross: max across all 4 lanes
+    other = __shfl_xor_sync(0x0F, row_max, 1);  // swap within pair
+    row_max = fmaxf(row_max, other);
+    return row_max;
+}
+
+// Compute row-wise sum of exp(score - row_max) across 4-lane row group.
+// Input: local_exp = expf(local_score - row_max) for each thread's chunk.
+// Returns: row_sum = sum of all 4 threads' exps.
+__device__ __forceinline__ float warp_reduce_row_sum(float local_exp) {
+    float other = __shfl_xor_sync(0x0F, local_exp, 2);
+    float row_sum = local_exp + other;
+    other = __shfl_xor_sync(0x0F, row_sum, 1);
+    row_sum = row_sum + other;
+    return row_sum;
+}
+
+// ── NOTE: convert_f32_tile_to_half2_tile and flash_attn_load_tile were
+// removed 2026-05-22 — dead code, never called, compilation errors.
+// ─────────────────────────────────────────────────────────────────────

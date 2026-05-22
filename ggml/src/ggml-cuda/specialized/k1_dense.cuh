@@ -21,6 +21,7 @@
 #include "../specialized/reg_broadcast.cuh"  // Register-level tile broadcast (#30)
 #include "../tile_vliw.cuh"        // NULLGLASS VLIW flags + OPAQUE tile opcodes [four-tile fusion]
 #include "../den_omma_flash_attn.cuh"  // OMMA FlashAttention (FlashAttention v4.1, SM120)
+#include "../den_multi_path_dispatch.cuh"  // Multi-path dispatch + workload tile configs
 
 // ── Kernel dispatch policy flags ──────────────────────────────────────
 // Bits 0-3 reserved for future GEMM variant policy flags.

@@ -1572,7 +1572,23 @@ bool create_tensors_helper::create_qwen35moe_tensors(const LLM_TN & tn) {
             // Create tensors with calculated dimensions
             layer.wqkv           = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_QKV,       "weight", i), { n_embd, key_dim * 2 + value_dim }, flags);
             layer.wqkv_gate      = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_GATE,      "weight", i), { n_embd, value_dim }, flags);
-            layer.ssm_conv1d     = create_tensor(ctx_split, tn(LLM_TENSOR_SSM_CONV1D,     "weight", i), { hparams.ssm_d_conv, conv_dim }, flags);
+            // Layout-agnostic: try all 4 possible conv1d layouts until one matches.
+            // GGUF may store as [d_conv, conv_dim], [conv_dim, d_conv], [d_conv, 1, conv_dim], or [conv_dim, 1, d_conv].
+            // The op handles all layouts — it reads d_conv as the smaller dimension.
+            std::vector<std::vector<int64_t>> conv1d_layouts = {
+                {hparams.ssm_d_conv, conv_dim},              // [4, 8192] correct
+                {hparams.ssm_d_conv, 1, conv_dim},           // [4, 1, 8192] with singleton
+                {conv_dim, hparams.ssm_d_conv},              // [8192, 4] transposed
+                {conv_dim, 1, hparams.ssm_d_conv},           // [8192, 1, 4] transposed + singleton
+            };
+            for (size_t j = 0; j < conv1d_layouts.size(); j++) {
+                try {
+                    layer.ssm_conv1d = create_tensor(ctx_split, tn(LLM_TENSOR_SSM_CONV1D, "weight", i), conv1d_layouts[j], flags);
+                    break;
+                } catch (...) {
+                    if (j == conv1d_layouts.size() - 1) throw;
+                }
+            }
             layer.ssm_dt         = create_tensor(ctx_split, tn(LLM_TENSOR_SSM_DT,         "bias",   i), { hparams.ssm_dt_rank }, flags);
             layer.ssm_a          = create_tensor(ctx_split, tn(LLM_TENSOR_SSM_A_NOSCAN,             i), { hparams.ssm_dt_rank }, flags);
             layer.ssm_beta       = create_tensor(ctx_split, tn(LLM_TENSOR_SSM_BETA,       "weight", i), { n_embd, n_v_heads }, flags);
@@ -1690,7 +1706,23 @@ bool create_tensors_helper::create_qwen35_tensors(const LLM_TN & tn) {
             // Create tensors with calculated dimensions
             layer.wqkv           = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_QKV,       "weight", i), { n_embd, key_dim * 2 + value_dim }, llama_model_loader::TENSOR_NOT_REQUIRED | flags);
             layer.wqkv_gate      = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_GATE,      "weight", i), { n_embd, value_dim }, llama_model_loader::TENSOR_NOT_REQUIRED | flags);
-            layer.ssm_conv1d     = create_tensor(ctx_split, tn(LLM_TENSOR_SSM_CONV1D,     "weight", i), { hparams.ssm_d_conv, conv_dim }, flags);
+            // Layout-agnostic: try all 4 possible conv1d layouts until one matches.
+            // GGUF may store as [d_conv, conv_dim], [conv_dim, d_conv], [d_conv, 1, conv_dim], or [conv_dim, 1, d_conv].
+            // The op handles all layouts — it reads d_conv as the smaller dimension.
+            std::vector<std::vector<int64_t>> conv1d_layouts = {
+                {hparams.ssm_d_conv, conv_dim},              // [4, 8192] correct
+                {hparams.ssm_d_conv, 1, conv_dim},           // [4, 1, 8192] with singleton
+                {conv_dim, hparams.ssm_d_conv},              // [8192, 4] transposed
+                {conv_dim, 1, hparams.ssm_d_conv},           // [8192, 1, 4] transposed + singleton
+            };
+            for (size_t j = 0; j < conv1d_layouts.size(); j++) {
+                try {
+                    layer.ssm_conv1d = create_tensor(ctx_split, tn(LLM_TENSOR_SSM_CONV1D, "weight", i), conv1d_layouts[j], flags);
+                    break;
+                } catch (...) {
+                    if (j == conv1d_layouts.size() - 1) throw;
+                }
+            }
             layer.ssm_dt         = create_tensor(ctx_split, tn(LLM_TENSOR_SSM_DT,         "bias",   i), { hparams.ssm_dt_rank }, flags);
             layer.ssm_a          = create_tensor(ctx_split, tn(LLM_TENSOR_SSM_A_NOSCAN,             i), { hparams.ssm_dt_rank }, flags);
             layer.ssm_beta       = create_tensor(ctx_split, tn(LLM_TENSOR_SSM_BETA,       "weight", i), { n_embd, n_v_heads }, flags);

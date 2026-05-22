@@ -2485,6 +2485,9 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
         # Gemma-style RMSNorm: effective_weight = 1.0 + stored_weight
         if name.endswith("_norm.weight"):
             data_torch = data_torch + 1.0
+        # Conv1d weight stays in native PyTorch layout [d_conv, d_inner].
+        # GGUF stores it column-major as ne=[d_conv, d_inner] — all backends
+        # (CPU iqk_ssm_conv4, CUDA ssm-conv, Metal ssm.metal) expect this.
         yield (name, data_torch)
 
 
@@ -2655,6 +2658,8 @@ class Qwen3_5Model(Qwen2Model):
         # The MoE model class (line 2485) already does this — aligning dense model.
         if name.endswith("_norm.weight"):
             data_torch = data_torch + 1.0
+        # Conv1d weight stays in native PyTorch layout [d_conv, d_inner].
+        # GGUF stores it column-major as ne=[d_conv, d_inner] — all backends expect this.
         return [(name, data_torch)]
 
 

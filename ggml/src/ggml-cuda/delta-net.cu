@@ -1,5 +1,6 @@
 #include "common.cuh"
 #include "delta-net.cuh"
+#include "den_gdn_umma.cuh"
 #include <cstdlib>
 #include <cstring>
 
@@ -297,6 +298,35 @@ void ggml_cuda_op_delta_net(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
     // Get device info from ctx (avoids calling CUDA runtime APIs inside dispatch)
     const int device_id = ctx.device;
     const int cc = ggml_cuda_info().devices[device_id].cc;
+
+    // ── Fused GDN UMMA path (env-gated) ─────────────────────────────────
+    // Set DEN_GDN_FUSED=1 to dispatch to the fused single-kernel GDN
+    // recurrence (replaces 5 separate graph ops with one kernel launch).
+    // Falls back to original path if intermediate states (src6) are
+    // requested — the fused kernel does not support saved_states.
+    {
+        const char * gdn_env = getenv("DEN_GDN_FUSED");
+        if (gdn_env && gdn_env[0] == '1' && !src6) {
+            fprintf(stderr, "delta-net: using fused GDN UMMA kernel (DEN_GDN_FUSED)\n");
+            launch_gdn_umma_fused(
+                (const float *)src0->data,
+                (const float *)src1->data,
+                (const float *)src2->data,
+                (const float *)src3->data,
+                (const float *)src4->data,
+                (const float *)src5->data,
+                (float *)dst->data,
+                (int)head_dim,
+                (int)n_heads_kq,     // H_k
+                (int)n_heads,        // H_v
+                (int)n_tokens,       // N
+                (int)n_seqs,         // B
+                (int)gqa_ratio,
+                repeat_type,
+                ctx.stream());
+            return;
+        }
+    }
 
     delta_net_f32_cuda(
         (const float *)src0->data,

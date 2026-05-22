@@ -1064,7 +1064,8 @@ void ggml_cuda_op_dequantize_mul_mat_vec(
         case GGML_TYPE_F16:
             convert_mul_mat_vec_f16_cuda(src0_dd_i, src1_dfloat, dst_dd_i, ne00, row_diff, stream);
             break;
-        case GGML_TYPE_NVFP4: {
+        case GGML_TYPE_NVFP4:
+        case GGML_TYPE_NVFP4_NULLGLASS: {
             // PRIMARY: mxf4nvf4 OMMA 4X UE4M3 native MMA path (29 cycles/MMA)
             const int N = row_diff;  // output rows
             const int K = (int)ne00;      // shared dimension

@@ -192,11 +192,16 @@ static_assert(sizeof(block_mxfp4) == sizeof(uint8_t) + QK_MXFP4/2, "wrong mxfp4 
 // DenQuant NVFP4 FP4 E2M1 + UE4M3 per-16 scale, mxf4nvf4 MMA tile
 #define QK_NVFP4 256
 #define QK_NVFP4_SUB 16
+#define QK_NVFP4_NULLGLASS 256
+#define QK_NVFP4_NULLGLASS_SUB 16
 typedef struct {
     uint32_t d4[4];     // 16 x UE4M3 scales, packed 4 per uint32 (little-endian)
     int8_t   qs[128];   // 256 x FP4 E2M1 values, nibble-packed (2 per byte)
     uint8_t  padding[16]; // NULLGLASS: 16B cognitive header (Hadamard, ESAB, Phase, AXIOM)
 } block_nvfp4;
+
+// NULLGLASS alias — same physical layout, different GGML type ID
+typedef block_nvfp4 block_nvfp4_nullglass;
 static_assert(sizeof(block_nvfp4) == 160, "block_nvfp4 must be 160 bytes for NULLGLASS");
 
 // Same physical layout as block_nvfp4 — used for activation tiles in native

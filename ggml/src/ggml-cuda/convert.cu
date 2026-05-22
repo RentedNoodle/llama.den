@@ -2002,6 +2002,7 @@ to_fp16_cuda_t ggml_get_to_fp16_cuda(ggml_type type) {
         case GGML_TYPE_MXFP4:
             return dequantize_row_mxfp4_cuda;
         case GGML_TYPE_NVFP4:
+        case GGML_TYPE_NVFP4_NULLGLASS:
             return dequantize_row_nvfp4_cuda;
         case GGML_TYPE_IQ4_XS:
             return dequantize_row_iq4_xs_cuda;
@@ -2107,6 +2108,7 @@ to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
         case GGML_TYPE_MXFP4:
             return dequantize_row_mxfp4_cuda;
         case GGML_TYPE_NVFP4:
+        case GGML_TYPE_NVFP4_NULLGLASS:
             return dequantize_row_nvfp4_cuda;
         case GGML_TYPE_IQ4_XS:
             return dequantize_row_iq4_xs_cuda;

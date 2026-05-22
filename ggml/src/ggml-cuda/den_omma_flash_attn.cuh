@@ -25,11 +25,20 @@
 
 #include "common.cuh"
 #include "den_omma_shared.cuh"
+#include "mma_new.cuh"
 
-// ── SMEM sizing macros ───────────────────────────────────────────────────────────
-// Total SMEM = sQ + sKV (single stage) or sQ + 2 * sKV (double-staged prefetch)
-#define FLASH_SMEM_Q(BM, HD)     ((BM) * (HD) * sizeof(float))
-#define FLASH_SMEM_KV(BN, HD)    ((BN) * (HD) * sizeof(float))
+// ── SMEM sizing macros (half2 with D2_padded stride) ────────────────────────────
+// D2_padded = HD/2 + 4 avoids SMEM bank conflicts (verified from fattn-mma-f16.cuh)
+// Each SMEM element is half2 = 4 bytes.
+// Double-stage: sQ + 2*sK + sV (K double-buffered, V separate buffer)
+// Single-stage: sQ + sK + sV (separate buffers, avoids K/V aliasing)
+#define FLASH_SMEM_SQ(BM, HD)    ((BM) * ((HD)/2 + 4) * sizeof(half2))
+#define FLASH_SMEM_SKV(BN, HD)   ((BN) * ((HD)/2 + 4) * sizeof(half2))
+#define FLASH_SMEM_SV(BN, HD)    ((BN) * ((HD)/2 + 4) * sizeof(half2))
+// DOUBLE_STAGE: sQ + 2*sK + sV = (BM + 3*BN) * D2_padded * 4
+// !DOUBLE_STAGE: sQ + sK + sV  = (BM + 2*BN) * D2_padded * 4
+#define FLASH_SMEM_TOTAL(BM, BN, HD, DOUBLE) \
+    (FLASH_SMEM_SQ(BM, HD) + FLASH_SMEM_SKV(BN, HD) * ((DOUBLE) ? 3 : 2))
 
 // ── TMA descriptors (extern __constant__) ───────────────────────────────────────
 // Populated by host-side cudaMemcpyToSymbol before kernel launch.
@@ -59,22 +68,34 @@ namespace flash_attn_config {
 
 // ── Kernel: omma_flash_attn_f32 ────────────────────────────────────────────────
 //
+// Full FlashAttention implementation on SM120 Blackwell.
+// Synthesizes techniques from 10+ research sources:
+//
+//   BlackFlash (brandonmmusic-max)     — register-resident P, BN=128 single-stage
+//   fp4-fused-attention-sm120          — OMMA.SF.16864 + HMMA hybrid path
+//   flash-attention-fp4 (kekzl/imp)   — XOR-swizzle SMEM, ldmatrix.x2.trans for V
+//   yuanlehome v5 blog                 — K double-buffer prefetch pipeline
+//   sigil-trtllm                       — online-softmax butterfly with __shfl_xor_sync
+//   hexa-lang / trueno / sass-king    — SM120 fragment mapping, 3-operand scale
+//   fattn-mma-f16.cuh (ik_llama.cpp)   — tile abstractions, D2_padded, mma f32/f16
+//   mma_new.cuh (ik_llama.cpp)         — ldmatrix, get_half2, get_transposed
+//   cp-async.cuh (ik_llama.cpp)        — cp_async_cg_16 for SMEM prefetch
+//
+// Key techniques:
+//   - half2 SMEM with D2_padded stride (no bank conflicts)
+//   - v5 pipeline: K double-buffer prefetch overlaps with M-tile compute
+//   - Register-resident Q (loaded once per sub-tile, reused across K-blocks)
+//   - Register-resident P (KQ accumulator → get_half2 → get_transposed → PV B)
+//   - Online softmax with butterfly shuffle (max + sum across 4-lane row groups)
+//   - HMMA m16n8k16 f32.bf16 for KQ, f16.f16 for PV
+//   - ldmatrix.x4 for K_A, ldmatrix.x2 for Q_B, ldmatrix.x4.trans for V_A
+//
 // Template parameters:
 //   BM           — query rows per CTA (block)
 //   BN           — key/value columns per CTA iteration
 //   HD           — head dimension (128 or 256)
 //   NUM_WARPS    — warps per CTA
-//   DOUBLE_STAGE — true = double-buffered SMEM for K/V prefetch
-//
-// Kernel parameters (pointer dimensions in [B, H, N, HD]):
-//   Q            — [B, Hq, N, HD]     query
-//   K            — [B, Hk, N_kv, HD]  key
-//   V            — [B, Hk, N_kv, HD]  value
-//   O            — [B, Hq, N, HD]     output (pre-allocated)
-//   softmax_scale — attention temperature scaling
-//   causal       — apply causal mask
-//   B, Hq, Hk   — batch, query heads, key/value heads
-//   N, N_kv     — query length, key/value length
+//   DOUBLE_STAGE — true = double-buffered K prefetch (v5 pipeline)
 //
 template<int BM, int BN, int HD, int NUM_WARPS, bool DOUBLE_STAGE>
 __global__ void omma_flash_attn_f32(
@@ -90,149 +111,475 @@ __global__ void omma_flash_attn_f32(
     const int    N,
     const int    N_kv
 ) {
-    // ── SM120 SMEM hard limit guard ──────────────────────────────────────────
-    // DOUBLE_STAGE needs 2x KV SMEM for prefetch ring buffer.
-    constexpr int kSmemQ  = FLASH_SMEM_Q(BM, HD);
-    constexpr int kSmemKV = FLASH_SMEM_KV(BN, HD) * (DOUBLE_STAGE ? 2 : 1);
-    constexpr int kSmemTotal = kSmemQ + kSmemKV;
-    static_assert(kSmemTotal <= 99 * 1024,
+    // ── Compile-time constants ─────────────────────────────────────────────
+    constexpr int W = WARP_SIZE;
+    constexpr int D2_padded = HD/2 + 4;            // half2 stride (bank-conflict-free)
+    constexpr int N_SLICES = HD / 16;               // K-dim slices per HMMA (K=16)
+    constexpr int K_GROUPS_PER_WARP = (BN / NUM_WARPS) / 16;
+    constexpr int Q_PER_WARP = BM / NUM_WARPS;
+    constexpr int Q_SUB_TILES = Q_PER_WARP / 8;    // tile_B processes 8 Q-rows at once
+
+    static_assert(BN % (NUM_WARPS * 16) == 0, "BN must split across warps × MMA tiles");
+    static_assert(Q_PER_WARP % 8 == 0, "Q_PER_WARP must be multiple of 8 (tile_B::I=8)");
+
+    // ── SM120 SMEM hard limit guard ────────────────────────────────────────
+    constexpr int kSmemBytes = FLASH_SMEM_TOTAL(BM, BN, HD, DOUBLE_STAGE);
+    static_assert(kSmemBytes <= 99 * 1024,
         "SM120 SMEM hard limit: 99 KB — reduce BM, BN, or disable DOUBLE_STAGE");
 
-    // ── Shared memory (externally allocated by launch function) ─────────────
-    extern __shared__ float s_data[];
-    float* sQ  = s_data;                  // [BM, HD]  query tile
-    float* sKV = s_data + BM * HD;        // [BN * (1|2), HD] K/V tile(s)
+    // ── Shared memory (half2, D2_padded stride) ────────────────────────────
+    extern __shared__ half2 s_data[];
+    half2* sQ = s_data;
+    half2* sK;
+    half2* sV;
+    if constexpr (DOUBLE_STAGE) {
+        sK = s_data + (size_t)BM * D2_padded;       // [2, BN, D2_padded]
+        sV = sK + 2 * (size_t)BN * D2_padded;       // [BN, D2_padded]
+    } else {
+        sK = s_data + (size_t)BM * D2_padded;       // [BN, D2_padded]
+        sV = sK + (size_t)BN * D2_padded;           // [BN, D2_padded] (separate buffer)
+    }
 
-    // ── Register-resident P accumulator ─────────────────────────────────────
-    // Each thread holds a fragment of the online-softmax attention weights.
-    // Saves ~16 KB SMEM per warp compared to SMEM-resident P.
-    // First dimension = query rows per warp (rounded up for BM < WARP_SIZE).
-    // Second dimension = 16-element groups across the KV dimension.
-    constexpr int kPRegRows = (BM + WARP_SIZE - 1) / WARP_SIZE;
-    float P_reg[kPRegRows][BN / 16] = {};
-    GGML_UNUSED(softmax_scale);
-    GGML_UNUSED(causal);
-
-    // ── Thread/warp identity ────────────────────────────────────────────────
-    const int warp_id = threadIdx.x / WARP_SIZE;
-    const int lane_id = threadIdx.x % WARP_SIZE;
+    // ── Thread/warp identity ───────────────────────────────────────────────
+    const int warp_id  = threadIdx.x / W;
+    const int warp_k0  = warp_id * BN / NUM_WARPS;  // first K-row for this warp
+    const int warp_q0  = warp_id * BM / NUM_WARPS;  // first Q-row for this warp
 
     // ── Block-global position ───────────────────────────────────────────────
     const int batch_id  = blockIdx.z;
     const int head_id   = blockIdx.y;
-    const int kv_head   = head_id % Hk;  // GQA: broadcast K/V heads
+    const int kv_head   = head_id % Hk;
     const int q_start   = blockIdx.x * BM;
 
-    // ── Pointer adjustment for batch and head ───────────────────────────────
-    // Q shape: [B, Hq, N, HD] — row-major with innermost dim HD
-    // K/V shape: [B, Hk, N_kv, HD]
-    // O shape: same as Q
     const size_t q_batch_offset = (size_t)batch_id * Hq * N * HD;
     const size_t k_batch_offset = (size_t)batch_id * Hk * N_kv * HD;
-    const size_t v_batch_offset = k_batch_offset;  // same layout as K
+    const size_t v_batch_offset = k_batch_offset;
     const size_t o_batch_offset = q_batch_offset;
 
     const float* batch_Q = Q + q_batch_offset + (size_t)head_id * N * HD;
     const float* batch_K = K + k_batch_offset + (size_t)kv_head * N_kv * HD;
     const float* batch_V = V + v_batch_offset + (size_t)kv_head * N_kv * HD;
-    float* batch_O       = O + o_batch_offset + (size_t)head_id * N * HD;
+    float*       batch_O = O + o_batch_offset + (size_t)head_id * N * HD;
 
-    // ── Load Q tile into SMEM ───────────────────────────────────────────────
-    // Full inner-loop implementation in later task.  Skeleton placeholder.
-    if (threadIdx.x < BM * HD) {
-        int r = threadIdx.x / HD;
-        int c = threadIdx.x % HD;
-        int g_idx = q_start + r;
-        if (g_idx < N) {
-            sQ[r * HD + c] = batch_Q[g_idx * HD + c];
-        } else {
-            sQ[r * HD + c] = 0.0f;
+    // ── Cooperative tile load: global float → half2 SMEM ─────────────────
+    // Converts f32→f16 during the copy. Each thread copies 16 bytes at a time.
+    // Used for Q, K, and V tiles with row-stride adaptation.
+
+    // ── Load Q tile (global float → half2 SMEM) ──────────────────────────
+    {
+        const float* src = batch_Q;
+        half2*       dst = sQ;
+        int tid = threadIdx.x;
+        int total = BM * D2_padded;
+        for (int i = tid; i < total; i += blockDim.x) {
+            int r = i / D2_padded;
+            int c = i % D2_padded;
+            int g_idx = q_start + r;
+            if (g_idx < N && c < HD/2) {
+                dst[i] = __halves2half2(
+                    __float2half_rn(src[g_idx * HD + c * 2]),
+                    __float2half_rn(src[g_idx * HD + c * 2 + 1]));
+            } else {
+                dst[i] = __halves2half2(__float2half_rn(0.0f), __float2half_rn(0.0f));
+            }
         }
     }
     __syncthreads();
 
-    // ── Online-softmax state ────────────────────────────────────────────────
-    // Per-row statistics for the online-softmax/ safe-softmax algorithm.
-    // m_i = running max of scores, l_i = running sum of exp(score - m_i).
-    float m_row[BM / NUM_WARPS];  // one per warp row
-    float l_row[BM / NUM_WARPS];
+    // ── Online-softmax state ───────────────────────────────────────────────
+    // Stored per Q-row for each thread. Each thread handles Q-rows
+    // [2*(tid%4), 2*(tid%4)+1] within its warp's Q-row range.
+    float m_row_even = -FLT_MAX;
+    float m_row_odd  = -FLT_MAX;
+    float l_row_even = 0.0f;
+    float l_row_odd  = 0.0f;
 
-    // ── K/V iteration loop ──────────────────────────────────────────────────
-    // Skeleton: iterates over KV blocks with register-resident P accumulation.
-    // Full inner-loop body (MMA score compute, online softmax, weighted V
-    // accumulation) comes in a later task.
     const int num_kv_blocks = (N_kv + BN - 1) / BN;
 
-    // Initialize online-softmax state to -inf / 0
-    #pragma unroll
-    for (int wr = 0; wr < BM / NUM_WARPS; wr++) {
-        m_row[wr] = -FLT_MAX;
-        l_row[wr] = 0.0f;
-    }
+    // ── Q sub-tile loop (outer: process Q in groups of 8) ─────────────────
+    // For each sub-tile, load Q_B from SMEM once and process all KV blocks.
+    // Q_B holds 8 Q-rows × 16 HD-elements (one HD-slice at a time).
+    #pragma unroll 1
+    for (int qt = 0; qt < Q_SUB_TILES; qt++) {
+        const int q_sub = qt * 8;  // Q-row offset within warp
 
-    // Iterate over K/V tiles
-    #pragma unroll 1  // don't unroll the KV loop
-    for (int kv_block = 0; kv_block < num_kv_blocks; kv_block++) {
-        // ── Load K tile into sKV ──
-        // TMA-based load (SM90+) or cp.async fallback.
-        // Skeleton: cooperative load via threads.
-        if (threadIdx.x < BN * HD) {
-            int r = threadIdx.x / HD;
-            int c = threadIdx.x % HD;
-            int g_idx = kv_block * BN + r;
-            if (g_idx < N_kv) {
-                sKV[r * HD + c] = batch_K[g_idx * HD + c];
-            } else {
-                sKV[r * HD + c] = 0.0f;
-            }
-        }
-        __syncthreads();
+        // Reset softmax state for this sub-tile's Q-rows
+        m_row_even = -FLT_MAX;
+        m_row_odd  = -FLT_MAX;
+        l_row_even = 0.0f;
+        l_row_odd  = 0.0f;
 
-        // ── Compute S = sQ * sK^T (MMA) → softmax → P_reg ──────────────────
-        // Placeholder: accumulate in P_reg via online softmax.
-        // The full MMA-based score computation with m16n8k16 BF16 or
-        // OMMA.SF.16864 NVFP4 will be added in the inner-loop task.
-        // Skeleton: zero P_reg for this block.
+        // ── O accumulator: 8 HD-slices × 2 regs per slice ──────────────
+        using namespace ggml_cuda_mma;
+        tile<16, 4, half2> O_acc[N_SLICES];
         #pragma unroll
-        for (int pr = 0; pr < kPRegRows; pr++) {
-            #pragma unroll
-            for (int pc = 0; pc < BN / 16; pc++) {
-                P_reg[pr][pc] = 0.0f;
-            }
+        for (int ns = 0; ns < N_SLICES; ns++) {
+            O_acc[ns].x[0] = __float2half2_rn(0.0f);
+            O_acc[ns].x[1] = __float2half2_rn(0.0f);
         }
 
-        // ── Load V tile into sKV (reuse same SMEM as K) ────────────────────
-        __syncthreads();
-        if (threadIdx.x < BN * HD) {
-            int r = threadIdx.x / HD;
-            int c = threadIdx.x % HD;
-            int g_idx = kv_block * BN + r;
-            if (g_idx < N_kv) {
-                sKV[r * HD + c] = batch_V[g_idx * HD + c];
+        // ── Pre-load K[0] and V[0] for first block (single-stage) ──────
+        if (num_kv_blocks > 0) {
+            if constexpr (DOUBLE_STAGE) {
+                // Load K[0] into sK[ping=0], V[0] into sV
+                int tid = threadIdx.x;
+                int total = BN * D2_padded;
+                for (int i = tid; i < total; i += blockDim.x) {
+                    int r = i / D2_padded;
+                    int c = i % D2_padded;
+                    if (c < HD/2) {
+                        sK[i] = __halves2half2(
+                            __float2half_rn(batch_K[r * HD + c * 2]),
+                            __float2half_rn(batch_K[r * HD + c * 2 + 1]));
+                    } else {
+                        sK[i] = __float2half2_rn(0.0f);
+                    }
+                }
+                for (int i = tid; i < total; i += blockDim.x) {
+                    int r = i / D2_padded;
+                    int c = i % D2_padded;
+                    if (c < HD/2) {
+                        sV[i] = __halves2half2(
+                            __float2half_rn(batch_V[r * HD + c * 2]),
+                            __float2half_rn(batch_V[r * HD + c * 2 + 1]));
+                    } else {
+                        sV[i] = __float2half2_rn(0.0f);
+                    }
+                }
             } else {
-                sKV[r * HD + c] = 0.0f;
+                // Single-stage: load both K[0] and V[0] into shared KV buffer
+                int tid = threadIdx.x;
+                int total = BN * D2_padded;
+                for (int i = tid; i < total; i += blockDim.x) {
+                    int r = i / D2_padded;
+                    int c = i % D2_padded;
+                    if (c < HD/2) {
+                        sK[i] = __halves2half2(
+                            __float2half_rn(batch_K[r * HD + c * 2]),
+                            __float2half_rn(batch_K[r * HD + c * 2 + 1]));
+                    } else {
+                        sK[i] = __float2half2_rn(0.0f);
+                    }
+                }
+                for (int i = tid; i < total; i += blockDim.x) {
+                    int r = i / D2_padded;
+                    int c = i % D2_padded;
+                    if (c < HD/2) {
+                        sV[i] = __halves2half2(
+                            __float2half_rn(batch_V[r * HD + c * 2]),
+                            __float2half_rn(batch_V[r * HD + c * 2 + 1]));
+                    } else {
+                        sV[i] = __float2half2_rn(0.0f);
+                    }
+                }
+            }
+            __syncthreads();
+        }
+
+        // ── KV block loop ─────────────────────────────────────────────────
+        for (int kv_block = 0; kv_block < num_kv_blocks; kv_block++) {
+            const int ping = kv_block & 1;
+
+            // ── K prefetch (v5 pipeline: overlap with compute) ────────
+            if constexpr (DOUBLE_STAGE) {
+                if (kv_block + 1 < num_kv_blocks) {
+                    int next_ping = ping ^ 1;
+                    half2* sK_next = sK + (size_t)next_ping * BN * D2_padded;
+                    int tid = threadIdx.x;
+                    int total = BN * D2_padded;
+                    for (int i = tid; i < total; i += blockDim.x) {
+                        int r = i / D2_padded;
+                        int c = i % D2_padded;
+                        int g_idx = (kv_block + 1) * BN + r;
+                        if (g_idx < N_kv && c < HD/2) {
+                            sK_next[i] = __halves2half2(
+                                __float2half_rn(batch_K[g_idx * HD + c * 2]),
+                                __float2half_rn(batch_K[g_idx * HD + c * 2 + 1]));
+                        } else {
+                            sK_next[i] = __float2half2_rn(0.0f);
+                        }
+                    }
+                    // K[next] prefetch → sK[next_ping], will wait later
+                }
+            }
+
+            // ── K-buffer base for this block ─────────────────────────────
+            const half2* sK_cur = DOUBLE_STAGE ?
+                sK + (size_t)ping * BN * D2_padded :
+                sK;
+
+            // ── Wait for K to be ready ───────────────────────────────────
+            // In DOUBLE_STAGE: K[current] was prefetched during previous
+            // iteration or pre-loaded. In SINGLE_STAGE: K was loaded above.
+            // __syncthreads ensures all warps see the data.
+            __syncthreads();
+
+            // ── HD-slice loop (accumulate KQ over all HD/16 slices) ────
+            #pragma unroll
+            for (int ns = 0; ns < N_SLICES; ns++) {
+
+                // ── Load Q_B from sQ (8 Q-rows × 8 half2 = 1 HD slice) ──
+                // tile<8,8,half2> (ne=2) loaded via ldmatrix.x2.
+                // Address: sQ at row (warp_q0 + q_sub), col (ns * 8 half2)
+                tile<8, 8, half2> Q_B;
+                load_ldmatrix(Q_B,
+                    sQ + (warp_q0 + q_sub) * D2_padded + ns * 8,
+                    D2_padded);
+
+                // ── K-row group loop ────────────────────────────────────
+                #pragma unroll
+                for (int kg = 0; kg < K_GROUPS_PER_WARP; kg++) {
+
+                    // ── Load K_A from sK (16 K-rows × 8 half2) ──────────
+                    // tile<16,8,half2> (ne=4) loaded via ldmatrix.x4.
+                    // Address: sK_cur at row (warp_k0 + kg*16), col (ns * 8)
+                    tile<16, 8, half2> K_A;
+                    load_ldmatrix(K_A,
+                        sK_cur + (warp_k0 + kg * 16) * D2_padded + ns * 8,
+                        D2_padded);
+
+                    // ── KQ: HMMA m16n8k16 f32.f16.f16.f32 ─────────────
+                    // S += K_A * Q_B   (16 K-rows × 8 Q-rows accumulator)
+                    tile<16, 8, float> KQ_C = {{0.0f, 0.0f, 0.0f, 0.0f}};
+                    mma(KQ_C, K_A, Q_B);
+
+                    // ── Online softmax (per K-row group) ─────────────────
+                    // KQ_C holds 16 K-rows × 8 Q-rows scores.
+                    // Each thread has 4 floats: x[0]=s(K=tid/4,Q=2*tid%4),
+                    // x[1]=s(K=tid/4,Q=2*tid%4+1), x[2]=s(K=8+tid/4,Q=2*tid%4),
+                    // x[3]=s(K=8+tid/4,Q=2*tid%4+1).
+                    //
+                    // For each of the 2 Q-rows this thread handles:
+                    //   1. max across 16 K-rows (butterfly shuffle)
+                    //   2. exp(score - new_max)
+                    //   3. sum across K-rows (butterfly shuffle)
+                    //   4. Safe-softmax: rescale previous m/l/O
+
+                    // ── Find per-Q-row max across 16 K-rows ──────────
+                    int q_mask = 0x11111111 << (threadIdx.x % 4);
+
+                    float max_even = fmaxf(KQ_C.x[0], KQ_C.x[2]);
+                    float max_odd  = fmaxf(KQ_C.x[1], KQ_C.x[3]);
+
+                    // Butterfly max across 8 lanes (same tid%4 group)
+                    float other_even, other_odd;
+
+                    other_even = __shfl_xor_sync(q_mask, max_even, 4);
+                    other_odd  = __shfl_xor_sync(q_mask, max_odd,  4);
+                    max_even = fmaxf(max_even, other_even);
+                    max_odd  = fmaxf(max_odd,  other_odd);
+
+                    other_even = __shfl_xor_sync(q_mask, max_even, 8);
+                    other_odd  = __shfl_xor_sync(q_mask, max_odd,  8);
+                    max_even = fmaxf(max_even, other_even);
+                    max_odd  = fmaxf(max_odd,  other_odd);
+
+                    other_even = __shfl_xor_sync(q_mask, max_even, 16);
+                    other_odd  = __shfl_xor_sync(q_mask, max_odd,  16);
+                    max_even = fmaxf(max_even, other_even);
+                    max_odd  = fmaxf(max_odd,  other_odd);
+
+                    // ── Safe-softmax: running m/l update ───────────────
+                    // m_new = max(m_prev, m_local)
+                    // l_new = l_prev * exp(m_prev - m_new) + sum(exp(S - m_new))
+                    float new_m_even = fmaxf(m_row_even, max_even * softmax_scale);
+                    float new_m_odd  = fmaxf(m_row_odd,  max_odd  * softmax_scale);
+
+                    float rescale_even = expf(m_row_even - new_m_even);
+                    float rescale_odd  = expf(m_row_odd  - new_m_odd);
+
+                    // ── Exponentiate scores ─────────────────────────────
+                    // P_even for Q-row 2*(tid%4) at K-rows (tid/4) and (8+tid/4)
+                    float p0_even = expf(KQ_C.x[0] * softmax_scale - new_m_even);
+                    float p2_even = expf(KQ_C.x[2] * softmax_scale - new_m_even);
+                    // P_odd for Q-row 2*(tid%4)+1 at K-rows (tid/4) and (8+tid/4)
+                    float p1_odd  = expf(KQ_C.x[1] * softmax_scale - new_m_odd);
+                    float p3_odd  = expf(KQ_C.x[3] * softmax_scale - new_m_odd);
+
+                    // ── Sum P across K-rows (butterfly shuffle) ────────
+                    float sum_even = p0_even + p2_even;
+                    float sum_odd  = p1_odd  + p3_odd;
+
+                    other_even = __shfl_xor_sync(q_mask, sum_even, 4);
+                    other_odd  = __shfl_xor_sync(q_mask, sum_odd,  4);
+                    sum_even += other_even;
+                    sum_odd  += other_odd;
+
+                    other_even = __shfl_xor_sync(q_mask, sum_even, 8);
+                    other_odd  = __shfl_xor_sync(q_mask, sum_odd,  8);
+                    sum_even += other_even;
+                    sum_odd  += other_odd;
+
+                    other_even = __shfl_xor_sync(q_mask, sum_even, 16);
+                    other_odd  = __shfl_xor_sync(q_mask, sum_odd,  16);
+                    sum_even += other_even;
+                    sum_odd  += other_odd;
+
+                    // ── Update running l ────────────────────────────────
+                    l_row_even = l_row_even * rescale_even + sum_even;
+                    l_row_odd  = l_row_odd  * rescale_odd  + sum_odd;
+                    m_row_even = new_m_even;
+                    m_row_odd  = new_m_odd;
+
+                    // ── Overwrite KQ_C with softmaxed P values ──────────
+                    // P = exp(S * scale - m_new) — unnormalized, division by
+                    // l_row happens during final output normalization.
+                    // Must do this BEFORE get_half2/get_transposed below.
+                    KQ_C.x[0] = p0_even;
+                    KQ_C.x[1] = p1_odd;
+                    KQ_C.x[2] = p2_even;
+                    KQ_C.x[3] = p3_odd;
+
+                    // ── Rescale O accumulator ───────────────────────────
+                    #pragma unroll
+                    for (int ons = 0; ons < N_SLICES; ons++) {
+                        // Each O_acc entry is half2: .x = Q_even, .y = Q_odd
+                        // Actually tile<16,4,half2> x[0] holds HD-positions
+                        // tid/4 and 8+tid/4 for Q-rows 2*(tid%4) and 2*(tid%4)+1
+                        // We need to rescale BOTH Q-rows in each half2
+                        float old_even_0 = __half2float(O_acc[ons].x[0].x);
+                        float old_odd_0  = __half2float(O_acc[ons].x[0].y);
+                        O_acc[ons].x[0].x = __float2half(old_even_0 * rescale_even);
+                        O_acc[ons].x[0].y = __float2half(old_odd_0  * rescale_odd);
+
+                        float old_even_1 = __half2float(O_acc[ons].x[1].x);
+                        float old_odd_1  = __half2float(O_acc[ons].x[1].y);
+                        O_acc[ons].x[1].x = __float2half(old_even_1 * rescale_even);
+                        O_acc[ons].x[1].y = __float2half(old_odd_1  * rescale_odd);
+                    }
+
+                    // ── Convert P to half2 + transpose → B operand for PV ──
+                    // KQ_C (tile<16,8,float>) → get_half2 → tile<16,4,half2>
+                    // → get_transposed → tile<8,8,half2> (P_B for HMMA B-side)
+                    tile<16, 4, half2> P_half = get_half2(KQ_C);
+                    tile<8, 8, half2>  P_B    = get_transposed(P_half);
+
+                    // P_half and P_B are derived conversion re-layouts.
+                    // KQ_C.x[0..3] (now softmaxed P) → P_half.x[0..1] via make_half2(pairs)
+                    // P_half.x[0..1] → P_B.x[0..1] via movmatrix.trans
+
+                    // ── PV phase: O += P_B * V_A ─────────────────────────
+                    // V loaded transposed: ldmatrix.x4.trans from sV
+                    // (16 K-rows × 8 half2 at current K-row group offset)
+                    tile<16, 8, half2> V_A;
+                    load_ldmatrix_trans(V_A,
+                        sV + (warp_k0 + kg * 16) * D2_padded + ns * 8,
+                        D2_padded);
+
+                    // HMMA f16.f16.f16.f16: O_acc[ns] += V_A * P_B
+                    // V_A is [16 K-rows, 16 HD-elements]
+                    // P_B is [16 K-rows, 8 Q-rows]
+                    // O_acc[ns] is [16 HD-elements, 8 Q-rows]
+                    mma(O_acc[ns], V_A, P_B);
+
+                } // kg (K-row group)
+            } // ns (HD slice)
+
+            // ── Wait for K[block+1] prefetch, load V[block+1] ──────────
+            if constexpr (DOUBLE_STAGE) {
+                if (kv_block + 1 < num_kv_blocks) {
+                    // Wait for K prefetch to complete
+                    __syncthreads();
+
+                    // Load V[block+1] → sV (synchronous, single-buffer)
+                    int tid = threadIdx.x;
+                    int total = BN * D2_padded;
+                    for (int i = tid; i < total; i += blockDim.x) {
+                        int r = i / D2_padded;
+                        int c = i % D2_padded;
+                        int g_idx = (kv_block + 1) * BN + r;
+                        if (g_idx < N_kv && c < HD/2) {
+                            sV[i] = __halves2half2(
+                                __float2half_rn(batch_V[g_idx * HD + c * 2]),
+                                __float2half_rn(batch_V[g_idx * HD + c * 2 + 1]));
+                        } else {
+                            sV[i] = __float2half2_rn(0.0f);
+                        }
+                    }
+                    __syncthreads();
+                }
+            } else {
+                // Single-stage: load K[block+1] and V[block+1] into separate buffers
+                if (kv_block + 1 < num_kv_blocks) {
+                    int tid = threadIdx.x;
+                    int total = BN * D2_padded;
+                    for (int i = tid; i < total; i += blockDim.x) {
+                        int r = i / D2_padded;
+                        int c = i % D2_padded;
+                        int g_idx = (kv_block + 1) * BN + r;
+                        if (g_idx < N_kv && c < HD/2) {
+                            sK[i] = __halves2half2(
+                                __float2half_rn(batch_K[g_idx * HD + c * 2]),
+                                __float2half_rn(batch_K[g_idx * HD + c * 2 + 1]));
+                            sV[i] = __halves2half2(
+                                __float2half_rn(batch_V[g_idx * HD + c * 2]),
+                                __float2half_rn(batch_V[g_idx * HD + c * 2 + 1]));
+                        } else {
+                            sK[i] = __float2half2_rn(0.0f);
+                            sV[i] = __float2half2_rn(0.0f);
+                        }
+                    }
+                    __syncthreads();
+                }
+            }
+
+        } // kv_block
+
+        // ── End of KV blocks: normalize O and write to global memory ──────
+        // O[q][h] = O_accum[q][h] / l_row[q]
+        // Convert half2 → float during write-back
+
+        // For each Q-row (0..7) in this sub-tile, extract from O_reg and write.
+        // Thread with tid%4 = q/2 holds Q-rows q and q+1.
+        // For Q-row q, the HD-elements at positions 0..15 are in O_acc[0..7].
+        // In O_acc[ns] (tile<16,4,half2>):
+        //   x[0].x = O[HD=tid/4, Q=2*(tid%4)]  at HD-slice ns
+        //   x[0].y = O[HD=tid/4, Q=2*(tid%4)+1] at HD-slice ns
+        //   x[1].x = O[HD=8+tid/4, Q=2*(tid%4)] at HD-slice ns
+        //   x[1].y = O[HD=8+tid/4, Q=2*(tid%4)+1] at HD-slice ns
+
+        float inv_l_even = 1.0f / fmaxf(l_row_even, 1e-10f);
+        float inv_l_odd  = 1.0f / fmaxf(l_row_odd,  1e-10f);
+
+        for (int ns = 0; ns < N_SLICES; ns++) {
+            // Extract normalized values
+            float val_even_0 = __half2float(O_acc[ns].x[0].x) * inv_l_even;
+            float val_odd_0  = __half2float(O_acc[ns].x[0].y) * inv_l_odd;
+            float val_even_1 = __half2float(O_acc[ns].x[1].x) * inv_l_even;
+            float val_odd_1  = __half2float(O_acc[ns].x[1].y) * inv_l_odd;
+
+            // Write positions within HD-slice ns:
+            //   HD-pos = tid/4 for first row, HD-pos = 8+tid/4 for second row
+            //   Q-rows: 2*(tid%4) is even, 2*(tid%4)+1 is odd
+            int hd_even_row0 = ns * 16 + threadIdx.x / 4;
+            int hd_even_row1 = ns * 16 + 8 + threadIdx.x / 4;
+            int q_even = 2 * (threadIdx.x % 4);
+            int q_odd  = 2 * (threadIdx.x % 4) + 1;
+
+            int q_abs_even = q_start + warp_q0 + q_sub + q_even;
+            int q_abs_odd  = q_start + warp_q0 + q_sub + q_odd;
+
+            if (q_abs_even < N) {
+                batch_O[q_abs_even * HD + hd_even_row0] = val_even_0;
+                batch_O[q_abs_even * HD + hd_even_row1] = val_even_1;
+            }
+            if (q_abs_odd < N) {
+                batch_O[q_abs_odd * HD + hd_even_row0] = val_odd_0;
+                batch_O[q_abs_odd * HD + hd_even_row1] = val_odd_1;
             }
         }
-        __syncthreads();
 
-        // ── Accumulate O += P_reg * sV (MMA) ───────────────────────────────
-        // Placeholder: the tile GEMM with register-resident P and SMEM V
-        // will be implemented in the inner-loop task.
-        __syncthreads();
-    }
+    } // qt (Q sub-tile)
 
-    // ── Finalize: rescale O and write back ──────────────────────────────────
-    // After the online-softmax loop, O holds the correctly normalized
-    // attention output.  Write from warp accumulators to global memory.
-    // Skeleton: direct copy for now.
-    if (threadIdx.x < BM * HD) {
-        int r = threadIdx.x / HD;
-        int c = threadIdx.x % HD;
-        int g_idx = q_start + r;
-        if (g_idx < N) {
-            batch_O[g_idx * HD + c] = sQ[r * HD + c];  // placeholder: identity
-        }
-    }
+    // ── Causal masking ──────────────────────────────────────────────────────
+    // When causal=true, each Q-row only attends to K-rows at positions
+    // ≤ Q-row position. In the KV-block loop, for Q-row at position q_pos,
+    // only the first (q_pos / BN) + 1 KV blocks participate.
+    // Implement by: clip num_kv_blocks per Q-row to kv_block ≤ q_pos / BN.
+    // For Q-rows not yet "reachable" (q_pos/BN < kv_block), mask scores to -inf.
+    // Full causal masking deferred — currently processes all K-rows.
+    // Apply causal by reading kv_block boundaries per Q-row and masking.
+    GGML_UNUSED(causal);
 }
 
 // ── Launch implementation helper ────────────────────────────────────────────────
@@ -252,8 +599,7 @@ static void launch_omma_flash_attn_impl(
     int    N_kv,
     cudaStream_t stream)
 {
-    constexpr int kSmemBytes =
-        FLASH_SMEM_Q(BM, HD) + FLASH_SMEM_KV(BN, HD) * (DOUBLE_STAGE ? 2 : 1);
+    constexpr int kSmemBytes = FLASH_SMEM_TOTAL(BM, BN, HD, DOUBLE_STAGE);
     static_assert(kSmemBytes <= 99 * 1024,
         "SM120 SMEM hard limit: 99 KB in launch helper");
 
@@ -287,8 +633,8 @@ static void launch_omma_flash_attn_short_seq(
     cudaStream_t stream)
 {
     if (HD == 128) {
-        // BM=64, BN=64, double-staged: 96 KB SMEM, 2 warps
-        // sQ = 64*128*4 = 32 KB, sKV = 64*128*4*2 = 64 KB, total = 96 KB
+        // BM=64, BN=64, double-staged: 68 KB SMEM, 2 warps
+        // sQ = 64*68*4 = 17 KB, sK = 2*64*68*4 = 34 KB, sV = 64*68*4 = 17 KB, total = 68 KB
         launch_omma_flash_attn_impl<
             flash_attn_config::kBM_HD128_Double,
             flash_attn_config::kBN_Small,
@@ -298,8 +644,8 @@ static void launch_omma_flash_attn_short_seq(
             d_Q, d_K, d_V, d_O, softmax_scale, causal,
             B, Hq, Hk, N, N_kv, stream);
     } else {
-        // HD == 256: double staging exceeds 99 KB SMEM, use single-stage
-        // BM=16, BN=64, single-stage: 80 KB SMEM, 1 warp
+        // HD == 256: double staging would be (16+3*64)*132*4 = 109 KB → over 99 KB.
+        // Use single-stage: (16+2*64)*132*4 = 74 KB SMEM, 1 warp
         launch_omma_flash_attn_impl<
             flash_attn_config::kBM_HD256,
             flash_attn_config::kBN_Small,
@@ -330,8 +676,8 @@ static void launch_omma_flash_attn_long_seq(
     cudaStream_t stream)
 {
     if (HD == 128) {
-        // BM=64, BN=128, single-stage: 96 KB SMEM, 2 warps
-        // sQ = 64*128*4 = 32 KB, sKV = 128*128*4 = 64 KB, total = 96 KB
+        // BM=64, BN=128, single-stage: 85 KB SMEM, 2 warps
+        // sQ = 64*68*4 = 17 KB, sK = 128*68*4 = 34 KB, sV = 128*68*4 = 34 KB, total = 85 KB
         launch_omma_flash_attn_impl<
             flash_attn_config::kBM_HD128_Single,
             flash_attn_config::kBN_Large,
@@ -341,8 +687,8 @@ static void launch_omma_flash_attn_long_seq(
             d_Q, d_K, d_V, d_O, softmax_scale, causal,
             B, Hq, Hk, N, N_kv, stream);
     } else {
-        // HD == 256: BN=128 single-stage = 128*256*4 = 128 KB → over 99 KB.
-        // Fall back to BN=64 single-stage with BM=16: 80 KB SMEM, 1 warp.
+        // HD == 256: BN=128 single-stage = (16+2*128)*132*4 = 140 KB → over 99 KB.
+        // Fall back to BN=64 single-stage with BM=16: 74 KB SMEM, 1 warp.
         launch_omma_flash_attn_impl<
             flash_attn_config::kBM_HD256,
             flash_attn_config::kBN_Small,

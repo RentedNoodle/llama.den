@@ -1356,6 +1356,19 @@ static const ggml_type_traits_t type_traits[GGML_TYPE_COUNT] = {
         .nrows                    = 1,
         .row_meta_size            = 0,
     },
+    [GGML_TYPE_NVFP4_NULLGLASS] = {
+        .type_name                = "nvfp4_nullglass",
+        .blck_size                = QK_NVFP4_NULLGLASS,
+        .type_size                = sizeof(block_nvfp4_nullglass),
+        .is_quantized             = true,
+        .to_float                 = (ggml_to_float_t) dequantize_row_nvfp4,  // reuse NVFP4 dequant
+        .from_float               = NULL,
+        .from_float_ref           = NULL,
+        .vec_dot                  = NULL,  // OMMA kernel overrides entirely
+        .vec_dot_type             = GGML_TYPE_NVFP4_NULLGLASS,  // prevents CPU executor interception
+        .nrows                    = 1,
+        .row_meta_size            = 0,
+    },
     [GGML_TYPE_IQ4_KS] = {
         .type_name                = "iq4_ks",
         .blck_size                = QK_K,
@@ -10470,8 +10483,10 @@ struct ggml_tensor * ggml_ssm_conv(
     GGML_ASSERT(ggml_is_matrix(sq));
     GGML_ASSERT(sq->type == GGML_TYPE_I32);
 
-    const int64_t d_conv   = c->ne[0];
-    const int64_t d_inner  = c->ne[1];
+    // Layout-agnostic: d_conv (~4) is always the smaller dim, d_inner (~8192) the larger.
+    // Accepts both [d_conv, d_inner] (GGUF native) and [d_inner, d_conv] (PyTorch native).
+    const int64_t d_conv   = (c->ne[0] < c->ne[1]) ? c->ne[0] : c->ne[1];
+    const int64_t d_inner  = (c->ne[0] < c->ne[1]) ? c->ne[1] : c->ne[0];
     const int64_t n_tokens = x->ne[1];
     const int64_t n_kv     = s->ne[2];
 
@@ -12974,6 +12989,7 @@ static void ggml_compute_forward_add(
         case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_NVFP4:
+        case GGML_TYPE_NVFP4_NULLGLASS:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:
@@ -13529,6 +13545,7 @@ static void ggml_compute_forward_add1(
         case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_NVFP4:
+        case GGML_TYPE_NVFP4_NULLGLASS:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:
@@ -13710,6 +13727,7 @@ static void ggml_compute_forward_acc(
         case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_NVFP4:
+        case GGML_TYPE_NVFP4_NULLGLASS:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:
@@ -18091,6 +18109,7 @@ static void ggml_compute_forward_out_prod(
         case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_NVFP4:
+        case GGML_TYPE_NVFP4_NULLGLASS:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:
@@ -18516,6 +18535,7 @@ static void ggml_compute_forward_set(
         case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_NVFP4:
+        case GGML_TYPE_NVFP4_NULLGLASS:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:
@@ -18847,6 +18867,7 @@ static void ggml_compute_forward_get_rows(
         case GGML_TYPE_Q8_0_R8:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_NVFP4:
+        case GGML_TYPE_NVFP4_NULLGLASS:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
         case GGML_TYPE_IQ4_KS_R4:
@@ -19559,6 +19580,7 @@ static void ggml_compute_forward_clamp(
                 ggml_compute_forward_clamp_f32(params, dst);
             } break;
         case GGML_TYPE_NVFP4:
+        case GGML_TYPE_NVFP4_NULLGLASS:
             {
                 // CPU fallback: dequant NVFP4 block_fp4_mmq to F32, apply clamp
                 const int ith = params->ith;
@@ -22506,8 +22528,16 @@ static int ggml_compute_forward_ssm_conv_f32(
     const int ith = params->ith;
     const int nth = params->nth;
 
-    const int nc   = src2->ne[0]; // d_conv
-    const int nr   = src0->ne[1]; // d_inner
+    // Layout-agnostic dimension detection:
+    // conv1d.weight can be in native [d_conv, d_inner] or transposed [d_inner, d_conv]
+    // d_conv (~4) is always the smaller dim, d_inner the larger.
+    const int c_dim_d_conv  = (src2->ne[0] < src2->ne[1]) ? 0 : 1;
+    const int c_dim_d_inner = 1 - c_dim_d_conv;
+    // Layout-agnostic weight strides (GGML column-major: rows=ne[0], cols=ne[1])
+    const size_t c_tap_stride  = src2->nb[c_dim_d_conv];   // stride between d_conv taps
+    const size_t c_chan_stride = src2->nb[c_dim_d_inner];  // stride between channels
+    const int   nc = src2->ne[c_dim_d_conv];     // d_conv
+    const int   nr = src0->ne[1];                 // d_inner (from state, always correct)
     const int n_t  = src1->ne[1]; // n_tokens
     const int n_kv = src0->ne[2]; // max number of sequences in the batch
 
@@ -22525,7 +22555,10 @@ static int ggml_compute_forward_ssm_conv_f32(
     // for use with the destination state offset between sequences
     GGML_ASSERT(src2->nb[2] == src2->ne[1]*src2->ne[0]*sizeof(float));
 
-    if (n_kv == 1 && nc == 4 && !src4) { // TODO: implement per token state saving in iqk_ssm_conv4
+    // iqk_ssm_conv4 assumes contiguous channel taps (native [d_conv,d_inner] layout).
+    // Skip it for transposed layout where taps are strided.
+    const bool c_is_native = (src2->ne[0] < src2->ne[1]);
+    if (n_kv == 1 && nc == 4 && !src4 && c_is_native) { // TODO: implement per token state saving in iqk_ssm_conv4
         float * dst_silu = NULL;
         if (node < cgraph->n_nodes + 2 &&
             cgraph->nodes[node+1]->op == GGML_OP_VIEW && cgraph->nodes[node+1]->src[0] == dst &&
@@ -22559,7 +22592,7 @@ static int ggml_compute_forward_ssm_conv_f32(
         // so copy them all over to the destination, just to be sure.
         for (int i3 = 0; i3 < n_kv; ++i3) {
             float * s0 = (float *) ((char *) src0->data + ir0*(src0->nb[1]) + i3*(src0->nb[2]));
-            float * s  = (float *) ((char *)  dst->data + ir0*(src2->nb[1]) + i3*(src2->nb[2]) + nr*n_t*sizeof(float));
+            float * s  = (float *) ((char *)  dst->data + ir0*(nc * sizeof(float)) + i3*(nc * nr * sizeof(float)) + nr*n_t*sizeof(float));
             // can't use memcpy because of d_conv vs d_conv - 1
             for (int i1 = 0; i1 < ir; ++i1) {
                 for (int i0 = 0; i0 < nc - 1; ++i0) {
@@ -22575,10 +22608,10 @@ static int ggml_compute_forward_ssm_conv_f32(
     for (int i2 = 0; i2 < n_t; ++i2) {
         int32_t * sq = (int32_t *) ((char *) src3->data +  i2*(src3->nb[1])); // {n_kv, n_tokens}
         float *   x  = (float *)   ((char *)  dst->data + ir0*sizeof(float) + i2*(nr*sizeof(float))); // {d_inner, n_tokens}
-        float *   s  = (float *)   ((char *)  dst->data + ir0*(src2->nb[1]) + sq[0]*(src2->nb[2]) + nr*n_t*sizeof(float)); // {d_conv, d_inner, n_kv}
+        float *   s  = (float *)   ((char *)  dst->data + ir0*(nc * sizeof(float)) + sq[0]*(nc * nr * sizeof(float)) + nr*n_t*sizeof(float)); // {d_conv, d_inner, n_kv}
         float *   s0; // {d_conv - 1, d_inner, n_kv}
         float *   x0 = (float *)   ((char *) src1->data + ir0*(src1->nb[0]) + i2*(src1->nb[1])); // {d_inner, n_tokens}
-        float *   c  = (float *)   ((char *) src2->data + ir0*(src2->nb[1])); // {d_conv, d_inner}
+        float *   c  = (float *)   ((char *) src2->data + ir0 * c_chan_stride); // layout-agnostic {d_conv, d_inner}
         int ne0s0;
 
         GGML_ASSERT(0 <= sq[0] && sq[0] < n_kv);
@@ -22625,11 +22658,12 @@ static int ggml_compute_forward_ssm_conv_f32(
 
         // it seems a little faster when this is separate from the state shift
         for (int i1 = 0; i1 < ir; ++i1) {
-            // rowwise dot product
+            // rowwise dot product — layout-agnostic weight access
             float sumf = 0.0f;
             for (int i0 = 0; i0 < nc; ++i0) {
-                int i = i0 + i1*nc;
-                sumf += s[i] * c[i];
+                // GGML column-major: byte = channel * c_chan_stride + tap * c_tap_stride
+                float c_val = *(float *)((char *)c + i1 * c_chan_stride + i0 * c_tap_stride);
+                sumf += s[i0 + i1*nc] * c_val;
             }
             x[i1] = sumf;
         }

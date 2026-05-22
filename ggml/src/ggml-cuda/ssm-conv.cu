@@ -91,11 +91,12 @@ static __global__ void ssm_conv_single_seq_f32_nc4(
     }
 
     const float * state_row = src0 + (size_t) row * src0_s1;
-    const float * c_row = src2 + (size_t) row * 4;
-    const float c0 = c_row[0];
-    const float c1 = c_row[1];
-    const float c2 = c_row[2];
-    const float c3 = c_row[3];
+    // Layout-agnostic: each channel's 4 taps may be strided (transposed [d_inner,d_conv])
+    // stride_between_taps = d_inner = nr
+    const float c0 = src2[(size_t) row + 0 * nr];
+    const float c1 = src2[(size_t) row + 1 * nr];
+    const float c2 = src2[(size_t) row + 2 * nr];
+    const float c3 = src2[(size_t) row + 3 * nr];
 
 #pragma unroll
     for (int it = 0; it < split_n_t; ++it) {
@@ -398,11 +399,12 @@ static __global__ void ssm_conv_f32_kernel_nc4(
         return;
     }
 
-    const float * c_row = src2 + (size_t) row * 4;
-    const float c0 = c_row[0];
-    const float c1 = c_row[1];
-    const float c2 = c_row[2];
-    const float c3 = c_row[3];
+    // Layout-agnostic: each channel's 4 taps may be strided (transposed [d_inner,d_conv])
+    // stride_between_taps = d_inner = nr
+    const float c0 = src2[(size_t) row + 0 * nr];
+    const float c1 = src2[(size_t) row + 1 * nr];
+    const float c2 = src2[(size_t) row + 2 * nr];
+    const float c3 = src2[(size_t) row + 3 * nr];
 
     for (int t = 0; t < n_t; ++t) {
         const int32_t * sq = src3 + (size_t) t * src3_nb1;
@@ -457,8 +459,9 @@ void ggml_cuda_op_ssm_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const ggml_tensor * src3 = dst->src[3]; // state_seq: [n_kv, n_tokens]
     const ggml_tensor * src4 = dst->src[4]; // [d_conv - 1, d_inner, n_tokens]
 
-    const int nc   = src2->ne[0];
-    const int nr   = src0->ne[1];
+    // Layout-agnostic: d_conv (~4) is always the smaller dim.
+    const int nc   = (src2->ne[0] < src2->ne[1]) ? src2->ne[0] : src2->ne[1]; // d_conv
+    const int nr   = src0->ne[1]; // d_inner (from state, always correct)
     const int n_t  = src1->ne[1];
     const int n_kv = src0->ne[2];
 
@@ -478,8 +481,9 @@ void ggml_cuda_op_ssm_conv(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     GGML_ASSERT(src2->nb[1] == src2->ne[0] * sizeof(float));
     GGML_ASSERT(src2->nb[2] == src2->ne[1] * src2->ne[0] * sizeof(float));
 
-    GGML_ASSERT(src2->ne[0] == src0->ne[0] + 1);
-    GGML_ASSERT(src2->ne[1] == src0->ne[1]);
+    // Layout-agnostic: nc is always d_conv, nr = d_inner (from state)
+    GGML_ASSERT(nc == src0->ne[0] + 1);  // d_conv matches state
+    GGML_ASSERT(nr == src0->ne[1]);      // d_inner matches state
     GGML_ASSERT(src1->ne[0] == src0->ne[1]);
     GGML_ASSERT(src3->ne[0] == src0->ne[2]);
     GGML_ASSERT(src3->ne[1] == src1->ne[1]);

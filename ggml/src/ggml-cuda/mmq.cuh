@@ -87,6 +87,7 @@ static mmq_q8_1_ds_layout mmq_get_q8_1_ds_layout(const ggml_type type_x) {
         case GGML_TYPE_IQ4_NL:
         case GGML_TYPE_MXFP4:
         case GGML_TYPE_NVFP4:
+        case GGML_TYPE_NVFP4_NULLGLASS:
         case GGML_TYPE_IQ2_KS:
         case GGML_TYPE_IQ2_K:
         case GGML_TYPE_IQ2_K_R4:
