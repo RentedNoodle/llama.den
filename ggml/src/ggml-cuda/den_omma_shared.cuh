@@ -147,3 +147,59 @@ static __device__ __forceinline__ uint8_t quant_f32_ue4m3(float v) {
 // The #define must appear AFTER the original definition to avoid
 // renaming the function definition itself.
 #define quant_f32_e2m1 lop3_quant_f32_e2m1
+
+// ═══════════════════════════════════════════════════════════════════════════════════
+// SM120 FlashAttention primitives (stolen from brandonmmusic-max/sm120-kernels)
+// ═══════════════════════════════════════════════════════════════════════════════════
+// Included by: den_omma_flash_attn.cuh
+//
+// Reference: FlashAttention v4.1 — 251 TFLOPS on SM120, beating cuDNN.
+// Key techniques: ldmatrix.x4, XOR swizzle, register-resident P, BN=128 single-stage.
+
+// XOR swizzle for conflict-free shared memory access.
+// Maps (row, col) -> linear offset such that consecutive rows
+// in the same column bank map to different SMEM banks.
+// Effective for 128-bit (4x float) access patterns where
+// every thread in a warp reads from a different bank.
+inline __device__ int xor_swizzle_128b(int row, int col, int num_cols) {
+    int bank   = col & 31;        // which 32-byte bank within group
+    int group  = col >> 5;        // which 128-byte group
+    return (row * num_cols) + (group * 32) + (bank ^ (row & 31));
+}
+
+// Cooperative SMEM load: copy 4 consecutive matrix rows from SMEM to registers.
+// Each row is 4 x uint32 (16 bytes, 4 floats).
+// Named for the ldmatrix.x4 PTX instruction which loads 4 fused matrix rows
+// from shared memory into registers in a single operation (SM90+).
+// On SM120, cooperative thread load is used for Q tile loads in FlashAttention.
+template <int NUM_ROWS>
+__device__ void smem_load_4x4_f32(float *regs, const float *smem_ptr, int row_stride) {
+    static_assert(NUM_ROWS == 4, "smem_load_4x4_f32 requires exactly 4 rows");
+    const uint32_t *smem_u32 = reinterpret_cast<const uint32_t*>(smem_ptr);
+    uint32_t *regs_u32 = reinterpret_cast<uint32_t*>(regs);
+    #pragma unroll
+    for (int i = 0; i < NUM_ROWS; i++) {
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            regs_u32[i * 4 + j] = smem_u32[i * row_stride / 4 + j];
+        }
+    }
+}
+
+// MMA m16n8k16 BF16xBF16 -> FP32 accumulator.
+// Confirmed SM120 fragment layout from sass-king analysis.
+// Each thread holds 4 float accumulators (d0-d3) and reads 8 BF16 values
+// from A-side (ra0-ra3, 4 uint32) and 2 BF16 values from B-side (rb0-rb1).
+// Fragment mapping:
+//   ra0 at K-offset 0, ra1 at K-offset 2, ra2 at K-offset 4, ra3 at K-offset 6
+//   -> 8 uint16 BF16 elements per register = 16 K elements total per side
+//   rb0-rb1: 4 BF16 elements each = 8 K elements total
+//   K=16 total per m16n8k16 instruction.
+#define OMMA_BF16_ACCUM_M16N8K16(ra0,ra1,ra2,ra3, rb0,rb1, rc0,rc1,rc2,rc3) \
+    asm volatile( \
+        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 " \
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n" \
+        : "=f"(rc0), "=f"(rc1), "=f"(rc2), "=f"(rc3) \
+        : "r"(ra0), "r"(ra1), "r"(ra2), "r"(ra3), \
+          "r"(rb0), "r"(rb1), \
+          "f"(rc0), "f"(rc1), "f"(rc2), "f"(rc3))
