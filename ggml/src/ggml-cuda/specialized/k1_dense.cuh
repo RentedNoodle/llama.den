@@ -20,6 +20,11 @@
 #include "../compute_market.cuh"   // SM slot table, consumer dispatch
 #include "../specialized/reg_broadcast.cuh"  // Register-level tile broadcast (#30)
 #include "../tile_vliw.cuh"        // NULLGLASS VLIW flags + OPAQUE tile opcodes [four-tile fusion]
+#include "../den_omma_flash_attn.cuh"  // OMMA FlashAttention (FlashAttention v4.1, SM120)
+
+// ── Kernel dispatch policy flags ──────────────────────────────────────
+// Bits 0-3 reserved for future GEMM variant policy flags.
+#define POLICY_OMMA_ATTN   (1u << 4)   // Dispatch to OMMA FlashAttention path
 
 // ── Inline RT BVH types (device-compatible subset) ──────────────────
 // Full definitions in den_rt_bvh.cuh (host-side build functions with std::vector).
@@ -907,6 +912,47 @@ inline void launch_dense_adaptive(
             tile_norms, n_norms, fused_rmsnorm, rms_eps, bvh, rt_skipped);
     }
     CUDA_CHECK(cudaGetLastError());
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// OMMA FlashAttention dispatch — k1_dense attention path
+//
+// Routes attention computation to the OMMA FlashAttention kernel when the
+// caller's tile policy flags indicate this is an attention layer (not a
+// standard GEMM). Uses the den_omma_flash_attn.cuh FlashAttention v4.1
+// reference implementation for SM120 with NVFP4 OMMA tensor cores.
+//
+// When to use:
+//   - Attention layers in Qwen3.5 (10 full-attention layers per 40)
+//   - NULLGLASS tile header indicates NVFP4 OMMA is available on both sides
+//   - Hardware is SM120+ (mxf4nvf4 path, not QMMA fallback)
+//   - Policy flag POLICY_OMMA_ATTN is set in the tile's execution flags
+//
+// NOTE: This is a stolen baseline from the branded SM120 FlashAttention
+// reference. Once working and verified, we will replace with our own
+// novel implementation (see NULLGLASS V4+ / PRISM phase-coordinated
+// sparse attention and OMMA tile-fused attention).
+//
+// Parameters:
+//   ctx            — ggml backend CUDA context
+//   Q, K, V, O     — Query, Key, Value, Output ggml tensors
+//   softmax_scale  — Scale factor for QK^T (typically 1/sqrt(HD))
+//   causal         — Whether to apply causal masking
+//   stream         — CUDA stream for launch
+// ───────────────────────────────────────────────────────────────────────
+inline void launch_omma_attention(
+    ggml_backend_cuda_context & ctx,
+    ggml_tensor * Q,
+    ggml_tensor * K,
+    ggml_tensor * V,
+    ggml_tensor * O,
+    float softmax_scale,
+    bool  causal,
+    cudaStream_t stream)
+{
+    launch_omma_flash_attn(ctx, Q, K, V, O, softmax_scale, causal, stream);
+
+    CUDA_CHECK(cudaGetLastError());  // Capture FlashAttention launch errors
 }
 
 }} // namespace den::k1_dense
