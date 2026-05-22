@@ -74,6 +74,7 @@
 #include "ggml-cuda/reduce.cuh"
 #include "ggml-cuda/tri.cuh"
 #include "ggml-cuda/delta-net.cuh"
+#include "ggml-cuda/gated_delta_net.cuh"
 
 #include <algorithm>
 #include <array>
@@ -4193,6 +4194,9 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
         case GGML_OP_DELTA_NET:
             ggml_cuda_op_delta_net(ctx, dst);
             break;
+        case GGML_OP_GATED_DELTA_NET:
+            ggml_cuda_op_gated_delta_net(ctx, dst);
+            break;
         case GGML_OP_FLASH_ATTN_EXT:
             // ── NVFP4 OMMA-accelerated attention ─────────────────────────
             // Routes to NVFP4 tile-based attention ONLY when K is NVFP4 format
@@ -5143,13 +5147,8 @@ GGML_CALL static bool ggml_backend_cuda_supports_op(ggml_backend_t backend, cons
                    op->src[6]->nb[0] == sizeof(int32_t) &&
                    op->src[0]->nb[1] == op->src[0]->ne[0] * sizeof(float); // contiguous d_inner
         case GGML_OP_DELTA_NET:
+        case GGML_OP_GATED_DELTA_NET:
             return true;
-        case GGML_OP_FLASH_ATTN_EXT:
-#if defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)
-            return (op->src[0]->ne[0] == 64 && op->src[1]->type == GGML_TYPE_F16) || op->src[0]->ne[0] == 128;
-#else
-            return ggml_cuda_fattn_is_supported(*cuda_ctx, op);
-#endif // defined(GGML_USE_HIPBLAS) && defined(__HIP_PLATFORM_AMD__)
         default:
             return false;
     }

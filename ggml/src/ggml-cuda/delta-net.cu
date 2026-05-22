@@ -294,6 +294,45 @@ void ggml_cuda_op_delta_net(ggml_backend_cuda_context & ctx, ggml_tensor * dst) 
 
     GGML_ASSERT(head_dim <= 256);  // Reasonable limit for shared memory
 
+    #if 0 // ── SASS KERNEL INTERCEPT: single-token decode ─────────────────────
+    // Bypasses the old strided kernel for n_tok=1 decode.
+    // Uses SM120-optimized SASS kernel with L1-bypassing loads,
+    // fast exp (ex2.approx), and cooperative Q/K SMEM loads.
+    if (n_tokens == 1 && !src6) {
+        extern void launch_gated_delta_net_sass(
+            const float*, const float*, const float*,
+            const float*, const float*,
+            float*, float*,
+            int, int, int, int, int,
+            int, size_t, size_t, size_t, size_t, size_t, size_t,
+            cudaStream_t);
+
+        launch_gated_delta_net_sass(
+            (const float *)src0->data,  // q
+            (const float *)src1->data,  // k
+            (const float *)src2->data,  // v
+            (const float *)src3->data,  // gate
+            (const float *)src4->data,  // beta
+            (float *)src5->data,        // state (in-place)
+            (float *)dst->data,         // output
+            (int)head_dim, (int)n_heads_kq, (int)n_heads,
+            (int)n_tokens, (int)n_seqs, (int)gqa_ratio,
+            src0->nb[2], src0->nb[3],
+            src2->nb[2], src2->nb[3],
+            src3->nb[1], src3->nb[2],
+            ctx.stream());
+
+        // Copy state from in-place buffer to fused output (graph compat)
+        const int64_t out_sz = (int64_t)head_dim * n_heads * n_tokens * n_seqs;
+        const int64_t st_sz  = (int64_t)head_dim * head_dim * n_heads * n_seqs;
+        CUDA_CHECK(cudaMemcpyAsync((float *)dst->data + out_sz,
+                                   (float *)src5->data,
+                                   st_sz * sizeof(float),
+                                   cudaMemcpyDeviceToDevice, ctx.stream()));
+        return;
+    }
+#endif
+
     // Get device info from ctx (avoids calling CUDA runtime APIs inside dispatch)
     const int device_id = ctx.device;
     const int cc = ggml_cuda_info().devices[device_id].cc;

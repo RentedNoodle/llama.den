@@ -1556,7 +1556,7 @@ void iqk_fused_delta_net_neon_impl(int n_heads, int gqa_ratio, int repeat_type, 
             kq_sum = vaddvq_f32(vqksum);
 
             const float beta_val = 1.0f / (1.0f + expf(-beta_raw));
-            const float decay    = expf(fminf(g_val, 50.0f));
+            const float decay    = expf(-g_val);
 
             float attn_score = kq_sum * scale;
 
@@ -1690,7 +1690,7 @@ void iqk_fused_delta_net_impl(int n_heads, int gqa_ratio, int repeat_type, int n
 #endif
 
             const float beta_val = 1.0f / (1.0f + expf(-beta_raw));
-            const float decay    = expf(fminf(g_val, 50.0f));
+            const float decay    = expf(-g_val);
 
             float attn_score = kq_sum * scale;
 
@@ -1791,6 +1791,7 @@ bool iqk_fused_delta_net(int head_dim, int n_heads, int gqa_ratio, int repeat_ty
         size_t vnb1, size_t vnb2, size_t vnb3,
         const float * q_data, const float * k_data, const float * v_data, const float * g_data, const float * beta_data,
         const float * state_in, float * out_data, float * state_out, float * saved_steps, int state_step_stride, int ith, int nth) {
+
     if (head_dim != 64 && head_dim != 128) {
         return false;
     }

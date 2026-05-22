@@ -88,7 +88,7 @@ struct TileDoubleBuffer {
     // that consumes the newly-loaded tile.
     __device__ inline void swap() {
         __syncthreads();
-        state ^= 1;  // flip: 0→1 or 1→0
+        state = state ^ 1;  // flip: 0→1 or 1→0
         __syncthreads();
     }
 };

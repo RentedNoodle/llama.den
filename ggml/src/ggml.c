@@ -4312,6 +4312,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "FILL",
     "SOLVE_TRI",
     "DELTA_NET",
+    "GATED_DELTA_NET",
 
     "MAP_UNARY",
     "MAP_BINARY",
@@ -4335,7 +4336,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "FUSED_RMS_RMS_ADD",
 };
 
-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
+static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 104");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -4432,6 +4433,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "fill(x)",
     "solve_tri(x)",
     "delta_net",
+    "gated_delta_net",
 
     "f(x)",
     "f(x,y)",
@@ -4456,7 +4458,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
 
 };
 
-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
+static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 104");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -10093,6 +10095,46 @@ struct ggml_tensor * ggml_delta_net(
 
     return result;
 }
+
+// ggml_gated_delta_net
+
+struct ggml_tensor * ggml_gated_delta_net(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * g,
+        struct ggml_tensor  * beta,
+        struct ggml_tensor  * state) {
+    GGML_ASSERT(q->type == GGML_TYPE_F32);
+    GGML_ASSERT(k->type == GGML_TYPE_F32);
+    GGML_ASSERT(v->type == GGML_TYPE_F32);
+    GGML_ASSERT(g->type == GGML_TYPE_F32);
+    GGML_ASSERT(beta->type == GGML_TYPE_F32);
+    GGML_ASSERT(state->type == GGML_TYPE_F32);
+
+    const int64_t S_v      = v->ne[0];
+    const int64_t H_v      = v->ne[1];
+    const int64_t n_tokens = v->ne[2];
+    const int64_t n_seqs   = v->ne[3];
+
+    const int64_t output_size = S_v * H_v * n_tokens * n_seqs;
+    const int64_t state_size  = S_v * S_v * H_v * n_seqs;
+
+    // Fused output: [attn_output | new_state]
+    struct ggml_tensor * result = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, output_size + state_size);
+
+    result->op     = GGML_OP_GATED_DELTA_NET;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = v;
+    result->src[3] = g;
+    result->src[4] = beta;
+    result->src[5] = state;
+
+    return result;
+}
+
 
 // ggml_fill
 
@@ -22884,10 +22926,16 @@ static void ggml_compute_forward_delta_net_f32(
         GGML_ASSERT(src6->ne[0] >= (n_tokens - 1)*state_step_stride);
     }
 
+    static int cpu_probe_count = 0;
+    if (ith == 0) fprintf(stderr, "[DN_CPU_ENTER] call=%d n_tok=%ld head_dim=%ld n_heads=%ld\n",
+            cpu_probe_count++, (long)n_tokens, (long)head_dim, (long)n_heads);
+
     if (iqk_fused_delta_net(head_dim, n_heads, gqa_ratio, repeat_type, n_tokens, n_seqs,
                 src2->nb[1]/sizeof(float), src2->nb[2]/sizeof(float), src2->nb[3]/sizeof(float),
                 q_data, k_data, v_data, g_data, beta_data, state_in,
                 out_data, state_working, saved_steps, (int) state_step_stride, ith, nth)) {
+        static int iqk_probe_count = 0;
+        if (ith == 0) fprintf(stderr, "[DN_IQK_HIT] call=%d n_tok=%ld\n", iqk_probe_count++, (long)n_tokens);
         return;
     }
 
@@ -22942,7 +22990,7 @@ static void ggml_compute_forward_delta_net_f32(
             const float k_norm_inv = 1.0f / sqrtf(k_norm_sq + eps);
 
             const float beta_val = 1.0f / (1.0f + expf(-beta_raw));
-            const float decay    = expf(fminf(g_val, 50.0f));
+            const float decay    = expf(-g_val);
 
             float attn_score = 0.0f;
             for (int64_t i = 0; i < head_dim; ++i) {
@@ -22976,7 +23024,7 @@ static void ggml_compute_forward_delta_net_f32(
                 for (int64_t row = 0; row < head_dim; ++row) {
                     float s = state[row + col * head_dim];
                     s = decay * s + v_new_buf[row] * k_col;
-                    state[row + col * head_dim] = fminf(fmaxf(s, -1e6f), 1e6f);
+                    state[row + col * head_dim] = s;
                 }
             }
 
@@ -22990,6 +23038,23 @@ static void ggml_compute_forward_delta_net_f32(
                 memcpy(next_state, state, state_head_size * sizeof(float));
             }
         }
+
+        // ── DIAGNOSTIC PROBE: output state checksum (head 0, batch 0) ──
+        {
+            static int probe_out_call = 0;
+            if (h_idx == (int64_t)h_start && ith == 0) {
+                float csum = 0.0f, cmin = 0.0f, cmax = 0.0f;
+                for (int64_t i = 0; i < head_dim * head_dim; ++i) {
+                    float v = state[i];
+                    csum += v; if (v < cmin) cmin = v; if (v > cmax) cmax = v;
+                }
+                fprintf(stderr, "[DN_PROBE_OUT] call=%d n_tokens=%ld | "
+                        "state_out csum=%.6f min=%.6f max=%.6f\n",
+                        probe_out_call, (long)n_tokens, csum, cmin, cmax);
+                probe_out_call++;
+            }
+        }
+        // ── END PROBE ──
     }
 
     free(v_new_buf);
@@ -24742,7 +24807,10 @@ static int ggml_compute_forward(struct ggml_compute_params * params, struct ggml
             {
                 ggml_compute_forward_delta_net(params, tensor);
             } break;
-        case GGML_OP_WIN_PART:
+        case GGML_OP_GATED_DELTA_NET:
+            {
+                GGML_ABORT("GATED_DELTA_NET has no CPU implementation");
+            } break;
             {
                 ggml_compute_forward_win_part(params, tensor);
             } break;
@@ -25802,10 +25870,7 @@ static void ggml_compute_backward(struct ggml_context * ctx, struct ggml_tensor 
         case GGML_OP_FILL:
         case GGML_OP_SOLVE_TRI:
         case GGML_OP_DELTA_NET:
-            {
-                GGML_ABORT("fatal error"); // TODO: not implemented
-            }
-        case GGML_OP_FLASH_ATTN_EXT:
+        case GGML_OP_GATED_DELTA_NET:
             {
                 struct ggml_tensor * flash_grad = NULL;
                 if (src0->grad || src1->grad || tensor->src[2]->grad) {

@@ -108,6 +108,20 @@ std::pair<ggml_tensor *, ggml_tensor *> delta_net::build_fused_delta_net(ggml_co
     cb(g,    "g_in", il);
     cb(state,"state_in", il);
 
+    // ── Force-resolve state tensor data pointer via view chain ──────────
+    // The ggml allocator tracks view alignments but does NOT set ->data
+    // for view tensors. The CUDA backend relies on ->data being valid.
+    // Walk the chain from state → ssm_state_flat → state_f32 → state_all
+    // → state_storage (kv_self.s_l[il]) to compute the final pointer.
+    {
+        size_t total_off = 0;
+        ggml_tensor *v = state;
+        while (v->view_src) { total_off += v->view_offs; v = v->view_src; }
+        if (v->data && state->data == nullptr) {
+            state->data = (char *)v->data + total_off;
+        }
+    }
+
     v = ggml_permute(ctx0, v, 0, 2, 1, 3);
     g = ggml_permute(ctx0, g, 2, 0, 3, 1);
     beta = ggml_permute(ctx0, beta, 2, 0, 1, 3);
@@ -283,7 +297,12 @@ std::pair<ggml_tensor *, ggml_tensor *> delta_net::build_beta_gate(llama_context
     cb(alpha_biased, "alpha_biased", il);
     ggml_tensor * alpha_softplus = ggml_softplus(ctx0, alpha_biased);
     cb(alpha_softplus, "a_softplus", il);
-    ggml_tensor * gate = ggml_mul(ctx0, alpha_softplus, ssm_a);
+    // HF reference: g = -exp(A_log) * softplus(alpha + dt).
+    // Our convention: gate = exp(A_log) * softplus(alpha+dt) is POSITIVE,
+    // kernel computes decay = exp(-gate). Matches HF decay exactly.
+    ggml_tensor * a_exp = ggml_exp(ctx0, ssm_a);
+    cb(a_exp, "A_exp", il);
+    ggml_tensor * gate = ggml_mul(ctx0, alpha_softplus, a_exp);
     cb(gate, "gate", il);
 
     return {beta, gate};
@@ -365,6 +384,8 @@ ggml_tensor * delta_net::build_qkv(ggml_context * ctx0, ggml_tensor * state_stor
     cb(k_conv, "k_conv", il);
     cb(v_conv, "v_conv", il);
 
+    // Old path (ggml_delta_net): L2 norm as before.
+    // New fused path (n_tok <= 8): upstream scale-by-1/sqrt(d).
     if (n_seq_tokens > 1) {
         q_conv = ggml_permute(ctx0, q_conv, 0, 2, 1, 3);
         k_conv = ggml_permute(ctx0, k_conv, 0, 2, 1, 3);
@@ -376,8 +397,8 @@ ggml_tensor * delta_net::build_qkv(ggml_context * ctx0, ggml_tensor * state_stor
         q_conv = ggml_permute(ctx0, q_conv, 0, 2, 1, 3);
         k_conv = ggml_permute(ctx0, k_conv, 0, 2, 1, 3);
     }
-    cb(q_conv, "q_conv_normed", il);
-    cb(k_conv, "k_conv_normed", il);
+    cb(q_conv, "q_conv_scaled", il);
+    cb(k_conv, "k_conv_scaled", il);
 
     auto [output, new_state] = build_fused_delta_net(ctx0, q_conv, k_conv, v_conv, gate, beta, state, il, cb, repeat_type,
             per_step_ckpt);
@@ -392,9 +413,20 @@ ggml_tensor * delta_net::build_qkv(ggml_context * ctx0, ggml_tensor * state_stor
     cb(new_conv_states_cont, "new_conv_states_cont", il);
     ggml_tensor * new_conv_flat = ggml_reshape_2d(ctx0, new_conv_states_cont, conv_state_dim, 1);
     ggml_tensor * new_ssm_flat  = ggml_reshape_2d(ctx0, new_state, ssm_state_dim, 1);
-    auto state_cpy = ggml_concat_inplace(ctx0, new_conv_flat, new_ssm_flat, state_dst, 0);
-    cb(state_cpy, "state_cpy", il);
-    ggml_build_forward_expand(gf, state_cpy);
+
+    // Write back conv + SSM state via ggml_cpy (GPU-supported).
+    // ggml_concat_inplace has no CUDA backend — it runs on CPU and memcpy's
+    // to a host pointer, leaving the GPU state buffer untouched.
+    ggml_tensor * conv_state_dst = ggml_view_2d(ctx0, state_dst, conv_state_dim, 1,
+            state_dst->nb[1], 0);
+    ggml_tensor * ssm_state_dst  = ggml_view_2d(ctx0, state_dst, ssm_state_dim, 1,
+            state_dst->nb[1], conv_state_dim * ggml_element_size(state_dst));
+    ggml_tensor * conv_cpy = ggml_cpy(ctx0, new_conv_flat, conv_state_dst);
+    ggml_tensor * ssm_cpy  = ggml_cpy(ctx0, new_ssm_flat, ssm_state_dst);
+    cb(conv_cpy, "conv_cpy", il);
+    cb(ssm_cpy, "ssm_cpy", il);
+    ggml_build_forward_expand(gf, conv_cpy);
+    ggml_build_forward_expand(gf, ssm_cpy);
 
     return output;
 }
@@ -536,10 +568,11 @@ ggml_tensor * delta_net::build_layer_attn_linear_core(ggml_context * ctx0, ggml_
                                  id < (int)kv_self.ckpt.per_step_conv[il].size()
                                ? kv_self.ckpt.per_step_conv[il][id] : nullptr;
 
+            const int split_repeat = l.ssm_beta_alpha ? 0 : 1;
             auto output = build_qkv(ctx0, split_s_l->splits[id], split_ssm_conv1d->splits[id], qkv_mixed, inp_s_seq_qnext, beta, gate,
                                head_k_dim, num_k_heads_id, head_v_dim, num_v_heads_id, hparams.ssm_d_conv,
                                state_seq_id_local, qnext_state_slots, reset_state_local, hparams.f_norm_rms_eps,
-                               0, il, cb, gf, per_step_ckpt, per_step_conv);
+                               split_repeat, il, cb, gf, per_step_ckpt, per_step_conv);
             split_norm = (ggml_split_tensor_t *)l.ssm_norm->extra;
             GGML_ASSERT(split_norm && split_norm->splits[id]);
             auto split_ssm_out = (ggml_split_tensor_t *)l.ssm_out->extra;
@@ -598,11 +631,14 @@ ggml_tensor * delta_net::build_layer_attn_linear_core(ggml_context * ctx0, ggml_
     auto per_step_conv = save_per_step_states && il < (int)kv_self.ckpt.per_step_conv.size() && !kv_self.ckpt.per_step_conv[il].empty()
                        ? kv_self.ckpt.per_step_conv[il].front() : nullptr;
 
+    // GQA head mapping: TILE for separate beta/alpha (no fused beta_alpha), INTERLEAVE for fused
+    const int repeat_type = model.layers[il].ssm_beta_alpha ? 0 : 1;
+
     auto output = build_qkv(ctx0, kv_self.s_l[il], model.layers[il].ssm_conv1d,
         qkv_mixed, inp_s_seq_qnext, beta, gate,
         head_k_dim, num_k_heads, head_v_dim, num_v_heads, hparams.ssm_d_conv,
         state_seq_id_local, qnext_state_slots, reset_state_local, hparams.f_norm_rms_eps,
-        0, il, cb, gf, per_step_ckpt, per_step_conv);
+        repeat_type, il, cb, gf, per_step_ckpt, per_step_conv);
 
     auto gated_output = build_gated_output(lctx, ctx0, model.layers[il].ssm_norm, model.layers[il].ssm_out, output, z, head_v_dim, num_v_heads, n_tok, il, cb);
     if (inp_out_ids) {

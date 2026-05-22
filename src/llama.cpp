@@ -60,7 +60,7 @@ void llama_set_mtp_target_context(struct llama_context * ctx, struct llama_conte
 
 // .den loader declarations (den_is_directory, den_load_*_tensor, etc.)
 // den_loader.cuh has no CUDA deps; safe to include unconditionally.
-#include "ggml-cuda/den_loader.cuh"
+//#include "ggml-cuda/den_loader.cuh" // REMOVED: stale from stash conflict
 
 // DEN routing mask stubs (CUDA objects not linked in minimal build)
 void den_mask_try_activate(int, const char *) {}

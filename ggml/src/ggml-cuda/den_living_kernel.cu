@@ -462,7 +462,7 @@ __device__ void living_prefetch_tick(
     if (lane == 0) {
         smem.ring_produce_stage = ring_stage ^ 1;  // flip to other stage
         __threadfence_block();  // ensure descriptors visible before stage flip
-        smem.ring_epoch++;
+        smem.ring_epoch = smem.ring_epoch + 1;
     }
 }
 
@@ -609,11 +609,11 @@ __device__ void living_perception_tick(
             // Set perception flags: bit 1 = speech_onset if energy > 0.01
             // Threshold corresponds to ~40 dB SPL at typical mic gain
             if (energy > 0.01f) {
-                smem.perception_flags |= 2u;   // speech onset
-                smem.perception_flags &= ~(1u << 7);  // clear idle
+                smem.perception_flags = smem.perception_flags | 2u;   // speech onset
+                smem.perception_flags = smem.perception_flags & ~(1u << 7);  // clear idle
             } else {
-                smem.perception_flags &= ~2u;  // clear speech onset
-                smem.perception_flags |= (1u << 7);  // set idle
+                smem.perception_flags = smem.perception_flags & ~2u;  // clear speech onset
+                smem.perception_flags = smem.perception_flags | (1u << 7);  // set idle
             }
         }
         break;
@@ -624,7 +624,7 @@ __device__ void living_perception_tick(
             // (simplified: toggle tts_need flag each tick)
             uint32_t flags = smem.perception_flags;
             if (flags & 4u) {  // silence detected
-                smem.perception_flags |= 8u;   // tts_need
+                smem.perception_flags = smem.perception_flags | 8u;   // tts_need
             }
         }
         break;
@@ -633,9 +633,9 @@ __device__ void living_perception_tick(
         if (lane == 0 && global_ocr_queue) {
             int pending = *global_ocr_queue;
             if (pending > 0) {
-                smem.perception_flags |= 16u;  // ocr_pending
+                smem.perception_flags = smem.perception_flags | 16u;  // ocr_pending
             } else {
-                smem.perception_flags &= ~16u;
+                smem.perception_flags = smem.perception_flags & ~16u;
             }
         }
         break;

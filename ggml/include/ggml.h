@@ -680,6 +680,7 @@ extern "C" {
         GGML_OP_FILL,
         GGML_OP_SOLVE_TRI,
         GGML_OP_DELTA_NET,
+        GGML_OP_GATED_DELTA_NET,
 
         GGML_OP_MAP_UNARY,
         GGML_OP_MAP_BINARY,
@@ -2552,6 +2553,20 @@ extern "C" {
             struct ggml_tensor  * beta,
             struct ggml_tensor  * state,
             struct ggml_tensor  * saved_steps);
+
+    // Gated DeltaNet: fused recurrence with state in output tensor.
+    // q/k [S, H, n_tok, n_seq], v [S, H, n_tok, n_seq]
+    // g [1 or S, H, n_tok, n_seq], beta [1, H, n_tok, n_seq]
+    // state [S, S, H, n_seq]
+    // Output: fused [attn_out | new_state]
+    GGML_API struct ggml_tensor * ggml_gated_delta_net(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * g,
+            struct ggml_tensor  * beta,
+            struct ggml_tensor  * state);
 
     // custom operators
 
