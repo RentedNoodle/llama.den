@@ -2634,7 +2634,8 @@ class Qwen3_5Model(Qwen2Model):
             name = name.replace("model.language_model.", "")
             name = name.replace("linear_attn.norm", "ssm_norm")
             name = name.replace("layers.", "blk.")
-            # Qwen3_5RMSNormGated: standard RMSNorm (NOT Gemma-style), weight is full scale
+            # SSM norm (linear_attn.norm): standard RMSNorm, weights already ~1.0.
+            # Do NOT add +1.0 — only attention/FFN norms are zero-centered (~0.24).
             return [(name, data_torch)]
         # Format: model.language_model.layers.{id}.{component}.{weight_name}.weight
         name = name.replace("model.language_model.", "")
@@ -2648,9 +2649,12 @@ class Qwen3_5Model(Qwen2Model):
                 break
         # Convert layers.{id} to blk.{id}
         name = name.replace("layers.", "blk.")
-        # Qwen3.5 uses standard RMSNorm (NOT Gemma-style offset).
-        # Gemma bakes effective_weight = 1.0 + stored_weight into the stored
-        # tensor — Qwen3.5 stores the full weight directly. Do NOT add +1.0.
+        # Qwen3.5 uses zero-centered RMSNorm: effective_weight = 1.0 + stored_weight.
+        # Weights are initialized near 0 (~0.24). Without the +1.0 offset, norm layers
+        # attenuate features to near-zero, causing the comma-collapse.
+        # The MoE model class (line 2485) already does this — aligning dense model.
+        if name.endswith("_norm.weight"):
+            data_torch = data_torch + 1.0
         return [(name, data_torch)]
 
 
