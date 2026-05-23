@@ -568,7 +568,8 @@ ggml_tensor * delta_net::build_layer_attn_linear_core(ggml_context * ctx0, ggml_
                                  id < (int)kv_self.ckpt.per_step_conv[il].size()
                                ? kv_self.ckpt.per_step_conv[il][id] : nullptr;
 
-            const int split_repeat = l.ssm_beta_alpha ? 0 : 1;
+            const int split_repeat = (lctx.model.arch == LLM_ARCH_QWEN35 || lctx.model.arch == LLM_ARCH_QWEN35MOE) ? 0 :
+                                     (l.ssm_beta_alpha ? 0 : 1);
             auto output = build_qkv(ctx0, split_s_l->splits[id], split_ssm_conv1d->splits[id], qkv_mixed, inp_s_seq_qnext, beta, gate,
                                head_k_dim, num_k_heads_id, head_v_dim, num_v_heads_id, hparams.ssm_d_conv,
                                state_seq_id_local, qnext_state_slots, reset_state_local, hparams.f_norm_rms_eps,
@@ -631,8 +632,9 @@ ggml_tensor * delta_net::build_layer_attn_linear_core(ggml_context * ctx0, ggml_
     auto per_step_conv = save_per_step_states && il < (int)kv_self.ckpt.per_step_conv.size() && !kv_self.ckpt.per_step_conv[il].empty()
                        ? kv_self.ckpt.per_step_conv[il].front() : nullptr;
 
-    // GQA head mapping: TILE for separate beta/alpha (no fused beta_alpha), INTERLEAVE for fused
-    const int repeat_type = model.layers[il].ssm_beta_alpha ? 0 : 1;
+    // GQA head mapping: Qwen3.5 always uses TILE layout. Other archs: TILE for fused beta_alpha, INTERLEAVE for separate.
+    const int repeat_type = (model.arch == LLM_ARCH_QWEN35 || model.arch == LLM_ARCH_QWEN35MOE) ? 0 :
+                            (model.layers[il].ssm_beta_alpha ? 0 : 1);
 
     auto output = build_qkv(ctx0, kv_self.s_l[il], model.layers[il].ssm_conv1d,
         qkv_mixed, inp_s_seq_qnext, beta, gate,

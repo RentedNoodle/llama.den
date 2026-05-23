@@ -2482,6 +2482,9 @@ class Qwen3_5MoeModel(Qwen2MoeModel):
                 break
 
         name = name.replace("layers.", "blk.")
+        # A_log → A = -exp(A_log) (precise suffix check to avoid matching ssm_alpha)
+        if name.endswith(".ssm_a"):
+            data_torch = -torch.exp(data_torch)
         # Gemma-style RMSNorm: effective_weight = 1.0 + stored_weight
         if name.endswith("_norm.weight"):
             data_torch = data_torch + 1.0
@@ -2624,24 +2627,6 @@ class Qwen3_5Model(Qwen2Model):
         if full_attn_interval is not None:
             self.gguf_writer.add_uint32(f"{self.gguf_writer.arch}.full_attention_interval", int(full_attn_interval))
 
-    def _reorder_v_heads(self, tensor, axis, n_k_heads, num_v_per_k, head_v_dim):
-        if num_v_per_k <= 1:
-            return tensor
-        # Reshape: split axis into [n_k_heads, num_v_per_k, head_v_dim], leave rest unchanged
-        new_shape = tensor.shape[:axis] + (n_k_heads, num_v_per_k, head_v_dim) + tensor.shape[axis+1:]
-        tensor = tensor.view(*new_shape)
-        # Permute: swap n_k_heads and num_v_per_k at [axis, axis+1]
-        perm = list(range(len(new_shape)))
-        perm[axis] = axis + 1
-        perm[axis + 1] = axis
-        tensor = tensor.permute(*perm)
-        # Flatten back: merge reordered dims
-        flat_shape = list(tensor.shape)
-        flat_shape[axis] = -1
-        del flat_shape[axis + 1]
-        del flat_shape[axis + 1]
-        return tensor.contiguous().view(*flat_shape)
-
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         # Skip vision encoder and MTP tensors (not used by llama.cpp runtime yet)
         if name.startswith("model.visual.") or name.startswith("mtp."):
@@ -2667,33 +2652,16 @@ class Qwen3_5Model(Qwen2Model):
                 break
         # Convert layers.{id} to blk.{id}
         name = name.replace("layers.", "blk.")
-        # Qwen3.5 uses zero-centered RMSNorm: effective_weight = 1.0 + stored_weight.
-        # Weights are initialized near 0 (~0.24). Without the +1.0 offset, norm layers
-        # attenuate features to near-zero, causing the comma-collapse.
-        # The MoE model class (line 2485) already does this — aligning dense model.
+        # A_log → A = -exp(A_log) (required by engine for proper decay).
+        # IMPORTANT: use precise suffix check — "ssm_a" is a substring of "ssm_alpha"!
+        if name.endswith(".ssm_a"):
+            data_torch = -torch.exp(data_torch)
+
+        # Zero-centered RMSNorm: effective_weight = 1.0 + stored_weight (~0.24 mean).
+        # SSM norm (linear_attn.norm) is standard RMSNorm (~0.95) — handled above, no +1.0.
         if name.endswith("_norm.weight"):
             data_torch = data_torch + 1.0
 
-        # V-Head reorder for linear attention tensors when n_k_heads != n_v_heads.
-        # HF weight layout: [output_dim, input_dim] — V-head dimension is along axis=0 (rows).
-        n_k_heads = self.hparams.get("linear_num_key_heads", 0)
-        n_v_heads = self.hparams.get("linear_num_value_heads", 0)
-        h_v_dim = self.hparams.get("linear_value_head_dim", self.hparams.get("linear_key_head_dim", 128))
-        if n_k_heads and n_v_heads and n_k_heads != n_v_heads:
-            nvpk = n_v_heads // n_k_heads
-            kd = n_k_heads * h_v_dim                     # key dim in output
-            vd = n_v_heads * h_v_dim                     # value dim in output
-            if name.endswith("attn_qkv.weight") and data_torch.dim() == 2 and data_torch.shape[0] >= kd * 2 + vd:
-                qp, kp, vp = data_torch[:kd], data_torch[kd:2*kd], data_torch[2*kd:2*kd+vd]
-                vp = self._reorder_v_heads(vp, 0, n_k_heads, nvpk, h_v_dim)
-                data_torch = torch.cat([qp, kp, vp], dim=0)
-            elif name.endswith("attn_gate.weight") and data_torch.dim() == 2 and data_torch.shape[0] == vd:
-                data_torch = self._reorder_v_heads(data_torch, 0, n_k_heads, nvpk, h_v_dim)
-            elif (name.endswith("ssm_alpha.weight") or name.endswith("ssm_beta.weight")) and data_torch.dim() == 2 and data_torch.shape[0] == n_v_heads:
-                data_torch = self._reorder_v_heads(data_torch, 0, n_k_heads, nvpk, 1)
-            elif name.endswith("ssm_out.weight") and data_torch.dim() == 2 and data_torch.shape[0] == vd:
-                # out_proj: [value_dim, n_embd] — reorder input dim (axis=1) for Wx+b
-                data_torch = self._reorder_v_heads(data_torch, 1, n_k_heads, nvpk, h_v_dim)
         return [(name, data_torch)]
 
 
