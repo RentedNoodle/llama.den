@@ -60,7 +60,9 @@ __global__ void delta_net_recurrent_f32(
     const int64_t qkv_stride_batch_kq = qkv_stride_batch / gqa_ratio;
 
     // G/Beta: [n_tokens, 1, n_heads, n_seqs] / [1, n_tokens, n_heads, n_seqs]
-    //const int64_t g_stride_head = n_tokens;
+    // Both have tokens innermost (dim0), heads along dim2.
+    // Flat float offset for (t, h) in contiguous layout: t + h*n_tokens
+    const int64_t g_stride_head = n_tokens;  // stride between heads within a token
     const int64_t g_stride_batch = n_tokens * n_heads;
 
     // State: [HEAD_DIM, HEAD_DIM*n_heads, 1, n_seqs]
@@ -77,8 +79,10 @@ __global__ void delta_net_recurrent_f32(
     const float * q_ptr = q + batch_idx * qkv_stride_batch_kq + head_idx_kq * qkv_stride_head;
     const float * k_ptr = k + batch_idx * qkv_stride_batch_kq + head_idx_kq * qkv_stride_head;
     const float * v_ptr = v + batch_idx * vnb3 + head_idx * vnb2;
-    const float * g_ptr = g + batch_idx * g_stride_batch + head_idx;
-    const float * beta_ptr = beta_in + batch_idx * g_stride_batch + head_idx;
+    // FIXED: contiguous layout is tokens-innermost: data[t + h*n_tokens]
+    // Old code used head_idx (heads innermost) which corrupted prefill (n_tokens > 1).
+    const float * g_ptr = g + batch_idx * g_stride_batch + head_idx * g_stride_head;
+    const float * beta_ptr = beta_in + batch_idx * g_stride_batch + head_idx * g_stride_head;
     const float * state_src = state_in + batch_idx * state_batch_stride + state_head_offset;
 
     // Output layout: [head_v_dim, num_v_heads, n_seq_tokens, n_seqs]
@@ -115,6 +119,8 @@ __global__ void delta_net_recurrent_f32(
     auto all_sum2 = all_sum1 + WARP_SIZE_S*num_stored_rows;
 
     for (int64_t t = 0; t < n_tokens; t++) {
+        // Reference (Paris delta_rule.py): q *= 1/sqrt(Dk) only, k/v are raw.
+        // L2-norming K dilutes S{·}k by ~11x (head_dim=128) — prevents state correction.
         float sum_kq = 0.0f;
         for (int i = tid; i < HEAD_DIM; i += block_size) {
             sQ[i] = q_ptr[t * qkv_stride_token + i] * scale;
@@ -124,8 +130,11 @@ __global__ void delta_net_recurrent_f32(
 
         float attn_score = reduce_sum<block_size>(sum_kq, sum_helper);
 
-        float beta_val = sigmoid_f(beta_ptr[t*n_heads]);
-        float decay    = expf(fminf(g_ptr[t*n_heads], 50.0f));
+        float beta_val = sigmoid_f(beta_ptr[t]);
+        // Stable bounded decay: exp(-softplus(g)) = sigmoid(-g) ∈ [0,1]
+        // Prevents state blowup during multi-token prefill (raw exp(g)>1.0
+        // when g>0 from learned projection). Matches Mamba2 stability contract.
+        float decay    = sigmoid_f(-g_ptr[t]);
 
         float sum1 = 0, sum2 = 0;
 #pragma unroll
@@ -146,7 +155,8 @@ __global__ void delta_net_recurrent_f32(
             sum2 += all_sum2[i*WARP_SIZE_S + row];
         }
 
-        //float sv_new = beta_val * (v_ptr[t * qkv_stride_token + row_out] - sum1 * decay);
+        // With L2-normalized K, the CPU-matched error: β·(v - α·S{k̂}·k_norm_inv)
+        // This matches ggml_compute_forward_delta_net_f32 line 22968 exactly
         float sv_new = beta_val * (v_ptr[t * vnb1 + row_out] - sum1 * decay);
         if (col_idx_0 == 0) {
             out_base[t * out_token_stride + row_out] = sum2 * decay + sv_new * attn_score;
