@@ -1,15 +1,14 @@
-# llama.den — Blackwell NVFP4 inference engine (GGUF format)
+Not really a llama.cpp fork anymore at this point. The NVFP4 stack, MoE dispatch, SSM kernels, governor FSM, RT core integration, and the entire SM120 tensor core path are all custom — the llama.cpp inheritance is basically just the GGML type system and the CPU fallback.
 
-Loads GGUF models and runs them on Blackwell SM120 using native OMMA.SF.16864 tensor core instructions. Started as a llama.cpp fork but the NVFP4 stack, MoE dispatch, SSM kernels, and governor FSM are all custom at this point.
+Loads GGUF models and runs them on Blackwell SM120 using native OMMA.SF.16864 tensor core instructions. If you have a 5070 Ti and want to run 4-bit quantized models using the native tensor core path instead of the DP4A fallback, this is the fork for that.
 
-## What makes it different
+## What's different
 
-- **NVFP4 OMMA kernels** — 5,433 native tensor core ops for sm_120a. Custom GGML type, dequant + GEMV fused, SASS-audited.
-- **Multi-kernel dispatch** — 8 kernel variants for different M-dimensions.
-- **SSM selective_scan** — native CUDA kernel for Mamba-style SSM layers (Qwen3.5 hybrid models).
-- **Governor FSM** — 14-state finite state machine for SM allocation across concurrent workloads.
-- **RT core BVH traversal** — for MoE expert routing and tile culling.
-- **Copy engine overlap** — dual-DMA weight streaming concurrent with OMMA compute.
+- NVFP4 OMMA kernels -- 5,433 native tensor core ops for sm_120a. SASS-audited.
+- 8 kernel variants for different M-dimensions (single-token decode through prefill tile GEMM)
+- SSM selective_scan for Mamba-style layers (Qwen3.5 hybrid models)
+- Governor FSM -- 14-state machine for SM allocation across concurrent workloads
+- RT core BVH traversal for MoE expert routing
 
 ## What works
 
@@ -20,10 +19,10 @@ Loads GGUF models and runs them on Blackwell SM120 using native OMMA.SF.16864 te
 
 ## What's rough
 
-- ~90 kernel files in various states — some work, some are prototypes, some are half-baked ideas
-- Documentation trails implementation
-- MoE dispatch for 35B models needs the expert paging system finished
-- Single-developer project. There WILL be bugs.
+- ~90 kernel files in various states. Some work. Some are prototypes. Some are ideas I haven't cleaned up yet.
+- Documentation trails implementation.
+- MoE dispatch for 35B models needs the expert paging system finished.
+- Single-developer project. There will be bugs.
 
 ## Build
 
