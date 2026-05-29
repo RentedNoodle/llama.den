@@ -8,10 +8,9 @@ I needed a way to run 4-bit block-scaled inference using the native tensor core 
 
 - NVFP4 OMMA kernels — 5,433 native tensor core ops for sm_120a. Custom GGML type, dequant + GEMV fused, SASS-audited.
 - Multi-kernel dispatch — 8 kernel variants for different M-dimensions.
-- SSM selective_scan — native CUDA kernel for Mamba-style SSM layers (Qwen3.5 hybrid models).
-- Governor FSM — 14-state finite state machine for SM allocation across concurrent workloads.
+- SSM selective_scan — native CUDA kernel for Mamba-style SSM layers.
+- Governor FSM — 14-state finite state machine for SM allocation.
 - RT core BVH traversal — for MoE expert routing and tile culling.
-- Copy engine overlap — dual-DMA weight streaming concurrent with OMMA compute.
 
 ## What works
 
@@ -19,25 +18,28 @@ I needed a way to run 4-bit block-scaled inference using the native tensor core 
 - BF16 GGUF models (standard llama.cpp compatibility)
 - CPU fallback path
 - SSM layers on Qwen3.5 models
-- SM spatial partitioning (50/20 split for concurrent tasks)
 
 ## What's rough
 
-- The kernel library is ~90 files in various states of completion. Some work. Some are prototypes. Some are ideas I haven't cleaned up yet.
-- Documentation trails implementation.
-- MoE dispatch for 35B models needs the expert paging system finished.
-- This is a single-developer project. There WILL be bugs.
+- ~90 kernel files in various states — some work, some are prototypes, some are half-baked ideas
+- Documentation trails implementation
+- MoE dispatch for 35B models needs the expert paging system finished
+- Single-developer project. There WILL be bugs.
 
 ## Build
 
-Requires CUDA 12.8 specifically. CUDA 13+ ptxas rejects the mxf4nvf4 target for sm_120a.
+Requires CUDA 12.8 specifically.
 
--- CUDA architectures: 120a
--- Configuring incomplete, errors occurred!
+```
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="120a"
+cmake --build build -j$(nproc)
+```
 
 ## Quick test
 
-0
+```
+cuobjdump --dump-sass build/ggml/src/libggml.so | grep -c "OMMA.SF.16864"
+```
 
 ## License
 
